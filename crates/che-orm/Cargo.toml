@@ -1,0 +1,21 @@
+[package]
+name = "che-orm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Experimental SQLite ORM for Rust inspired by Django ORM"
+readme = "README.md"
+documentation = "https://docs.rs/che-orm"
+keywords = ["orm", "sqlite", "database", "migrations", "django"]
+categories = ["database"]
+
+[dependencies]
+che-orm-macros.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "che-orm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Migration CLI for che-orm"
+readme = "README.md"
+documentation = "https://docs.rs/che-orm-cli"
+keywords = ["orm", "sqlite", "migrations", "cli"]
+categories = ["command-line-utilities", "database"]
+
+[[bin]]
+name = "che-orm"
+path = "src/main.rs"
+
+[dependencies]
+che-orm.workspace = true
+clap.workspace = true
+tokio.workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "che-orm-examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "crud"
+path = "src/bin/crud.rs"
+
+[[bin]]
+name = "relations"
+path = "src/bin/relations.rs"
+
+[[bin]]
+name = "schema_snapshot"
+path = "src/bin/schema_snapshot.rs"
+
+[dependencies]
+che-orm.workspace = true
+tokio.workspace = true

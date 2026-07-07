@@ -1,0 +1,18 @@
+[package]
+name = "che-orm-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Derive macros for che-orm"
+documentation = "https://docs.rs/che-orm-macros"
+keywords = ["orm", "derive", "macro", "sqlite"]
+categories = ["database"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true

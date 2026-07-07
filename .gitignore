@@ -1,0 +1,8 @@
+/target
+/che_orm_schema.json
+/example.sqlite
+/app.sqlite
+/migrations
+*.db
+*.sqlite
+*.sqlite3
