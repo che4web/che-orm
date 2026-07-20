@@ -29,16 +29,16 @@ async fn main() -> che_orm::Result<()> {
     db.create_table::<Post>().await?;
 
     let author = Author::objects(&db)
-        .create(AuthorCreate {
-            name: "Alice".to_string(),
-        })
+        .create()
+        .set("name", "Alice")
+        .execute()
         .await?;
 
     let post = Post::objects(&db)
-        .create(PostCreate {
-            author_id: author.id,
-            title: "Building a Django-like ORM in Rust".to_string(),
-        })
+        .create()
+        .set("author_id", author.id)
+        .set("title", "Building a Django-like ORM in Rust")
+        .execute()
         .await?;
 
     let loaded_author = Post::objects(&db)

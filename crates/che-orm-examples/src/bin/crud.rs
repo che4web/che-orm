@@ -23,11 +23,11 @@ async fn main() -> che_orm::Result<()> {
     db.create_table::<User>().await?;
 
     let user = User::objects(&db)
-        .create(UserCreate {
-            email: "alice@example.com".to_string(),
-            name: "Alice".to_string(),
-            is_active: true,
-        })
+        .create()
+        .set("email", "alice@example.com")
+        .set("name", "Alice")
+        .set("is_active", true)
+        .execute()
         .await?;
 
     println!("created: {user:?}");

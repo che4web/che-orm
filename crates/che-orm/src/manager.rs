@@ -9,10 +9,46 @@ pub struct ModelManager<'db, M> {
     _model: PhantomData<M>,
 }
 
+pub struct CreateBuilder<'db, M: Model> {
+    db: &'db SqliteBackend,
+    values: Vec<(String, SqliteValue)>,
+    _model: PhantomData<M>,
+}
+
 pub struct UpdateBuilder<'db, M: Model> {
     db: &'db SqliteBackend,
     id: M::Id,
     values: Vec<(String, SqliteValue)>,
+}
+
+pub struct QueryBuilder<'db, M: Model> {
+    db: &'db SqliteBackend,
+    filters: Vec<QueryFilter>,
+    ordering: Option<Ordering>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    _model: PhantomData<M>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QueryOperator {
+    Eq,
+    Contains,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+struct QueryFilter {
+    field: String,
+    operator: QueryOperator,
+    value: SqliteValue,
+}
+
+struct Ordering {
+    field: String,
+    descending: bool,
 }
 
 impl<'db, M> ModelManager<'db, M>
@@ -26,25 +62,23 @@ where
         }
     }
 
-    pub async fn create(&self, data: M::Create) -> Result<M> {
-        let values = M::create_values(data);
-        let columns = values.iter().map(|(name, _)| *name).collect::<Vec<_>>();
-        let placeholders = (1..=values.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({}) RETURNING *",
-            M::table_name(),
-            columns.join(", "),
-            placeholders
-        );
-        let query = bind_values(
-            sqlx::query(&sql),
-            values.into_iter().map(|(_, value)| value),
-        );
-        let row = query.fetch_one(self.db.pool()).await?;
-        Ok(M::from_row(&row)?)
+    pub fn create(&self) -> CreateBuilder<'db, M> {
+        CreateBuilder {
+            db: self.db,
+            values: Vec::new(),
+            _model: PhantomData,
+        }
+    }
+
+    pub fn query(&self) -> QueryBuilder<'db, M> {
+        QueryBuilder {
+            db: self.db,
+            filters: Vec::new(),
+            ordering: None,
+            limit: None,
+            offset: None,
+            _model: PhantomData,
+        }
     }
 
     pub async fn get(&self, id: M::Id) -> Result<M> {
@@ -152,6 +186,196 @@ where
     }
 }
 
+impl<'db, M> QueryBuilder<'db, M>
+where
+    M: SqliteModel,
+{
+    pub fn eq<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(field, QueryOperator::Eq, value)
+    }
+
+    pub fn contains<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(field, QueryOperator::Contains, value)
+    }
+
+    pub fn gt<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(field, QueryOperator::Gt, value)
+    }
+
+    pub fn gte<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(field, QueryOperator::Gte, value)
+    }
+
+    pub fn lt<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(field, QueryOperator::Lt, value)
+    }
+
+    pub fn lte<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(field, QueryOperator::Lte, value)
+    }
+
+    pub fn order_by(mut self, field: &str) -> Self {
+        let (descending, field) = field
+            .strip_prefix('-')
+            .map_or((false, field), |field| (true, field));
+        self.ordering = Some(Ordering {
+            field: field.to_string(),
+            descending,
+        });
+        self
+    }
+
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn offset(mut self, offset: u32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    pub async fn all(self) -> Result<Vec<M>> {
+        let mut values = Vec::new();
+        let mut sql = format!("SELECT * FROM {}", M::table_name());
+
+        if !self.filters.is_empty() {
+            let mut clauses = Vec::new();
+            for filter in self.filters {
+                let field = checked_field::<M>(&filter.field)?;
+                let placeholder = values.len() + 1;
+                let operator = match filter.operator {
+                    QueryOperator::Eq => "=",
+                    QueryOperator::Contains => "LIKE",
+                    QueryOperator::Gt => ">",
+                    QueryOperator::Gte => ">=",
+                    QueryOperator::Lt => "<",
+                    QueryOperator::Lte => "<=",
+                };
+                clauses.push(format!("{field} {operator} ?{placeholder}"));
+                values.push(match filter.operator {
+                    QueryOperator::Contains => contains_value(filter.value),
+                    _ => filter.value,
+                });
+            }
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+
+        if let Some(ordering) = self.ordering {
+            let field = checked_field::<M>(&ordering.field)?;
+            let direction = if ordering.descending { "DESC" } else { "ASC" };
+            sql.push_str(&format!(" ORDER BY {field} {direction}"));
+        }
+
+        match (self.limit, self.offset) {
+            (Some(limit), Some(offset)) => {
+                sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+            }
+            (Some(limit), None) => {
+                sql.push_str(&format!(" LIMIT {limit}"));
+            }
+            (None, Some(offset)) => {
+                sql.push_str(&format!(" LIMIT -1 OFFSET {offset}"));
+            }
+            (None, None) => {}
+        }
+
+        let query = bind_values(sqlx::query(&sql), values);
+        let rows = query.fetch_all(self.db.pool()).await?;
+        rows.iter()
+            .map(M::from_row)
+            .collect::<sqlx::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn filter<V>(mut self, field: &str, operator: QueryOperator, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filters.push(QueryFilter {
+            field: field.to_string(),
+            operator,
+            value: value.into(),
+        });
+        self
+    }
+}
+
+fn contains_value(value: SqliteValue) -> SqliteValue {
+    match value {
+        SqliteValue::String(value) => SqliteValue::String(format!("%{value}%")),
+        value => value,
+    }
+}
+
+impl<'db, M> CreateBuilder<'db, M>
+where
+    M: SqliteModel,
+{
+    pub fn set<V>(mut self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.values.push((field.to_string(), value.into()));
+        self
+    }
+
+    pub fn set_null(mut self, field: &str) -> Self {
+        self.values.push((field.to_string(), SqliteValue::Null));
+        self
+    }
+
+    pub async fn execute(self) -> Result<M> {
+        if self.values.is_empty() {
+            let sql = format!("INSERT INTO {} DEFAULT VALUES RETURNING *", M::table_name());
+            let row = sqlx::query(&sql).fetch_one(self.db.pool()).await?;
+            return Ok(M::from_row(&row)?);
+        }
+
+        let mut values = Vec::with_capacity(self.values.len());
+        for (field, value) in self.values {
+            values.push((checked_create_field::<M>(&field)?, value));
+        }
+
+        let columns = values.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        let placeholders = (1..=values.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({}) RETURNING *",
+            M::table_name(),
+            columns.join(", "),
+            placeholders
+        );
+        let query = bind_values(
+            sqlx::query(&sql),
+            values.into_iter().map(|(_, value)| value),
+        );
+        let row = query.fetch_one(self.db.pool()).await?;
+        Ok(M::from_row(&row)?)
+    }
+}
+
 impl<'db, M> UpdateBuilder<'db, M>
 where
     M: SqliteModel,
@@ -226,6 +450,19 @@ fn checked_field<M: Model>(field: &str) -> Result<&'static str> {
         .find(|info| info.db_name == field || info.rust_name == field)
         .map(|info| info.db_name)
         .ok_or_else(|| Error::UnknownField(field.to_string()))
+}
+
+fn checked_create_field<M: Model>(field: &str) -> Result<&'static str> {
+    let info = M::fields()
+        .iter()
+        .find(|info| info.db_name == field || info.rust_name == field)
+        .ok_or_else(|| Error::UnknownField(field.to_string()))?;
+
+    if info.primary_key || info.auto {
+        return Err(Error::ReadonlyField(field.to_string()));
+    }
+
+    Ok(info.db_name)
 }
 
 fn checked_update_field<M: Model>(field: &str) -> Result<&'static str> {

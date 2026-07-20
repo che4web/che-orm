@@ -8,7 +8,7 @@ pub mod schema;
 pub mod sqlite;
 
 pub use error::{Error, Result};
-pub use manager::{ModelManager, UpdateBuilder};
+pub use manager::{ModelManager, QueryBuilder, UpdateBuilder};
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, sqlite_migration_sql,
 };
@@ -18,5 +18,6 @@ pub use sqlite::SqliteBackend;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use serde_json;
     pub use sqlx;
 }

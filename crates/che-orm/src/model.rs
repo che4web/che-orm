@@ -89,7 +89,6 @@ impl From<f32> for SqliteValue {
 
 pub trait Model: Sized + Send + Sync + 'static {
     type Id: Clone + Send + Sync + for<'q> sqlx::Encode<'q, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
-    type Create: Send + Sync;
     type Update: Send + Sync;
 
     fn table_name() -> &'static str;
@@ -105,12 +104,15 @@ pub trait Model: Sized + Send + Sync + 'static {
     {
         ModelManager::new(db)
     }
+
+    fn get_value(&self, _field: &str) -> Option<crate::__private::serde_json::Value> {
+        None
+    }
 }
 
 pub trait SqliteModel: Model {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> sqlx::Result<Self>;
     fn id(&self) -> Self::Id;
-    fn create_values(data: Self::Create) -> Vec<(&'static str, SqliteValue)>;
     fn update_values(data: Self::Update) -> Vec<(&'static str, SqliteValue)>;
     fn save_values(&self) -> Vec<(&'static str, SqliteValue)>;
 }

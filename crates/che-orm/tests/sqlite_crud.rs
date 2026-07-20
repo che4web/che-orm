@@ -23,11 +23,11 @@ async fn sqlite_crud_flow() {
     db.create_table::<User>().await.unwrap();
 
     let user = User::objects(&db)
-        .create(UserCreate {
-            email: "alice@example.com".to_string(),
-            name: "Alice".to_string(),
-            is_active: true,
-        })
+        .create()
+        .set("email", "alice@example.com")
+        .set("name", "Alice")
+        .set("is_active", true)
+        .execute()
         .await
         .unwrap();
 
@@ -94,11 +94,11 @@ async fn applies_migration_files_without_exposing_sqlx() {
     assert_eq!(applied, vec!["0001_initial.sql"]);
 
     let user = User::objects(&db)
-        .create(UserCreate {
-            email: "migration@example.com".to_string(),
-            name: "Migration".to_string(),
-            is_active: true,
-        })
+        .create()
+        .set("email", "migration@example.com")
+        .set("name", "Migration")
+        .set("is_active", true)
+        .execute()
         .await
         .unwrap();
     assert_eq!(user.id, 1);
@@ -112,11 +112,11 @@ async fn update_fields_rejects_empty_and_readonly_updates() {
     db.create_table::<User>().await.unwrap();
 
     let user = User::objects(&db)
-        .create(UserCreate {
-            email: "readonly@example.com".to_string(),
-            name: "Readonly".to_string(),
-            is_active: true,
-        })
+        .create()
+        .set("email", "readonly@example.com")
+        .set("name", "Readonly")
+        .set("is_active", true)
+        .execute()
         .await
         .unwrap();
 
@@ -135,4 +135,64 @@ async fn update_fields_rejects_empty_and_readonly_updates() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn create_builder_uses_defaults_and_rejects_readonly_fields() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+
+    let user = User::objects(&db)
+        .create()
+        .set("email", "default@example.com")
+        .set("name", "Default")
+        .execute()
+        .await
+        .unwrap();
+    assert!(!user.is_active);
+
+    assert!(
+        User::objects(&db)
+            .create()
+            .set("id", 42_i64)
+            .set("email", "readonly-create@example.com")
+            .set("name", "Readonly Create")
+            .execute()
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn query_builder_filters_orders_and_limits() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+
+    for (email, name, is_active) in [
+        ("alice@example.com", "Alice", true),
+        ("alicia@example.com", "Alicia", true),
+        ("bob@example.com", "Bob", false),
+    ] {
+        User::objects(&db)
+            .create()
+            .set("email", email)
+            .set("name", name)
+            .set("is_active", is_active)
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    let users = User::objects(&db)
+        .query()
+        .contains("name", "Ali")
+        .eq("is_active", true)
+        .order_by("-id")
+        .limit(1)
+        .all()
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].name, "Alicia");
 }

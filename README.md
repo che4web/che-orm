@@ -28,10 +28,10 @@ let db = SqliteBackend::connect("sqlite::memory:").await?;
 db.create_table::<User>().await?;
 
 let mut user = User::objects(&db)
-    .create(UserCreate {
-        email: "alice@example.com".to_string(),
-        name: "Alice".to_string(),
-    })
+    .create()
+    .set("email", "alice@example.com")
+    .set("name", "Alice")
+    .execute()
     .await?;
 
 user.name = "Alicia".to_string();

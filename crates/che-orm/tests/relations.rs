@@ -29,16 +29,16 @@ async fn loads_related_and_reverse_related_objects() {
     db.create_table::<Post>().await.unwrap();
 
     let user = User::objects(&db)
-        .create(UserCreate {
-            name: "Alice".to_string(),
-        })
+        .create()
+        .set("name", "Alice")
+        .execute()
         .await
         .unwrap();
     let post = Post::objects(&db)
-        .create(PostCreate {
-            user_id: user.id,
-            title: "First post".to_string(),
-        })
+        .create()
+        .set("user_id", user.id)
+        .set("title", "First post")
+        .execute()
         .await
         .unwrap();
 

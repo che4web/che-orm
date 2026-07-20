@@ -32,18 +32,16 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
-    let create_name = format_ident!("{}Create", model_name);
     let update_name = format_ident!("{}Update", model_name);
 
     let mut infos = Vec::new();
     let mut row_fields = Vec::new();
-    let mut create_fields = Vec::new();
-    let mut create_values = Vec::new();
     let mut update_fields = Vec::new();
     let mut update_values = Vec::new();
     let mut id_ty = None;
     let mut id_ident = None;
     let mut save_values = Vec::new();
+    let mut value_arms = Vec::new();
 
     for field in fields {
         let ident = field.ident.expect("named field");
@@ -100,11 +98,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             #ident: ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?
         });
 
-        if !primary_key && !auto {
-            create_fields.push(quote! { pub #ident: #ty });
-            create_values.push(sqlite_value_quote(&ident, &ty, &db_name));
-        }
-
         if !primary_key {
             update_fields.push(quote! { pub #ident: ::std::option::Option<#ty> });
             update_values.push(quote! {
@@ -113,6 +106,11 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 }
             });
             save_values.push(sqlite_value_ref_quote(&ident, &ty, &db_name));
+        }
+
+        value_arms.push(model_value_arm(&ident, &db_name, &ty));
+        if db_name != rust_name {
+            value_arms.push(model_value_arm(&ident, &rust_name, &ty));
         }
     }
 
@@ -124,11 +122,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     })?;
 
     Ok(quote! {
-        #[derive(Debug, Clone)]
-        pub struct #create_name {
-            #(#create_fields,)*
-        }
-
         #[derive(Debug, Clone, Default)]
         pub struct #update_name {
             #(#update_fields,)*
@@ -136,7 +129,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         impl ::che_orm::Model for #model_name {
             type Id = #id_ty;
-            type Create = #create_name;
             type Update = #update_name;
 
             fn table_name() -> &'static str {
@@ -146,6 +138,13 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             fn fields() -> &'static [::che_orm::FieldInfo] {
                 static FIELDS: ::std::sync::OnceLock<::std::vec::Vec<::che_orm::FieldInfo>> = ::std::sync::OnceLock::new();
                 FIELDS.get_or_init(|| ::std::vec![#(#infos),*]).as_slice()
+            }
+
+            fn get_value(&self, field: &str) -> ::std::option::Option<::che_orm::__private::serde_json::Value> {
+                match field {
+                    #(#value_arms,)*
+                    _ => ::std::option::Option::None,
+                }
             }
         }
 
@@ -166,12 +165,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 self.#id_ident.clone()
             }
 
-            fn create_values(data: Self::Create) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> {
-                let mut values = ::std::vec::Vec::new();
-                #(#create_values)*
-                values
-            }
-
             fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> {
                 let mut values = ::std::vec::Vec::new();
                 #(#update_values)*
@@ -184,6 +177,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 values
             }
         }
+
     })
 }
 
@@ -282,21 +276,6 @@ fn field_type(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     }
 }
 
-fn sqlite_value_quote(ident: &syn::Ident, ty: &Type, db_name: &str) -> proc_macro2::TokenStream {
-    if is_option(ty) {
-        quote! {
-            values.push((#db_name, match data.#ident {
-                ::std::option::Option::Some(value) => ::che_orm::SqliteValue::from(value),
-                ::std::option::Option::None => ::che_orm::SqliteValue::Null,
-            }));
-        }
-    } else {
-        quote! {
-            values.push((#db_name, ::che_orm::SqliteValue::from(data.#ident)));
-        }
-    }
-}
-
 fn sqlite_value_ref_quote(
     ident: &syn::Ident,
     ty: &Type,
@@ -312,6 +291,29 @@ fn sqlite_value_ref_quote(
     } else {
         quote! {
             values.push((#db_name, ::che_orm::SqliteValue::from(self.#ident.clone())));
+        }
+    }
+}
+
+fn model_value_arm(ident: &syn::Ident, name: &str, ty: &Type) -> proc_macro2::TokenStream {
+    if is_option(ty) {
+        quote! {
+            #name => match &self.#ident {
+                ::std::option::Option::Some(value) => {
+                    ::std::option::Option::Some(
+                        ::che_orm::__private::serde_json::Value::from(value.clone())
+                    )
+                }
+                ::std::option::Option::None => ::std::option::Option::Some(
+                    ::che_orm::__private::serde_json::Value::Null
+                ),
+            }
+        }
+    } else {
+        quote! {
+            #name => ::std::option::Option::Some(
+                ::che_orm::__private::serde_json::Value::from(self.#ident.clone())
+            )
         }
     }
 }
