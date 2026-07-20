@@ -42,18 +42,40 @@ impl SqliteBackend {
         &self,
         migrations_dir: impl AsRef<Path>,
     ) -> Result<Vec<String>> {
+        self.apply_migrations_dir_inner(None, migrations_dir.as_ref())
+            .await
+    }
+
+    pub async fn apply_migrations_dir_with_namespace(
+        &self,
+        namespace: &str,
+        migrations_dir: impl AsRef<Path>,
+    ) -> Result<Vec<String>> {
+        self.apply_migrations_dir_inner(Some(namespace), migrations_dir.as_ref())
+            .await
+    }
+
+    async fn apply_migrations_dir_inner(
+        &self,
+        namespace: Option<&str>,
+        migrations_dir: &Path,
+    ) -> Result<Vec<String>> {
         self.ensure_migrations_table().await?;
 
-        let mut files = migration_files(migrations_dir.as_ref())?;
+        let mut files = migration_files(migrations_dir)?;
         files.sort();
 
         let mut applied = Vec::new();
         for path in files {
-            let name = path
+            let file_name = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default()
                 .to_string();
+            let name = match namespace {
+                Some(namespace) => format!("{namespace}/{file_name}"),
+                None => file_name,
+            };
             let already_applied: Option<i64> =
                 sqlx::query_scalar("SELECT id FROM _che_orm_migrations WHERE name = ?1")
                     .bind(&name)

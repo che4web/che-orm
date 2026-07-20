@@ -5,6 +5,7 @@ use std::{
 
 use che_orm::{Result, Schema, SqliteBackend, diff_schemas, sqlite_migration_sql};
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
 
 #[derive(Debug, Parser)]
 #[command(name = "che-orm")]
@@ -28,7 +29,10 @@ enum Command {
     },
     Migrate {
         #[arg(long)]
-        database_url: String,
+        database_url: Option<String>,
+
+        #[arg(long, default_value = "app.toml")]
+        config: PathBuf,
 
         #[arg(long, default_value = "migrations")]
         migrations_dir: PathBuf,
@@ -47,9 +51,20 @@ async fn main() -> Result<()> {
         } => makemigrations(&schema, &migrations_dir, &name),
         Command::Migrate {
             database_url,
+            config,
             migrations_dir,
-        } => migrate(&database_url, &migrations_dir).await,
+        } => migrate(database_url, &config, &migrations_dir).await,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    database: DatabaseConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatabaseConfig {
+    url: String,
 }
 
 fn makemigrations(schema_path: &Path, migrations_dir: &Path, name: &str) -> Result<()> {
@@ -79,13 +94,23 @@ fn makemigrations(schema_path: &Path, migrations_dir: &Path, name: &str) -> Resu
     Ok(())
 }
 
-async fn migrate(database_url: &str, migrations_dir: &Path) -> Result<()> {
-    let db = SqliteBackend::connect(database_url).await?;
+async fn migrate(database_url: Option<String>, config: &Path, migrations_dir: &Path) -> Result<()> {
+    let database_url = match database_url {
+        Some(database_url) => database_url,
+        None => database_url_from_config(config)?,
+    };
+    let db = SqliteBackend::connect(&database_url).await?;
     for name in db.apply_migrations_dir(migrations_dir).await? {
         println!("Applied {name}");
     }
 
     Ok(())
+}
+
+fn database_url_from_config(path: &Path) -> Result<String> {
+    let config = fs::read_to_string(path)?;
+    let config: AppConfig = toml::from_str(&config).map_err(std::io::Error::other)?;
+    Ok(config.database.url)
 }
 
 fn migration_files(migrations_dir: &Path) -> Result<Vec<PathBuf>> {

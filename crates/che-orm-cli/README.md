@@ -63,15 +63,28 @@ migrations/
 ## Apply Migrations
 
 ```bash
-cargo run -p che-orm-cli -- migrate --database-url sqlite://app.sqlite
+cargo run -p che-orm-cli -- migrate --config app.toml
 ```
 
 With explicit migration directory:
 
 ```bash
 cargo run -p che-orm-cli -- migrate \
-  --database-url sqlite://app.sqlite \
+  --config app.toml \
   --migrations-dir migrations
+```
+
+The config file must contain:
+
+```toml
+[database]
+url = "sqlite://app.sqlite?mode=rwc"
+```
+
+You can still override the config with an explicit database URL:
+
+```bash
+cargo run -p che-orm-cli -- migrate --database-url sqlite://app.sqlite?mode=rwc
 ```
 
 The CLI creates and uses this bookkeeping table:
@@ -100,7 +113,7 @@ SQLite column drops are intentionally not executed automatically yet because saf
 ```bash
 cargo run -p che-orm-examples --bin schema_snapshot
 cargo run -p che-orm-cli -- makemigrations --schema che_orm_schema.json --name initial
-cargo run -p che-orm-cli -- migrate --database-url sqlite://example.sqlite
+cargo run -p che-orm-cli -- migrate --config app.toml
 ```
 
 ## Notes
