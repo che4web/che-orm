@@ -100,11 +100,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         if !primary_key {
             update_fields.push(quote! { pub #ident: ::std::option::Option<#ty> });
-            update_values.push(quote! {
-                if let ::std::option::Option::Some(value) = data.#ident {
-                    values.push((#db_name, ::che_orm::SqliteValue::from(value)));
-                }
-            });
+            update_values.push(sqlite_value_update_quote(&ident, &ty, &db_name));
             save_values.push(sqlite_value_ref_quote(&ident, &ty, &db_name));
         }
 
@@ -291,6 +287,29 @@ fn sqlite_value_ref_quote(
     } else {
         quote! {
             values.push((#db_name, ::che_orm::SqliteValue::from(self.#ident.clone())));
+        }
+    }
+}
+
+fn sqlite_value_update_quote(
+    ident: &syn::Ident,
+    ty: &Type,
+    db_name: &str,
+) -> proc_macro2::TokenStream {
+    if is_option(ty) {
+        quote! {
+            if let ::std::option::Option::Some(value) = data.#ident {
+                values.push((#db_name, match value {
+                    ::std::option::Option::Some(value) => ::che_orm::SqliteValue::from(value),
+                    ::std::option::Option::None => ::che_orm::SqliteValue::Null,
+                }));
+            }
+        }
+    } else {
+        quote! {
+            if let ::std::option::Option::Some(value) = data.#ident {
+                values.push((#db_name, ::che_orm::SqliteValue::from(value)));
+            }
         }
     }
 }
