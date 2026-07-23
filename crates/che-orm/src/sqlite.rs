@@ -21,7 +21,7 @@ impl SqliteBackend {
         Ok(Self { pool })
     }
 
-    pub(crate) fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 

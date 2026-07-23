@@ -307,6 +307,47 @@ where
             .map_err(Into::into)
     }
 
+    pub async fn count(self) -> Result<i64> {
+        let mut values = Vec::new();
+        let mut sql = format!("SELECT COUNT(*) FROM {}", M::table_name());
+
+        if !self.filters.is_empty() {
+            let mut clauses = Vec::new();
+            for filter in self.filters {
+                let field = checked_field::<M>(&filter.field)?;
+                let placeholder = values.len() + 1;
+                let operator = match filter.operator {
+                    QueryOperator::Eq => "=",
+                    QueryOperator::Contains => "LIKE",
+                    QueryOperator::Gt => ">",
+                    QueryOperator::Gte => ">=",
+                    QueryOperator::Lt => "<",
+                    QueryOperator::Lte => "<=",
+                };
+                clauses.push(format!("{field} {operator} ?{placeholder}"));
+                values.push(match filter.operator {
+                    QueryOperator::Contains => contains_value(filter.value),
+                    _ => filter.value,
+                });
+            }
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+
+        let query = values
+            .into_iter()
+            .fold(sqlx::query_scalar(&sql), |query, value| match value {
+                SqliteValue::I64(value) => query.bind(value),
+                SqliteValue::String(value) => query.bind(value),
+                SqliteValue::Bool(value) => query.bind(value),
+                SqliteValue::F64(value) => query.bind(value),
+                SqliteValue::Null => query.bind(Option::<i64>::None),
+            });
+        let count = query.fetch_one(self.db.pool()).await?;
+
+        Ok(count)
+    }
+
     fn filter<V>(mut self, field: &str, operator: QueryOperator, value: V) -> Self
     where
         V: Into<SqliteValue>,
