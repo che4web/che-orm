@@ -159,6 +159,27 @@ struct Task {
 `update`, `update_fields(...).execute()`, and `save()`. Both fields are read-only
 for create/update builders and are stored in SQLite as `TEXT DEFAULT CURRENT_TIMESTAMP`.
 
+## JSON Fields
+
+Use `serde_json::Value` for JSON data. Values are stored in SQLite as `TEXT` and
+decoded back to JSON when rows are loaded.
+
+```rust
+use che_orm::Model;
+use serde_json::Value;
+
+#[derive(Debug, Clone, Model)]
+#[model(table = "tasks")]
+struct Task {
+    #[field(primary_key)]
+    id: i64,
+
+    title: String,
+    metadata: Value,
+    optional_metadata: Option<Value>,
+}
+```
+
 ## Schema Snapshots
 
 The ORM can serialize model metadata to a JSON schema snapshot.

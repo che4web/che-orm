@@ -117,9 +117,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         });
 
-        row_fields.push(quote! {
-            #ident: ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?
-        });
+        row_fields.push(row_field_quote(&ident, &ty, &db_name));
 
         if !primary_key && !auto_now_add && !auto_now {
             update_fields.push(quote! { pub #ident: ::std::option::Option<#ty> });
@@ -300,8 +298,39 @@ fn field_type(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
         Ok(quote!(::che_orm::FieldType::Real))
     } else if is_naive_datetime(ty) {
         Ok(quote!(::che_orm::FieldType::DateTime))
+    } else if is_json_value(ty) {
+        Ok(quote!(::che_orm::FieldType::Json))
     } else {
         Err(syn::Error::new_spanned(ty, "unsupported field type"))
+    }
+}
+
+fn row_field_quote(ident: &syn::Ident, ty: &Type, db_name: &str) -> proc_macro2::TokenStream {
+    if is_json_value(ty) {
+        quote! {
+            #ident: {
+                let value: ::std::string::String = ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?;
+                ::che_orm::__private::serde_json::from_str(&value)
+                    .map_err(|error| ::che_orm::__private::sqlx::Error::Decode(::std::boxed::Box::new(error)))?
+            }
+        }
+    } else if option_inner(ty).is_some_and(is_json_value) {
+        quote! {
+            #ident: {
+                let value: ::std::option::Option<::std::string::String> = ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?;
+                match value {
+                    ::std::option::Option::Some(value) => ::std::option::Option::Some(
+                        ::che_orm::__private::serde_json::from_str(&value)
+                            .map_err(|error| ::che_orm::__private::sqlx::Error::Decode(::std::boxed::Box::new(error)))?
+                    ),
+                    ::std::option::Option::None => ::std::option::Option::None,
+                }
+            }
+        }
+    } else {
+        quote! {
+            #ident: ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?
+        }
     }
 }
 
@@ -348,7 +377,20 @@ fn sqlite_value_update_quote(
 }
 
 fn model_value_arm(ident: &syn::Ident, name: &str, ty: &Type) -> proc_macro2::TokenStream {
-    if is_naive_datetime(ty) {
+    if is_json_value(ty) {
+        quote! {
+            #name => ::std::option::Option::Some(self.#ident.clone())
+        }
+    } else if option_inner(ty).is_some_and(is_json_value) {
+        quote! {
+            #name => match &self.#ident {
+                ::std::option::Option::Some(value) => ::std::option::Option::Some(value.clone()),
+                ::std::option::Option::None => ::std::option::Option::Some(
+                    ::che_orm::__private::serde_json::Value::Null
+                ),
+            }
+        }
+    } else if is_naive_datetime(ty) {
         quote! {
             #name => ::std::option::Option::Some(
                 ::che_orm::__private::serde_json::Value::String(self.#ident.to_string())
@@ -414,6 +456,10 @@ fn is_i64(ty: &Type) -> bool {
 
 fn is_naive_datetime(ty: &Type) -> bool {
     is_type(ty, "NaiveDateTime")
+}
+
+fn is_json_value(ty: &Type) -> bool {
+    is_type(ty, "Value")
 }
 
 fn is_type(ty: &Type, name: &str) -> bool {

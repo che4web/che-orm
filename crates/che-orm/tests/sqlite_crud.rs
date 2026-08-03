@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use che_orm::{Model, NaiveDateTime, SqliteBackend, create_table_sql};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "users")]
@@ -30,6 +31,19 @@ struct Task {
 
     #[field(auto_now)]
     updated_at: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Model)]
+#[model(table = "json_tasks")]
+struct JsonTask {
+    #[field(primary_key)]
+    id: i64,
+
+    title: String,
+
+    metadata: Value,
+
+    optional_metadata: Option<Value>,
 }
 
 #[tokio::test]
@@ -90,6 +104,10 @@ fn generates_create_table_sql() {
     let task_sql = create_table_sql::<Task>();
     assert!(task_sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
     assert!(task_sql.contains("updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
+
+    let json_task_sql = create_table_sql::<JsonTask>();
+    assert!(json_task_sql.contains("metadata TEXT NOT NULL"));
+    assert!(json_task_sql.contains("optional_metadata TEXT"));
 }
 
 #[tokio::test]
@@ -140,6 +158,49 @@ async fn timestamp_fields_are_managed_by_orm() {
     let saved = changed.save(&db).await.unwrap();
     assert_eq!(saved.created_at, task.created_at);
     assert!(saved.updated_at > updated.updated_at);
+}
+
+#[tokio::test]
+async fn json_fields_roundtrip_update_and_save() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<JsonTask>().await.unwrap();
+
+    let metadata = json!({
+        "priority": "high",
+        "tags": ["backend", "orm"],
+        "nested": { "done": false }
+    });
+    let task = JsonTask::objects(&db)
+        .create()
+        .set("title", "JSON")
+        .set("metadata", metadata.clone())
+        .set_null("optional_metadata")
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(task.metadata, metadata);
+    assert_eq!(task.optional_metadata, None);
+
+    let fetched = JsonTask::objects(&db).get(task.id).await.unwrap();
+    assert_eq!(fetched.metadata["priority"], "high");
+
+    let optional_metadata = json!(["a", "b", 3]);
+    let updated = JsonTask::objects(&db)
+        .update_fields(task.id)
+        .set("metadata", json!({ "done": true }))
+        .set("optional_metadata", optional_metadata.clone())
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(updated.metadata, json!({ "done": true }));
+    assert_eq!(updated.optional_metadata, Some(optional_metadata));
+
+    let mut changed = updated.clone();
+    changed.metadata = json!({ "saved": true });
+    changed.optional_metadata = None;
+    let saved = changed.save(&db).await.unwrap();
+    assert_eq!(saved.metadata, json!({ "saved": true }));
+    assert_eq!(saved.optional_metadata, None);
 }
 
 #[tokio::test]

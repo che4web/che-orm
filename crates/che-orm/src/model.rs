@@ -9,6 +9,7 @@ pub enum FieldType {
     Boolean,
     Real,
     DateTime,
+    Json,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +41,7 @@ pub enum SqliteValue {
     Bool(bool),
     F64(f64),
     DateTime(chrono::NaiveDateTime),
+    Json(serde_json::Value),
     Null,
 }
 
@@ -94,6 +96,12 @@ impl From<f32> for SqliteValue {
 impl From<chrono::NaiveDateTime> for SqliteValue {
     fn from(value: chrono::NaiveDateTime) -> Self {
         Self::DateTime(value)
+    }
+}
+
+impl From<serde_json::Value> for SqliteValue {
+    fn from(value: serde_json::Value) -> Self {
+        Self::Json(value)
     }
 }
 

@@ -177,5 +177,6 @@ fn sql_type(ty: FieldType) -> &'static str {
         FieldType::Boolean => "BOOLEAN",
         FieldType::Real => "REAL",
         FieldType::DateTime => "TEXT",
+        FieldType::Json => "TEXT",
     }
 }

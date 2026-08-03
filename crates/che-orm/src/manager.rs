@@ -320,6 +320,7 @@ where
                 SqliteValue::Bool(value) => query.bind(value),
                 SqliteValue::F64(value) => query.bind(value),
                 SqliteValue::DateTime(value) => query.bind(value),
+                SqliteValue::Json(value) => query.bind(value.to_string()),
                 SqliteValue::Null => query.bind(Option::<i64>::None),
             });
         let count = query.fetch_one(self.db.pool()).await?;
@@ -539,6 +540,7 @@ where
         SqliteValue::Bool(value) => query.bind(value),
         SqliteValue::F64(value) => query.bind(value),
         SqliteValue::DateTime(value) => query.bind(value),
+        SqliteValue::Json(value) => query.bind(value.to_string()),
         SqliteValue::Null => query.bind(Option::<i64>::None),
     })
 }
