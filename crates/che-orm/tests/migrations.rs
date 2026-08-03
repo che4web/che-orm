@@ -111,6 +111,8 @@ fn id_field() -> FieldSchema {
         unique: false,
         max_length: None,
         default: None,
+        auto_now_add: false,
+        auto_now: false,
         foreign_key: None,
     }
 }
@@ -125,6 +127,8 @@ fn email_field() -> FieldSchema {
         unique: false,
         max_length: None,
         default: None,
+        auto_now_add: false,
+        auto_now: false,
         foreign_key: None,
     }
 }

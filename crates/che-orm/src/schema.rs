@@ -25,6 +25,10 @@ pub struct FieldSchema {
     pub unique: bool,
     pub max_length: Option<u32>,
     pub default: Option<String>,
+    #[serde(default)]
+    pub auto_now_add: bool,
+    #[serde(default)]
+    pub auto_now: bool,
     pub foreign_key: Option<ForeignKeySchema>,
 }
 
@@ -91,6 +95,8 @@ impl ModelSchema {
                     unique: field.unique,
                     max_length: field.max_length,
                     default: field.default.map(str::to_string),
+                    auto_now_add: field.auto_now_add,
+                    auto_now: field.auto_now,
                     foreign_key: field.foreign_key.map(|foreign_key| ForeignKeySchema {
                         table: foreign_key.table.to_string(),
                         column: foreign_key.column.to_string(),

@@ -132,6 +132,33 @@ let author_posts = Post::objects(&db)
 # }
 ```
 
+## Timestamp Fields
+
+Use `NaiveDateTime` fields for ORM-managed create/update timestamps:
+
+```rust
+use che_orm::{Model, NaiveDateTime};
+
+#[derive(Debug, Clone, Model)]
+#[model(table = "tasks")]
+struct Task {
+    #[field(primary_key)]
+    id: i64,
+
+    title: String,
+
+    #[field(auto_now_add)]
+    created_at: NaiveDateTime,
+
+    #[field(auto_now)]
+    updated_at: NaiveDateTime,
+}
+```
+
+`auto_now_add` is set on insert. `auto_now` is set on insert and updated on each
+`update`, `update_fields(...).execute()`, and `save()`. Both fields are read-only
+for create/update builders and are stored in SQLite as `TEXT DEFAULT CURRENT_TIMESTAMP`.
+
 ## Schema Snapshots
 
 The ORM can serialize model metadata to a JSON schema snapshot.
@@ -184,6 +211,8 @@ let applied = db.apply_migrations_dir("migrations").await?;
 
 - `#[field(primary_key)]`
 - `#[field(auto)]`
+- `#[field(auto_now_add)]`
+- `#[field(auto_now)]`
 - `#[field(unique)]`
 - `#[field(max_length = 255)]`
 - `#[field(default = true)]`

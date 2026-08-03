@@ -8,6 +8,7 @@ pub enum FieldType {
     Text,
     Boolean,
     Real,
+    DateTime,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +28,8 @@ pub struct FieldInfo {
     pub unique: bool,
     pub max_length: Option<u32>,
     pub default: Option<&'static str>,
+    pub auto_now_add: bool,
+    pub auto_now: bool,
     pub foreign_key: Option<ForeignKeyInfo>,
 }
 
@@ -36,6 +39,7 @@ pub enum SqliteValue {
     String(String),
     Bool(bool),
     F64(f64),
+    DateTime(chrono::NaiveDateTime),
     Null,
 }
 
@@ -84,6 +88,12 @@ impl From<f64> for SqliteValue {
 impl From<f32> for SqliteValue {
     fn from(value: f32) -> Self {
         Self::F64(value.into())
+    }
+}
+
+impl From<chrono::NaiveDateTime> for SqliteValue {
+    fn from(value: chrono::NaiveDateTime) -> Self {
+        Self::DateTime(value)
     }
 }
 

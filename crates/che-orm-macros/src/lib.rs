@@ -57,6 +57,27 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let max_length = attrs.max_length;
         let default = attrs.default;
         let foreign_key = attrs.foreign_key;
+        let auto_now_add = attrs.auto_now_add;
+        let auto_now = attrs.auto_now;
+
+        if auto_now_add && auto_now {
+            return Err(syn::Error::new_spanned(
+                &ident,
+                "field cannot use both auto_now_add and auto_now",
+            ));
+        }
+        if (auto_now_add || auto_now) && !is_naive_datetime(&ty) {
+            return Err(syn::Error::new_spanned(
+                &ty,
+                "auto_now_add and auto_now require chrono::NaiveDateTime",
+            ));
+        }
+        if primary_key && (auto_now_add || auto_now) {
+            return Err(syn::Error::new_spanned(
+                &ident,
+                "primary key fields cannot use auto_now_add or auto_now",
+            ));
+        }
 
         if primary_key {
             id_ty = Some(ty.clone());
@@ -90,6 +111,8 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 unique: #unique,
                 max_length: #max_length_tokens,
                 default: #default_tokens,
+                auto_now_add: #auto_now_add,
+                auto_now: #auto_now,
                 foreign_key: #foreign_key_tokens,
             }
         });
@@ -98,7 +121,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             #ident: ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?
         });
 
-        if !primary_key {
+        if !primary_key && !auto_now_add && !auto_now {
             update_fields.push(quote! { pub #ident: ::std::option::Option<#ty> });
             update_values.push(sqlite_value_update_quote(&ident, &ty, &db_name));
             save_values.push(sqlite_value_ref_quote(&ident, &ty, &db_name));
@@ -181,6 +204,8 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 struct FieldAttrs {
     primary_key: bool,
     auto: bool,
+    auto_now_add: bool,
+    auto_now: bool,
     unique: bool,
     max_length: Option<u32>,
     default: Option<String>,
@@ -218,6 +243,12 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
                 Ok(())
             } else if meta.path.is_ident("auto") {
                 result.auto = true;
+                Ok(())
+            } else if meta.path.is_ident("auto_now_add") {
+                result.auto_now_add = true;
+                Ok(())
+            } else if meta.path.is_ident("auto_now") {
+                result.auto_now = true;
                 Ok(())
             } else if meta.path.is_ident("unique") {
                 result.unique = true;
@@ -267,6 +298,8 @@ fn field_type(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
         Ok(quote!(::che_orm::FieldType::Boolean))
     } else if is_type(ty, "f64") || is_type(ty, "f32") {
         Ok(quote!(::che_orm::FieldType::Real))
+    } else if is_naive_datetime(ty) {
+        Ok(quote!(::che_orm::FieldType::DateTime))
     } else {
         Err(syn::Error::new_spanned(ty, "unsupported field type"))
     }
@@ -315,7 +348,26 @@ fn sqlite_value_update_quote(
 }
 
 fn model_value_arm(ident: &syn::Ident, name: &str, ty: &Type) -> proc_macro2::TokenStream {
-    if is_option(ty) {
+    if is_naive_datetime(ty) {
+        quote! {
+            #name => ::std::option::Option::Some(
+                ::che_orm::__private::serde_json::Value::String(self.#ident.to_string())
+            )
+        }
+    } else if option_inner(ty).is_some_and(is_naive_datetime) {
+        quote! {
+            #name => match &self.#ident {
+                ::std::option::Option::Some(value) => {
+                    ::std::option::Option::Some(
+                        ::che_orm::__private::serde_json::Value::String(value.to_string())
+                    )
+                }
+                ::std::option::Option::None => ::std::option::Option::Some(
+                    ::che_orm::__private::serde_json::Value::Null
+                ),
+            }
+        }
+    } else if is_option(ty) {
         quote! {
             #name => match &self.#ident {
                 ::std::option::Option::Some(value) => {
@@ -358,6 +410,10 @@ fn option_inner(ty: &Type) -> Option<&Type> {
 
 fn is_i64(ty: &Type) -> bool {
     is_type(ty, "i64")
+}
+
+fn is_naive_datetime(ty: &Type) -> bool {
+    is_type(ty, "NaiveDateTime")
 }
 
 fn is_type(ty: &Type, name: &str) -> bool {

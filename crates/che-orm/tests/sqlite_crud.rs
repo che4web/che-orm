@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use che_orm::{Model, SqliteBackend, create_table_sql};
+use che_orm::{Model, NaiveDateTime, SqliteBackend, create_table_sql};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "users")]
@@ -15,6 +15,21 @@ struct User {
 
     #[field(default = false)]
     is_active: bool,
+}
+
+#[derive(Debug, Clone, Model)]
+#[model(table = "tasks")]
+struct Task {
+    #[field(primary_key)]
+    id: i64,
+
+    title: String,
+
+    #[field(auto_now_add)]
+    created_at: NaiveDateTime,
+
+    #[field(auto_now)]
+    updated_at: NaiveDateTime,
 }
 
 #[tokio::test]
@@ -71,6 +86,60 @@ fn generates_create_table_sql() {
     assert!(sql.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"));
     assert!(sql.contains("email TEXT NOT NULL UNIQUE"));
     assert!(sql.contains("is_active BOOLEAN NOT NULL DEFAULT false"));
+
+    let task_sql = create_table_sql::<Task>();
+    assert!(task_sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
+    assert!(task_sql.contains("updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
+}
+
+#[tokio::test]
+async fn timestamp_fields_are_managed_by_orm() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<Task>().await.unwrap();
+
+    let task = Task::objects(&db)
+        .create()
+        .set("title", "First")
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(task.title, "First");
+    assert_eq!(task.created_at, task.updated_at);
+
+    assert!(
+        Task::objects(&db)
+            .create()
+            .set("title", "Readonly Create")
+            .set("created_at", task.created_at)
+            .execute()
+            .await
+            .is_err()
+    );
+    assert!(
+        Task::objects(&db)
+            .update_fields(task.id)
+            .set("updated_at", task.updated_at)
+            .execute()
+            .await
+            .is_err()
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let updated = Task::objects(&db)
+        .update_fields(task.id)
+        .set("title", "Updated")
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(updated.created_at, task.created_at);
+    assert!(updated.updated_at > task.updated_at);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut changed = updated.clone();
+    changed.title = "Saved".to_string();
+    let saved = changed.save(&db).await.unwrap();
+    assert_eq!(saved.created_at, task.created_at);
+    assert!(saved.updated_at > updated.updated_at);
 }
 
 #[tokio::test]

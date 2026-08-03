@@ -120,6 +120,8 @@ fn column_schema_sql(field: &FieldSchema) -> String {
         field.auto,
         field.unique,
         field.default.as_deref(),
+        field.auto_now_add,
+        field.auto_now,
         field.foreign_key.as_ref(),
     )
 }
@@ -132,6 +134,8 @@ fn column_parts(
     auto: bool,
     unique: bool,
     default: Option<&str>,
+    auto_now_add: bool,
+    auto_now: bool,
     foreign_key: Option<&ForeignKeySchema>,
 ) -> String {
     let mut parts = vec![name.to_string()];
@@ -153,6 +157,8 @@ fn column_parts(
     }
     if let Some(default) = default {
         parts.push(format!("DEFAULT {default}"));
+    } else if auto_now_add || auto_now {
+        parts.push("DEFAULT CURRENT_TIMESTAMP".to_string());
     }
     if let Some(foreign_key) = foreign_key {
         parts.push(format!(
@@ -170,5 +176,6 @@ fn sql_type(ty: FieldType) -> &'static str {
         FieldType::Text => "TEXT",
         FieldType::Boolean => "BOOLEAN",
         FieldType::Real => "REAL",
+        FieldType::DateTime => "TEXT",
     }
 }

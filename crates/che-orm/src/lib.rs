@@ -1,4 +1,6 @@
 pub use che_orm_macros::Model;
+pub use chrono;
+pub use chrono::NaiveDateTime;
 
 pub mod error;
 pub mod manager;
@@ -18,6 +20,7 @@ pub use sqlite::SqliteBackend;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use chrono;
     pub use serde_json;
     pub use sqlx;
 }

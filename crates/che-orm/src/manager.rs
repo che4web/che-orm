@@ -140,29 +140,7 @@ where
         if values.is_empty() {
             return Err(Error::EmptyUpdate);
         }
-
-        let pk = M::primary_key().ok_or(Error::MissingPrimaryKey)?;
-        let assignments = values
-            .iter()
-            .enumerate()
-            .map(|(index, (name, _))| format!("{name} = ?{}", index + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let id_placeholder = values.len() + 1;
-        let sql = format!(
-            "UPDATE {} SET {} WHERE {} = ?{} RETURNING *",
-            M::table_name(),
-            assignments,
-            pk.db_name,
-            id_placeholder
-        );
-        let query = bind_values(
-            sqlx::query(&sql),
-            values.into_iter().map(|(_, value)| value),
-        )
-        .bind(id);
-        let row = query.fetch_one(self.db.pool()).await?;
-        Ok(M::from_row(&row)?)
+        update_by_values::<M>(self.db, id, values).await
     }
 
     pub async fn save(&self, model: &M) -> Result<M> {
@@ -341,6 +319,7 @@ where
                 SqliteValue::String(value) => query.bind(value),
                 SqliteValue::Bool(value) => query.bind(value),
                 SqliteValue::F64(value) => query.bind(value),
+                SqliteValue::DateTime(value) => query.bind(value),
                 SqliteValue::Null => query.bind(Option::<i64>::None),
             });
         let count = query.fetch_one(self.db.pool()).await?;
@@ -386,7 +365,8 @@ where
     }
 
     pub async fn execute(self) -> Result<M> {
-        if self.values.is_empty() {
+        let timestamp_fields = create_timestamp_fields::<M>();
+        if self.values.is_empty() && timestamp_fields.is_empty() {
             let sql = format!("INSERT INTO {} DEFAULT VALUES RETURNING *", M::table_name());
             let row = sqlx::query(&sql).fetch_one(self.db.pool()).await?;
             return Ok(M::from_row(&row)?);
@@ -397,16 +377,19 @@ where
             values.push((checked_create_field::<M>(&field)?, value));
         }
 
-        let columns = values.iter().map(|(name, _)| *name).collect::<Vec<_>>();
-        let placeholders = (1..=values.len())
+        let mut columns = values.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        let mut placeholders = (1..=values.len())
             .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        for field in timestamp_fields {
+            columns.push(field);
+            placeholders.push("CURRENT_TIMESTAMP".to_string());
+        }
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) RETURNING *",
             M::table_name(),
             columns.join(", "),
-            placeholders
+            placeholders.join(", ")
         );
         let query = bind_values(
             sqlx::query(&sql),
@@ -461,18 +444,22 @@ where
     }
 
     let pk = M::primary_key().ok_or(Error::MissingPrimaryKey)?;
+    let bind_count = values.len();
+    let timestamp_fields = update_timestamp_fields::<M>();
 
-    let assignments = values
+    let mut assignments = values
         .iter()
         .enumerate()
         .map(|(index, (name, _))| format!("{name} = ?{}", index + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let id_placeholder = values.len() + 1;
+        .collect::<Vec<_>>();
+    for field in timestamp_fields {
+        assignments.push(format!("{field} = CURRENT_TIMESTAMP"));
+    }
+    let id_placeholder = bind_count + 1;
     let sql = format!(
         "UPDATE {} SET {} WHERE {} = ?{} RETURNING *",
         M::table_name(),
-        assignments,
+        assignments.join(", "),
         pk.db_name,
         id_placeholder
     );
@@ -499,7 +486,7 @@ fn checked_create_field<M: Model>(field: &str) -> Result<&'static str> {
         .find(|info| info.db_name == field || info.rust_name == field)
         .ok_or_else(|| Error::UnknownField(field.to_string()))?;
 
-    if info.primary_key || info.auto {
+    if is_readonly_field(info) {
         return Err(Error::ReadonlyField(field.to_string()));
     }
 
@@ -512,11 +499,31 @@ fn checked_update_field<M: Model>(field: &str) -> Result<&'static str> {
         .find(|info| info.db_name == field || info.rust_name == field)
         .ok_or_else(|| Error::UnknownField(field.to_string()))?;
 
-    if info.primary_key || info.auto {
+    if is_readonly_field(info) {
         return Err(Error::ReadonlyField(field.to_string()));
     }
 
     Ok(info.db_name)
+}
+
+fn is_readonly_field(info: &crate::FieldInfo) -> bool {
+    info.primary_key || info.auto || info.auto_now_add || info.auto_now
+}
+
+fn create_timestamp_fields<M: Model>() -> Vec<&'static str> {
+    M::fields()
+        .iter()
+        .filter(|field| field.auto_now_add || field.auto_now)
+        .map(|field| field.db_name)
+        .collect()
+}
+
+fn update_timestamp_fields<M: Model>() -> Vec<&'static str> {
+    M::fields()
+        .iter()
+        .filter(|field| field.auto_now)
+        .map(|field| field.db_name)
+        .collect()
 }
 
 fn bind_values<'q, I>(
@@ -531,6 +538,7 @@ where
         SqliteValue::String(value) => query.bind(value),
         SqliteValue::Bool(value) => query.bind(value),
         SqliteValue::F64(value) => query.bind(value),
+        SqliteValue::DateTime(value) => query.bind(value),
         SqliteValue::Null => query.bind(Option::<i64>::None),
     })
 }
