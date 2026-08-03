@@ -81,6 +81,10 @@ The external API does not require application code to use `sqlx` directly. `sqlx
 
 ## Relations
 
+Use `#[field(foreign_key = OtherModel)]` on an integer id field to declare a
+SQLite foreign key. The field still stores the related model id; relation loading
+is explicit.
+
 ```rust
 use che_orm::{Model, SqliteBackend};
 
@@ -106,6 +110,8 @@ struct Post {
 ```
 
 `#[field(foreign_key = Author)]` generates schema metadata and SQLite `REFERENCES authors(id)`.
+Create the referenced table before the table that contains the foreign key, or
+generate/apply migrations in dependency order.
 
 ```rust
 # use che_orm::{Model, SqliteBackend};
@@ -119,17 +125,63 @@ struct Post {
 # let db = SqliteBackend::connect("sqlite::memory:").await?;
 # db.create_table::<Author>().await?;
 # db.create_table::<Post>().await?;
-# let author = Author::objects(&db).create(AuthorCreate { name: "Alice".to_string() }).await?;
-# let post = Post::objects(&db).create(PostCreate { author_id: author.id, title: "Hello".to_string() }).await?;
+let author = Author::objects(&db)
+    .create()
+    .set("name", "Alice")
+    .execute()
+    .await?;
+
+let post = Post::objects(&db)
+    .create()
+    .set("author_id", author.id)
+    .set("title", "Hello")
+    .execute()
+    .await?;
+
 let loaded_author = Post::objects(&db)
     .get_related::<Author>(post.author_id)
     .await?;
+assert_eq!(loaded_author.name, "Alice");
 
 let author_posts = Post::objects(&db)
     .filter_by_i64("author_id", author.id)
     .await?;
+assert_eq!(author_posts.len(), 1);
 # Ok(())
 # }
+```
+
+For REST serializers, keep the foreign key id as a normal writable field and add
+a read-only related field when you want nested output:
+
+```rust
+# use che_orm::Model;
+# use che_rest::{Field, ModelSerializer, RelatedModel};
+# #[derive(Debug, Clone, Model)]
+# #[model(table = "authors")]
+# struct Author { #[field(primary_key)] id: i64, name: String }
+# #[derive(Debug, Clone, Model)]
+# #[model(table = "posts")]
+# struct Post { #[field(primary_key)] id: i64, #[field(foreign_key = Author)] author_id: i64, title: String }
+static AUTHOR_RELATION: RelatedModel<Author> = RelatedModel::new(author_serializer);
+
+static POST_FIELDS: &[Field] = &[
+    Field::new("id").read_only(),
+    Field::new("author_id"),
+    Field::related("author", "author_id", &AUTHOR_RELATION),
+    Field::new("title"),
+];
+
+fn author_serializer() -> ModelSerializer<Author> {
+    ModelSerializer::new(&[
+        Field::new("id").read_only(),
+        Field::new("name"),
+    ])
+}
+
+fn post_serializer() -> ModelSerializer<Post> {
+    ModelSerializer::new(POST_FIELDS)
+}
 ```
 
 ## Timestamp Fields
