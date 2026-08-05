@@ -2,7 +2,23 @@ use std::marker::PhantomData;
 
 use sqlx::{Sqlite, query::Query, sqlite::SqliteArguments};
 
-use crate::{Error, Model, Result, SqliteBackend, SqliteModel, SqliteValue};
+use crate::{Error, Model, ModelField, Result, SqliteBackend, SqliteModel, SqliteValue};
+
+pub trait QueryField<M> {
+    fn db_name(&self) -> &str;
+}
+
+impl<M> QueryField<M> for ModelField<M> {
+    fn db_name(&self) -> &str {
+        ModelField::db_name(self)
+    }
+}
+
+impl<M> QueryField<M> for &str {
+    fn db_name(&self) -> &str {
+        self
+    }
+}
 
 pub struct ModelManager<'db, M> {
     db: &'db SqliteBackend,
@@ -168,49 +184,59 @@ impl<'db, M> QueryBuilder<'db, M>
 where
     M: SqliteModel,
 {
-    pub fn eq<V>(self, field: &str, value: V) -> Self
+    pub fn eq<F, V>(self, field: F, value: V) -> Self
     where
+        F: QueryField<M>,
         V: Into<SqliteValue>,
     {
         self.filter(field, QueryOperator::Eq, value)
     }
 
-    pub fn contains<V>(self, field: &str, value: V) -> Self
+    pub fn contains<F, V>(self, field: F, value: V) -> Self
     where
+        F: QueryField<M>,
         V: Into<SqliteValue>,
     {
         self.filter(field, QueryOperator::Contains, value)
     }
 
-    pub fn gt<V>(self, field: &str, value: V) -> Self
+    pub fn gt<F, V>(self, field: F, value: V) -> Self
     where
+        F: QueryField<M>,
         V: Into<SqliteValue>,
     {
         self.filter(field, QueryOperator::Gt, value)
     }
 
-    pub fn gte<V>(self, field: &str, value: V) -> Self
+    pub fn gte<F, V>(self, field: F, value: V) -> Self
     where
+        F: QueryField<M>,
         V: Into<SqliteValue>,
     {
         self.filter(field, QueryOperator::Gte, value)
     }
 
-    pub fn lt<V>(self, field: &str, value: V) -> Self
+    pub fn lt<F, V>(self, field: F, value: V) -> Self
     where
+        F: QueryField<M>,
         V: Into<SqliteValue>,
     {
         self.filter(field, QueryOperator::Lt, value)
     }
 
-    pub fn lte<V>(self, field: &str, value: V) -> Self
+    pub fn lte<F, V>(self, field: F, value: V) -> Self
     where
+        F: QueryField<M>,
         V: Into<SqliteValue>,
     {
         self.filter(field, QueryOperator::Lte, value)
     }
 
-    pub fn order_by(mut self, field: &str) -> Self {
+    pub fn order_by<F>(mut self, field: F) -> Self
+    where
+        F: QueryField<M>,
+    {
+        let field = field.db_name();
         let (descending, field) = field
             .strip_prefix('-')
             .map_or((false, field), |field| (true, field));
@@ -328,12 +354,13 @@ where
         Ok(count)
     }
 
-    fn filter<V>(mut self, field: &str, operator: QueryOperator, value: V) -> Self
+    fn filter<F, V>(mut self, field: F, operator: QueryOperator, value: V) -> Self
     where
+        F: QueryField<M>,
         V: Into<SqliteValue>,
     {
         self.filters.push(QueryFilter {
-            field: field.to_string(),
+            field: field.db_name().to_string(),
             operator,
             value: value.into(),
         });

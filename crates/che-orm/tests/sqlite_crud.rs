@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use che_orm::{Model, NaiveDateTime, SqliteBackend, create_table_sql};
+use che_orm::{Choice, Model, NaiveDateTime, SqliteBackend, SqliteValue, create_table_sql};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Model)]
@@ -31,6 +31,21 @@ struct Task {
 
     #[field(auto_now)]
     updated_at: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Choice)]
+enum TaskStatus {
+    New,
+    InProgress,
+    Done,
+}
+
+#[derive(Debug, Clone, Model)]
+#[model(table = "choice_tasks")]
+struct ChoiceTask {
+    #[field(primary_key)]
+    id: i64,
+    status: TaskStatus,
 }
 
 #[derive(Debug, Clone, Model)]
@@ -67,6 +82,14 @@ async fn sqlite_crud_flow() {
     let fetched = User::objects(&db).get(user.id).await.unwrap();
     assert_eq!(fetched.name, "Alice");
 
+    let typed = User::objects(&db)
+        .query()
+        .eq(UserFields::NAME, "Alice")
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(typed.len(), 1);
+
     let all = User::objects(&db).all().await.unwrap();
     assert_eq!(all.len(), 1);
 
@@ -90,6 +113,30 @@ async fn sqlite_crud_flow() {
     User::objects(&db).delete(user.id).await.unwrap();
     let all = User::objects(&db).all().await.unwrap();
     assert!(all.is_empty());
+}
+
+#[tokio::test]
+async fn choice_field_roundtrips_and_enforces_values() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<ChoiceTask>().await.unwrap();
+
+    let task = ChoiceTask::objects(&db)
+        .create()
+        .set("status", SqliteValue::String("in_progress".to_string()))
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(task.status, TaskStatus::InProgress);
+    assert_eq!(TaskStatus::values(), &["new", "in_progress", "done"]);
+    assert_eq!(ChoiceTaskFields::STATUS.db_name(), "status");
+    assert!(
+        ChoiceTask::objects(&db)
+            .create()
+            .set("status", SqliteValue::String("invalid".to_string()))
+            .execute()
+            .await
+            .is_err()
+    );
 }
 
 #[test]

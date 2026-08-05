@@ -187,6 +187,7 @@ fn column_schema_sql(field: &FieldSchema) -> String {
         field.auto_now_add,
         field.auto_now,
         field.foreign_key.as_ref(),
+        field.choices.as_deref(),
     )
 }
 
@@ -201,6 +202,7 @@ fn column_parts(
     auto_now_add: bool,
     auto_now: bool,
     foreign_key: Option<&ForeignKeySchema>,
+    choices: Option<&[String]>,
 ) -> String {
     let mut parts = vec![name.to_string()];
 
@@ -230,6 +232,14 @@ fn column_parts(
             foreign_key.table, foreign_key.column
         ));
     }
+    if let Some(choices) = choices {
+        let values = choices
+            .iter()
+            .map(|choice| format!("'{}'", choice.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("CHECK ({name} IN ({values}))"));
+    }
 
     parts.join(" ")
 }
@@ -245,6 +255,6 @@ fn sql_type(ty: FieldType) -> &'static str {
         FieldType::Boolean => "BOOLEAN",
         FieldType::Real => "REAL",
         FieldType::DateTime => "TEXT",
-        FieldType::Json => "TEXT",
+        FieldType::Json | FieldType::Choice => "TEXT",
     }
 }

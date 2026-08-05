@@ -1,4 +1,4 @@
-pub use che_orm_macros::Model;
+pub use che_orm_macros::{Choice, Model};
 pub use chrono;
 pub use chrono::NaiveDateTime;
 
@@ -10,11 +10,13 @@ pub mod schema;
 pub mod sqlite;
 
 pub use error::{Error, Result};
-pub use manager::{ModelManager, QueryBuilder, UpdateBuilder};
+pub use manager::{ModelManager, QueryBuilder, QueryField, UpdateBuilder};
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, sqlite_migration_sql,
 };
-pub use model::{FieldInfo, FieldType, ForeignKeyInfo, Model, SqliteModel, SqliteValue};
+pub use model::{
+    Choice, FieldInfo, FieldType, ForeignKeyInfo, Model, ModelField, SqliteModel, SqliteValue,
+};
 pub use schema::{FieldSchema, ForeignKeySchema, ModelSchema, Schema};
 pub use sqlite::SqliteBackend;
 

@@ -177,6 +177,7 @@ fn id_field() -> FieldSchema {
         auto_now_add: false,
         auto_now: false,
         foreign_key: None,
+        choices: None,
     }
 }
 
@@ -193,5 +194,6 @@ fn email_field() -> FieldSchema {
         auto_now_add: false,
         auto_now: false,
         foreign_key: None,
+        choices: None,
     }
 }

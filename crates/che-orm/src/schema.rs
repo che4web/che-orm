@@ -30,6 +30,8 @@ pub struct FieldSchema {
     #[serde(default)]
     pub auto_now: bool,
     pub foreign_key: Option<ForeignKeySchema>,
+    #[serde(default)]
+    pub choices: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +103,9 @@ impl ModelSchema {
                         table: foreign_key.table.to_string(),
                         column: foreign_key.column.to_string(),
                     }),
+                    choices: field
+                        .choices
+                        .map(|choices| choices.iter().map(|choice| choice.to_string()).collect()),
                 })
                 .collect(),
         }

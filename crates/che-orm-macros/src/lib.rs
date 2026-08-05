@@ -10,6 +10,68 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         .into()
 }
 
+#[proc_macro_derive(Choice)]
+pub fn derive_choice(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_choice(input)
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let enum_name = input.ident;
+    let Data::Enum(data) = input.data else {
+        return Err(syn::Error::new_spanned(enum_name, "Choice requires an enum"));
+    };
+
+    let mut variants = Vec::new();
+    let mut values = Vec::new();
+    for variant in data.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(syn::Error::new_spanned(
+                variant,
+                "Choice variants must be unit variants",
+            ));
+        }
+        let value = snake_case(&variant.ident.to_string());
+        if values.iter().any(|existing| existing == &value) {
+            return Err(syn::Error::new_spanned(
+                variant.ident,
+                "Choice variants must have unique snake_case values",
+            ));
+        }
+        variants.push((variant.ident, value.clone()));
+        values.push(value);
+    }
+
+    let value_literals = values.iter().map(|value| quote!(#value));
+    let as_str_arms = variants.iter().map(|(variant, value)| quote!(Self::#variant => #value));
+    let from_str_arms = variants.iter().map(|(variant, value)| {
+        quote!(#value => Ok(Self::#variant))
+    });
+
+    Ok(quote! {
+        impl ::che_orm::Choice for #enum_name {
+            fn as_str(&self) -> &'static str {
+                match self {
+                    #(#as_str_arms,)*
+                }
+            }
+
+            fn from_str(value: &str) -> ::std::result::Result<Self, ::std::string::String> {
+                match value {
+                    #(#from_str_arms,)*
+                    _ => Err(format!("invalid {} choice: {value}", stringify!(#enum_name))),
+                }
+            }
+
+            fn values() -> &'static [&'static str] {
+                &[#(#value_literals),*]
+            }
+        }
+    })
+}
+
 fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let model_name = input.ident;
     let table_name =
@@ -33,6 +95,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     };
 
     let update_name = format_ident!("{}Update", model_name);
+    let fields_name = format_ident!("{}Fields", model_name);
 
     let mut infos = Vec::new();
     let mut row_fields = Vec::new();
@@ -42,6 +105,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut id_ident = None;
     let mut save_values = Vec::new();
     let mut value_arms = Vec::new();
+    let mut field_constants = Vec::new();
 
     for field in fields {
         let ident = field.ident.expect("named field");
@@ -49,7 +113,13 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let attrs = field_attrs(&field.attrs)?;
         let rust_name = ident.to_string();
         let db_name = attrs.rename.unwrap_or_else(|| rust_name.clone());
-        let field_type = field_type(&ty)?;
+        let field_constant = format_ident!("{}", rust_name.to_ascii_uppercase());
+        let choice_type = choice_type(&ty);
+        let field_type = if choice_type.is_some() {
+            quote!(::che_orm::FieldType::Choice)
+        } else {
+            field_type(&ty)?
+        };
         let primary_key = attrs.primary_key;
         let auto = attrs.auto || primary_key && is_i64(&ty);
         let nullable = is_option(&ty);
@@ -59,6 +129,11 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let foreign_key = attrs.foreign_key;
         let auto_now_add = attrs.auto_now_add;
         let auto_now = attrs.auto_now;
+
+        field_constants.push(quote! {
+            pub const #field_constant: ::che_orm::ModelField<#model_name> =
+                ::che_orm::ModelField::new(#db_name);
+        });
 
         if auto_now_add && auto_now {
             return Err(syn::Error::new_spanned(
@@ -99,6 +174,10 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             })),
             None => quote!(None),
         };
+        let choices_tokens = match choice_type {
+            Some(choice_type) => quote!(Some(<#choice_type as ::che_orm::Choice>::values())),
+            None => quote!(None),
+        };
 
         infos.push(quote! {
             ::che_orm::FieldInfo {
@@ -114,6 +193,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 auto_now_add: #auto_now_add,
                 auto_now: #auto_now,
                 foreign_key: #foreign_key_tokens,
+                choices: #choices_tokens,
             }
         });
 
@@ -142,6 +222,12 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         #[derive(Debug, Clone, Default)]
         pub struct #update_name {
             #(#update_fields,)*
+        }
+
+        pub struct #fields_name;
+
+        impl #fields_name {
+            #(#field_constants)*
         }
 
         impl ::che_orm::Model for #model_name {
@@ -305,8 +391,55 @@ fn field_type(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     }
 }
 
+fn choice_type(ty: &Type) -> Option<&Type> {
+    let base = option_inner(ty).unwrap_or(ty);
+    let Type::Path(path) = base else { return None };
+    let name = path.path.segments.last()?.ident.to_string();
+    if matches!(
+        name.as_str(),
+        "i64" | "i32" | "u32" | "String" | "bool" | "f64" | "f32" | "NaiveDateTime" | "Value"
+    ) {
+        None
+    } else {
+        Some(base)
+    }
+}
+
 fn row_field_quote(ident: &syn::Ident, ty: &Type, db_name: &str) -> proc_macro2::TokenStream {
-    if is_json_value(ty) {
+    if let Some(choice) = choice_type(ty) {
+        if option_inner(ty).is_some() {
+            quote! {
+                #ident: {
+                    let value: ::std::option::Option<::std::string::String> =
+                        ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?;
+                    match value {
+                        ::std::option::Option::Some(value) => ::std::option::Option::Some(
+                            <#choice as ::che_orm::Choice>::from_str(&value)
+                                .map_err(|error| ::che_orm::__private::sqlx::Error::Decode(
+                                    ::std::boxed::Box::new(::std::io::Error::new(
+                                        ::std::io::ErrorKind::InvalidData, error,
+                                    ))
+                                ))?
+                        ),
+                        ::std::option::Option::None => ::std::option::Option::None,
+                    }
+                }
+            }
+        } else {
+            quote! {
+                #ident: {
+                    let value: ::std::string::String =
+                        ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?;
+                    <#choice as ::che_orm::Choice>::from_str(&value)
+                        .map_err(|error| ::che_orm::__private::sqlx::Error::Decode(
+                            ::std::boxed::Box::new(::std::io::Error::new(
+                                ::std::io::ErrorKind::InvalidData, error,
+                            ))
+                        ))?
+                }
+            }
+        }
+    } else if is_json_value(ty) {
         quote! {
             #ident: {
                 let value: ::std::string::String = ::che_orm::__private::sqlx::Row::try_get(row, #db_name)?;
@@ -339,7 +472,25 @@ fn sqlite_value_ref_quote(
     ty: &Type,
     db_name: &str,
 ) -> proc_macro2::TokenStream {
-    if is_option(ty) {
+    if let Some(choice) = choice_type(ty) {
+        if option_inner(ty).is_some() {
+            quote! {
+                values.push((#db_name, match self.#ident.clone() {
+                    ::std::option::Option::Some(value) =>
+                        ::che_orm::SqliteValue::String(
+                            <#choice as ::che_orm::Choice>::as_str(&value).to_string()
+                        ),
+                    ::std::option::Option::None => ::che_orm::SqliteValue::Null,
+                }));
+            }
+        } else {
+            quote! {
+                values.push((#db_name, ::che_orm::SqliteValue::String(
+                    <#choice as ::che_orm::Choice>::as_str(&self.#ident).to_string()
+                )));
+            }
+        }
+    } else if is_option(ty) {
         quote! {
             values.push((#db_name, match self.#ident.clone() {
                 ::std::option::Option::Some(value) => ::che_orm::SqliteValue::from(value),
@@ -358,7 +509,29 @@ fn sqlite_value_update_quote(
     ty: &Type,
     db_name: &str,
 ) -> proc_macro2::TokenStream {
-    if is_option(ty) {
+    if let Some(choice) = choice_type(ty) {
+        if option_inner(ty).is_some() {
+            quote! {
+                if let ::std::option::Option::Some(value) = data.#ident {
+                    values.push((#db_name, match value {
+                        ::std::option::Option::Some(value) =>
+                            ::che_orm::SqliteValue::String(
+                                <#choice as ::che_orm::Choice>::as_str(&value).to_string()
+                            ),
+                        ::std::option::Option::None => ::che_orm::SqliteValue::Null,
+                    }));
+                }
+            }
+        } else {
+            quote! {
+                if let ::std::option::Option::Some(value) = data.#ident {
+                    values.push((#db_name, ::che_orm::SqliteValue::String(
+                        <#choice as ::che_orm::Choice>::as_str(&value).to_string()
+                    )));
+                }
+            }
+        }
+    } else if is_option(ty) {
         quote! {
             if let ::std::option::Option::Some(value) = data.#ident {
                 values.push((#db_name, match value {
@@ -377,7 +550,30 @@ fn sqlite_value_update_quote(
 }
 
 fn model_value_arm(ident: &syn::Ident, name: &str, ty: &Type) -> proc_macro2::TokenStream {
-    if is_json_value(ty) {
+    if let Some(choice) = choice_type(ty) {
+        if option_inner(ty).is_some() {
+            quote! {
+                #name => match &self.#ident {
+                    ::std::option::Option::Some(value) => ::std::option::Option::Some(
+                        ::che_orm::__private::serde_json::Value::String(
+                            <#choice as ::che_orm::Choice>::as_str(value).to_string()
+                        )
+                    ),
+                    ::std::option::Option::None => ::std::option::Option::Some(
+                        ::che_orm::__private::serde_json::Value::Null
+                    ),
+                }
+            }
+        } else {
+            quote! {
+                #name => ::std::option::Option::Some(
+                    ::che_orm::__private::serde_json::Value::String(
+                        <#choice as ::che_orm::Choice>::as_str(&self.#ident).to_string()
+                    )
+                )
+            }
+        }
+    } else if is_json_value(ty) {
         quote! {
             #name => ::std::option::Option::Some(self.#ident.clone())
         }

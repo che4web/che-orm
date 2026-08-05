@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::ModelManager;
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +12,7 @@ pub enum FieldType {
     Real,
     DateTime,
     Json,
+    Choice,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +35,32 @@ pub struct FieldInfo {
     pub auto_now_add: bool,
     pub auto_now: bool,
     pub foreign_key: Option<ForeignKeyInfo>,
+    pub choices: Option<&'static [&'static str]>,
+}
+
+pub trait Choice: Sized + Clone + Send + Sync + 'static {
+    fn as_str(&self) -> &'static str;
+    fn from_str(value: &str) -> Result<Self, String>;
+    fn values() -> &'static [&'static str];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelField<M> {
+    db_name: &'static str,
+    _model: PhantomData<fn() -> M>,
+}
+
+impl<M> ModelField<M> {
+    pub const fn new(db_name: &'static str) -> Self {
+        Self {
+            db_name,
+            _model: PhantomData,
+        }
+    }
+
+    pub const fn db_name(&self) -> &'static str {
+        self.db_name
+    }
 }
 
 #[derive(Debug, Clone)]
