@@ -3,6 +3,7 @@ use crate::{FieldSchema, FieldType, ForeignKeySchema, Model, ModelSchema, Schema
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
     pub changes: Vec<SchemaChange>,
+    pub schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,16 +70,79 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Migration {
         }
     }
 
-    Migration { changes }
+    Migration {
+        changes,
+        schema: new.clone(),
+    }
 }
 
 pub fn sqlite_migration_sql(migration: &Migration) -> String {
-    migration
-        .changes
+    let mut statements = Vec::new();
+    let mut rebuilt_tables = Vec::new();
+
+    for change in &migration.changes {
+        if let SchemaChange::DropColumn { table, .. } = change
+            && !rebuilt_tables.iter().any(|rebuilt| *rebuilt == table)
+        {
+            rebuilt_tables.push(table);
+        }
+    }
+
+    for change in &migration.changes {
+        match change {
+            SchemaChange::DropColumn { table, .. } => {
+                if let Some(model) = migration
+                    .schema
+                    .models
+                    .iter()
+                    .find(|model| model.table == *table)
+                    && !statements.iter().any(|statement: &String| {
+                        statement.contains(&format!("__che_orm_new_{}", model.table))
+                    })
+                {
+                    statements.push(rebuild_table_sql(model, &migration.changes));
+                }
+            }
+            SchemaChange::AddColumn { table, .. }
+                if rebuilt_tables.iter().any(|rebuilt| *rebuilt == table) => {}
+            _ => statements.push(sqlite_change_sql(change)),
+        }
+    }
+
+    statements.join("\n\n")
+}
+
+fn rebuild_table_sql(model: &ModelSchema, changes: &[SchemaChange]) -> String {
+    let temporary_table = format!("__che_orm_new_{}", model.table);
+    let columns = model
+        .fields
         .iter()
-        .map(sqlite_change_sql)
+        .map(column_schema_sql)
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join(",\n    ");
+    let copied_columns = model
+        .fields
+        .iter()
+        .filter(|field| {
+            !changes.iter().any(|change| {
+                matches!(
+                    change,
+                    SchemaChange::AddColumn { table, field: added }
+                        if table == &model.table && added.name == field.name
+                )
+            })
+        })
+        .map(|field| quote_identifier(&field.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "PRAGMA defer_foreign_keys = ON;\nCREATE TABLE {temporary} (\n    {columns}\n);\nINSERT INTO {temporary} ({copied}) SELECT {copied} FROM {table};\nDROP TABLE {table};\nALTER TABLE {temporary} RENAME TO {table};",
+        temporary = quote_identifier(&temporary_table),
+        columns = columns,
+        copied = copied_columns,
+        table = quote_identifier(&model.table),
+    )
 }
 
 fn create_table_model_sql(model: &ModelSchema) -> String {
@@ -105,9 +169,9 @@ fn sqlite_change_sql(change: &SchemaChange) -> String {
                 column_schema_sql(field)
             )
         }
-        SchemaChange::DropColumn { table, column } => format!(
-            "-- SQLite safe generator does not drop columns automatically.\n-- Review manually: ALTER TABLE {table} DROP COLUMN {column};"
-        ),
+        SchemaChange::DropColumn { .. } => {
+            unreachable!("drop columns are handled by table rebuild")
+        }
     }
 }
 
@@ -168,6 +232,10 @@ fn column_parts(
     }
 
     parts.join(" ")
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn sql_type(ty: FieldType) -> &'static str {
