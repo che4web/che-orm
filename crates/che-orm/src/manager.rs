@@ -354,6 +354,108 @@ where
         Ok(count)
     }
 
+    pub async fn update_one_returning<I, F, V>(self, updates: I) -> Result<Option<M>>
+    where
+        I: IntoIterator<Item = (F, V)>,
+        F: QueryField<M>,
+        V: Into<SqliteValue>,
+    {
+        let values = checked_updates::<M, I, F, V>(updates)?;
+        if values.is_empty() {
+            return Err(Error::EmptyUpdate);
+        }
+
+        let mut bindings = values
+            .iter()
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        let assignments = values
+            .iter()
+            .enumerate()
+            .map(|(index, (field, _))| format!("{field} = ?{}", index + 1))
+            .collect::<Vec<_>>();
+        let timestamp_fields = update_timestamp_fields::<M>();
+        let mut assignments = assignments;
+        assignments.extend(
+            timestamp_fields
+                .iter()
+                .map(|field| format!("{field} = CURRENT_TIMESTAMP")),
+        );
+
+        let where_sql = append_where::<M>(&self.filters, &mut bindings, values.len() + 1)?;
+        let sql = format!(
+            "UPDATE {} SET {}{} RETURNING *",
+            M::table_name(),
+            assignments.join(", "),
+            where_sql,
+        );
+        let row = bind_values(sqlx::query(&sql), bindings)
+            .fetch_optional(self.db.pool())
+            .await?;
+        row.map(|row| M::from_row(&row).map_err(Into::into))
+            .transpose()
+    }
+
+    pub async fn claim_next_returning<I, F, V>(self, updates: I) -> Result<Option<M>>
+    where
+        I: IntoIterator<Item = (F, V)>,
+        F: QueryField<M>,
+        V: Into<SqliteValue>,
+    {
+        let values = checked_updates::<M, I, F, V>(updates)?;
+        if values.is_empty() {
+            return Err(Error::EmptyUpdate);
+        }
+
+        let pk = M::primary_key().ok_or(Error::MissingPrimaryKey)?;
+        let mut bindings = values
+            .iter()
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        let assignments = values
+            .iter()
+            .enumerate()
+            .map(|(index, (field, _))| format!("{field} = ?{}", index + 1))
+            .collect::<Vec<_>>();
+        let timestamp_fields = update_timestamp_fields::<M>();
+        let mut assignments = assignments;
+        assignments.extend(
+            timestamp_fields
+                .iter()
+                .map(|field| format!("{field} = CURRENT_TIMESTAMP")),
+        );
+
+        let order = self
+            .ordering
+            .as_ref()
+            .map_or(pk.db_name, |ordering| ordering.field.as_str());
+        let direction =
+            self.ordering.as_ref().map_or(
+                "ASC",
+                |ordering| {
+                    if ordering.descending { "DESC" } else { "ASC" }
+                },
+            );
+        let where_sql = append_where::<M>(&self.filters, &mut bindings, values.len() + 1)?;
+        let subquery = format!(
+            "SELECT {pk} FROM {table}{where_sql} ORDER BY {order} {direction} LIMIT 1",
+            pk = pk.db_name,
+            table = M::table_name(),
+        );
+        let sql = format!(
+            "UPDATE {} SET {} WHERE {} = ({}) RETURNING *",
+            M::table_name(),
+            assignments.join(", "),
+            pk.db_name,
+            subquery,
+        );
+        let row = bind_values(sqlx::query(&sql), bindings)
+            .fetch_optional(self.db.pool())
+            .await?;
+        row.map(|row| M::from_row(&row).map_err(Into::into))
+            .transpose()
+    }
+
     fn filter<F, V>(mut self, field: F, operator: QueryOperator, value: V) -> Self
     where
         F: QueryField<M>,
@@ -373,6 +475,47 @@ fn contains_value(value: SqliteValue) -> SqliteValue {
         SqliteValue::String(value) => SqliteValue::String(format!("%{value}%")),
         value => value,
     }
+}
+
+fn checked_updates<M, I, F, V>(updates: I) -> Result<Vec<(&'static str, SqliteValue)>>
+where
+    M: Model,
+    I: IntoIterator<Item = (F, V)>,
+    F: QueryField<M>,
+    V: Into<SqliteValue>,
+{
+    updates
+        .into_iter()
+        .map(|(field, value)| Ok((checked_update_field::<M>(field.db_name())?, value.into())))
+        .collect()
+}
+
+fn append_where<M: Model>(
+    filters: &[QueryFilter],
+    bindings: &mut Vec<SqliteValue>,
+    start_index: usize,
+) -> Result<String> {
+    if filters.is_empty() {
+        return Ok(String::new());
+    }
+    let mut clauses = Vec::with_capacity(filters.len());
+    for (offset, filter) in filters.iter().enumerate() {
+        let field = checked_field::<M>(&filter.field)?;
+        let operator = match filter.operator {
+            QueryOperator::Eq => "=",
+            QueryOperator::Contains => "LIKE",
+            QueryOperator::Gt => ">",
+            QueryOperator::Gte => ">=",
+            QueryOperator::Lt => "<",
+            QueryOperator::Lte => "<=",
+        };
+        clauses.push(format!("{field} {operator} ?{}", start_index + offset));
+        bindings.push(match filter.operator {
+            QueryOperator::Contains => contains_value(filter.value.clone()),
+            _ => filter.value.clone(),
+        });
+    }
+    Ok(format!(" WHERE {}", clauses.join(" AND ")))
 }
 
 impl<'db, M> CreateBuilder<'db, M>
