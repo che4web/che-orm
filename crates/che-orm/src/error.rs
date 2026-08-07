@@ -20,6 +20,15 @@ pub enum Error {
 
     #[error("field cannot be updated: {0}")]
     ReadonlyField(String),
+
+    #[error("invalid file path: {0}")]
+    InvalidFilePath(String),
+
+    #[error("invalid file extension: {0}")]
+    InvalidFileExtension(String),
+
+    #[error("file storage error: {0}")]
+    Storage(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

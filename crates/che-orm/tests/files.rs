@@ -1,0 +1,62 @@
+use std::{
+    fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use che_orm::{FilePath, FileStorage, LocalFileStorage, Model, SqliteBackend};
+
+#[derive(Debug, Clone, Model)]
+#[model(table = "file_assets")]
+struct Asset {
+    #[field(primary_key)]
+    id: i64,
+    path: FilePath,
+    optional_path: Option<FilePath>,
+}
+
+#[test]
+fn file_paths_reject_traversal() {
+    assert!(FilePath::new("../secret.txt").is_err());
+    assert!(FilePath::new("/tmp/secret.txt").is_err());
+    assert!(FilePath::new(r"..\secret.txt").is_err());
+    assert!(FilePath::new("safe/./file.txt").is_err());
+    assert!(FilePath::new("safe/file.txt").is_ok());
+}
+
+#[test]
+fn local_storage_roundtrip() {
+    let root = std::env::temp_dir().join(format!(
+        "che-orm-files-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let storage = LocalFileStorage::new(&root);
+    let path = storage.store(b"hello", Some("txt")).unwrap();
+    assert!(storage.exists(&path).unwrap());
+    assert_eq!(storage.read(&path).unwrap(), b"hello");
+    storage.delete(&path).unwrap();
+    assert!(!storage.exists(&path).unwrap());
+    assert!(storage.store(b"x", Some("../txt")).is_err());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn file_path_model_roundtrips() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<Asset>().await.unwrap();
+    let path = FilePath::new("aa/bb/report.txt").unwrap();
+    let asset = Asset::objects(&db)
+        .create()
+        .set("path", path.clone())
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(asset.path, path);
+    assert!(asset.optional_path.is_none());
+    assert_eq!(
+        Asset::objects(&db).get(asset.id).await.unwrap().path,
+        FilePath::new("aa/bb/report.txt").unwrap()
+    );
+}

@@ -3,6 +3,7 @@ pub use chrono;
 pub use chrono::NaiveDateTime;
 
 pub mod error;
+pub mod files;
 pub mod manager;
 pub mod migration;
 pub mod model;
@@ -10,6 +11,7 @@ pub mod schema;
 pub mod sqlite;
 
 pub use error::{Error, Result};
+pub use files::{FilePath, FileStorage, LocalFileStorage};
 pub use manager::{ModelManager, QueryBuilder, QueryField, UpdateBuilder};
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, sqlite_migration_sql,

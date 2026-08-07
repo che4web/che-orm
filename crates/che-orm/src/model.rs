@@ -13,6 +13,7 @@ pub enum FieldType {
     DateTime,
     Json,
     Choice,
+    FilePath,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +132,12 @@ impl From<chrono::NaiveDateTime> for SqliteValue {
 impl From<serde_json::Value> for SqliteValue {
     fn from(value: serde_json::Value) -> Self {
         Self::Json(value)
+    }
+}
+
+impl From<crate::FilePath> for SqliteValue {
+    fn from(value: crate::FilePath) -> Self {
+        Self::String(value.into_inner())
     }
 }
 

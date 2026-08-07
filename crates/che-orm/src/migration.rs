@@ -256,5 +256,6 @@ fn sql_type(ty: FieldType) -> &'static str {
         FieldType::Real => "REAL",
         FieldType::DateTime => "TEXT",
         FieldType::Json | FieldType::Choice => "TEXT",
+        FieldType::FilePath => "TEXT",
     }
 }

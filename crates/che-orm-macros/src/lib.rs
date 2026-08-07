@@ -21,7 +21,10 @@ pub fn derive_choice(input: TokenStream) -> TokenStream {
 fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let enum_name = input.ident;
     let Data::Enum(data) = input.data else {
-        return Err(syn::Error::new_spanned(enum_name, "Choice requires an enum"));
+        return Err(syn::Error::new_spanned(
+            enum_name,
+            "Choice requires an enum",
+        ));
     };
 
     let mut variants = Vec::new();
@@ -45,10 +48,12 @@ fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let value_literals = values.iter().map(|value| quote!(#value));
-    let as_str_arms = variants.iter().map(|(variant, value)| quote!(Self::#variant => #value));
-    let from_str_arms = variants.iter().map(|(variant, value)| {
-        quote!(#value => Ok(Self::#variant))
-    });
+    let as_str_arms = variants
+        .iter()
+        .map(|(variant, value)| quote!(Self::#variant => #value));
+    let from_str_arms = variants
+        .iter()
+        .map(|(variant, value)| quote!(#value => Ok(Self::#variant)));
 
     Ok(quote! {
         impl ::che_orm::Choice for #enum_name {
@@ -115,7 +120,9 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let db_name = attrs.rename.unwrap_or_else(|| rust_name.clone());
         let field_constant = format_ident!("{}", rust_name.to_ascii_uppercase());
         let choice_type = choice_type(&ty);
-        let field_type = if choice_type.is_some() {
+        let field_type = if is_file_path(&ty) {
+            quote!(::che_orm::FieldType::FilePath)
+        } else if choice_type.is_some() {
             quote!(::che_orm::FieldType::Choice)
         } else {
             field_type(&ty)?
@@ -374,7 +381,9 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
 
 fn field_type(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
     let ty = option_inner(ty).unwrap_or(ty);
-    if is_type(ty, "i64") || is_type(ty, "i32") || is_type(ty, "u32") {
+    if is_file_path(ty) {
+        Ok(quote!(::che_orm::FieldType::FilePath))
+    } else if is_type(ty, "i64") || is_type(ty, "i32") || is_type(ty, "u32") {
         Ok(quote!(::che_orm::FieldType::Integer))
     } else if is_type(ty, "String") {
         Ok(quote!(::che_orm::FieldType::Text))
@@ -397,12 +406,30 @@ fn choice_type(ty: &Type) -> Option<&Type> {
     let name = path.path.segments.last()?.ident.to_string();
     if matches!(
         name.as_str(),
-        "i64" | "i32" | "u32" | "String" | "bool" | "f64" | "f32" | "NaiveDateTime" | "Value"
+        "i64"
+            | "i32"
+            | "u32"
+            | "String"
+            | "bool"
+            | "f64"
+            | "f32"
+            | "NaiveDateTime"
+            | "Value"
+            | "FilePath"
     ) {
         None
     } else {
         Some(base)
     }
+}
+
+fn is_file_path(ty: &Type) -> bool {
+    let base = option_inner(ty).unwrap_or(ty);
+    let Type::Path(path) = base else { return false };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "FilePath")
 }
 
 fn row_field_quote(ident: &syn::Ident, ty: &Type, db_name: &str) -> proc_macro2::TokenStream {
@@ -550,7 +577,26 @@ fn sqlite_value_update_quote(
 }
 
 fn model_value_arm(ident: &syn::Ident, name: &str, ty: &Type) -> proc_macro2::TokenStream {
-    if let Some(choice) = choice_type(ty) {
+    if is_file_path(ty) {
+        if option_inner(ty).is_some() {
+            quote! {
+                #name => match &self.#ident {
+                    ::std::option::Option::Some(value) => ::std::option::Option::Some(
+                        ::che_orm::__private::serde_json::Value::String(value.as_str().to_string())
+                    ),
+                    ::std::option::Option::None => ::std::option::Option::Some(
+                        ::che_orm::__private::serde_json::Value::Null
+                    ),
+                }
+            }
+        } else {
+            quote! {
+                #name => ::std::option::Option::Some(
+                    ::che_orm::__private::serde_json::Value::String(self.#ident.as_str().to_string())
+                )
+            }
+        }
+    } else if let Some(choice) = choice_type(ty) {
         if option_inner(ty).is_some() {
             quote! {
                 #name => match &self.#ident {
