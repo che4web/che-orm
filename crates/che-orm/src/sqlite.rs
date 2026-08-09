@@ -6,7 +6,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 
-use crate::{Error, Model, Result, create_table_sql};
+use crate::{Error, Model, Result, create_table_sql, migration::SQLITE_FK_REBUILD_DIRECTIVE};
 
 #[derive(Debug, Clone)]
 pub struct SqliteBackend {
@@ -20,11 +20,24 @@ pub struct MigrationStatus {
     pub checksum: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SafeMigrationResult {
+    Applied,
+    AlreadyApplied,
+}
+
 impl SqliteBackend {
     pub async fn connect(url: &str) -> Result<Self> {
-        let pool = SqlitePoolOptions::new().connect(url).await?;
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
+        let pool = SqlitePoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(url)
             .await?;
         Ok(Self { pool })
     }
@@ -38,6 +51,10 @@ impl SqliteBackend {
     }
 
     pub async fn apply_sql(&self, sql: &str) -> Result<()> {
+        if requires_fk_safe_rebuild(sql) {
+            self.apply_fk_safe_sql(sql, None).await?;
+            return Ok(());
+        }
         let mut tx = self.pool.begin().await?;
         for statement in executable_statements(sql) {
             sqlx::query(&statement).execute(&mut *tx).await?;
@@ -142,19 +159,28 @@ impl SqliteBackend {
                 continue;
             }
 
-            let mut tx = self.pool.begin().await?;
-            for statement in executable_statements(
-                std::str::from_utf8(&sql)
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-            ) {
-                sqlx::query(&statement).execute(&mut *tx).await?;
+            let sql = std::str::from_utf8(&sql)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            if requires_fk_safe_rebuild(sql) {
+                if self
+                    .apply_fk_safe_sql(sql, Some((&name, &checksum)))
+                    .await?
+                    == SafeMigrationResult::AlreadyApplied
+                {
+                    continue;
+                }
+            } else {
+                let mut tx = self.pool.begin().await?;
+                for statement in executable_statements(sql) {
+                    sqlx::query(&statement).execute(&mut *tx).await?;
+                }
+                sqlx::query("INSERT INTO _che_orm_migrations (name, checksum) VALUES (?1, ?2)")
+                    .bind(&name)
+                    .bind(&checksum)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
             }
-            sqlx::query("INSERT INTO _che_orm_migrations (name, checksum) VALUES (?1, ?2)")
-                .bind(&name)
-                .bind(&checksum)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
 
             applied.push(name);
         }
@@ -186,6 +212,96 @@ impl SqliteBackend {
         }
         Ok(())
     }
+
+    async fn apply_fk_safe_sql(
+        &self,
+        sql: &str,
+        migration: Option<(&str, &str)>,
+    ) -> Result<SafeMigrationResult> {
+        let mut connection = self.pool.acquire().await?;
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *connection)
+            .await?;
+
+        let result = async {
+            sqlx::query("BEGIN EXCLUSIVE")
+                .execute(&mut *connection)
+                .await?;
+            if let Some((name, checksum)) = migration {
+                let existing: Option<(i64, Option<String>)> =
+                    sqlx::query_as("SELECT id, checksum FROM _che_orm_migrations WHERE name = ?1")
+                        .bind(name)
+                        .fetch_optional(&mut *connection)
+                        .await?;
+                if let Some((id, stored_checksum)) = existing {
+                    if let Some(stored_checksum) = stored_checksum {
+                        if stored_checksum != checksum {
+                            return Err(Error::MigrationChecksumMismatch {
+                                name: name.to_string(),
+                                expected: stored_checksum,
+                                actual: checksum.to_string(),
+                            });
+                        }
+                    } else {
+                        sqlx::query("UPDATE _che_orm_migrations SET checksum = ?1 WHERE id = ?2")
+                            .bind(checksum)
+                            .bind(id)
+                            .execute(&mut *connection)
+                            .await?;
+                    }
+                    sqlx::query("COMMIT").execute(&mut *connection).await?;
+                    return Ok(SafeMigrationResult::AlreadyApplied);
+                }
+            }
+            for statement in executable_statements(sql) {
+                sqlx::query(&statement).execute(&mut *connection).await?;
+            }
+            if let Some((name, checksum)) = migration {
+                sqlx::query("INSERT INTO _che_orm_migrations (name, checksum) VALUES (?1, ?2)")
+                    .bind(name)
+                    .bind(checksum)
+                    .execute(&mut *connection)
+                    .await?;
+            }
+            let violations: Vec<(String, i64, String, i64)> =
+                sqlx::query_as("PRAGMA foreign_key_check")
+                    .fetch_all(&mut *connection)
+                    .await?;
+            if !violations.is_empty() {
+                return Err(Error::ForeignKeyCheckFailed(
+                    violations
+                        .iter()
+                        .map(|(table, rowid, parent, fk)| {
+                            format!("{table} row {rowid} references {parent} (fk {fk})")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ));
+            }
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            Ok(SafeMigrationResult::Applied)
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+        }
+        let restore = sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *connection)
+            .await;
+        if restore.is_err() {
+            let _ = connection.close().await;
+        }
+        match (result, restore) {
+            (Err(error), Err(restore)) => Err(Error::ForeignKeyRestoreFailed {
+                original: error.to_string(),
+                restore,
+            }),
+            (Err(error), Ok(_)) => Err(error),
+            (Ok(_), Err(error)) => Err(Error::ForeignKeyEnforcementRestoreFailed(error)),
+            (Ok(result), Ok(_)) => Ok(result),
+        }
+    }
 }
 
 fn migration_files(migrations_dir: &Path) -> Result<Vec<PathBuf>> {
@@ -206,6 +322,12 @@ fn migration_files(migrations_dir: &Path) -> Result<Vec<PathBuf>> {
 fn migration_checksum(sql: &[u8]) -> String {
     let digest = Sha256::digest(sql);
     format!("{digest:x}")
+}
+
+fn requires_fk_safe_rebuild(sql: &str) -> bool {
+    sql.lines()
+        .map(str::trim)
+        .any(|line| line == SQLITE_FK_REBUILD_DIRECTIVE)
 }
 
 fn executable_statements(sql: &str) -> Vec<String> {

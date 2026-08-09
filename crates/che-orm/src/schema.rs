@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{FieldType, Model, Result};
+use crate::{FieldType, ForeignKeyAction, Model, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Schema {
@@ -47,7 +47,8 @@ pub struct FieldSchema {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignKeySchema {
     pub table: String,
-    pub column: String,
+    #[serde(default)]
+    pub on_delete: ForeignKeyAction,
 }
 
 impl Schema {
@@ -111,7 +112,7 @@ impl ModelSchema {
                     auto_now: field.auto_now,
                     foreign_key: field.foreign_key.map(|foreign_key| ForeignKeySchema {
                         table: foreign_key.table.to_string(),
-                        column: foreign_key.column.to_string(),
+                        on_delete: foreign_key.on_delete,
                     }),
                     choices: field
                         .choices

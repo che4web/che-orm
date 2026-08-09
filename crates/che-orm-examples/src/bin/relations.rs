@@ -41,13 +41,13 @@ async fn main() -> che_orm::Result<()> {
         .execute()
         .await?;
 
-    let loaded_author = Post::objects(&db)
-        .get_related::<Author>(post.author_id)
-        .await?;
+    let loaded_author = PostRelations::AUTHOR.get(&db, post.author_id).await?;
     println!("post author: {loaded_author:?}");
 
-    let author_posts = Post::objects(&db)
-        .filter_by_i64("author_id", author.id)
+    let author_posts = PostRelations::AUTHOR
+        .reverse()
+        .query(&db, author.id)
+        .all()
         .await?;
     println!("author posts: {author_posts:?}");
 

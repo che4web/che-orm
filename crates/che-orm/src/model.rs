@@ -16,10 +16,21 @@ pub enum FieldType {
     FilePath,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ForeignKeyAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ForeignKeyInfo {
     pub table: &'static str,
-    pub column: &'static str,
+    pub on_delete: ForeignKeyAction,
 }
 
 #[derive(Debug, Clone, Copy)]

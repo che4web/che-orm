@@ -1,11 +1,15 @@
 use crate::{
-    Error, FieldSchema, FieldType, ForeignKeySchema, IndexSchema, Model, ModelSchema, Result,
-    Schema,
+    Error, FieldSchema, FieldType, ForeignKeyAction, ForeignKeySchema, IndexSchema, Model,
+    ModelSchema, Result, Schema,
 };
+use std::collections::{BTreeMap, BTreeSet};
+
+pub(crate) const SQLITE_FK_REBUILD_DIRECTIVE: &str = "-- che-orm: sqlite-fk-rebuild";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
     pub changes: Vec<SchemaChange>,
+    pub old_schema: Schema,
     pub schema: Schema,
 }
 
@@ -121,11 +125,13 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Migration {
 
     Migration {
         changes,
+        old_schema: old.clone(),
         schema: new.clone(),
     }
 }
 
 pub fn validate_migration(migration: &Migration) -> Result<()> {
+    validate_foreign_keys(&migration.schema)?;
     for change in &migration.changes {
         match change {
             SchemaChange::AddColumn { table, field }
@@ -150,24 +156,75 @@ pub fn validate_migration(migration: &Migration) -> Result<()> {
     Ok(())
 }
 
+fn validate_foreign_keys(schema: &Schema) -> Result<()> {
+    for model in &schema.models {
+        for field in &model.fields {
+            let Some(foreign_key) = &field.foreign_key else {
+                continue;
+            };
+            let target_model = schema
+                .models
+                .iter()
+                .find(|candidate| candidate.table == foreign_key.table)
+                .ok_or_else(|| {
+                    Error::UnsafeMigration(format!(
+                        "foreign key '{}.{}' references missing table '{}'",
+                        model.table, field.name, foreign_key.table
+                    ))
+                })?;
+            let target_field = target_model
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == "id")
+                .ok_or_else(|| {
+                    Error::UnsafeMigration(format!(
+                        "foreign key '{}.{}' references table '{}' without id primary key",
+                        model.table, field.name, foreign_key.table
+                    ))
+                })?;
+            if !target_field.primary_key || target_field.ty != FieldType::Integer {
+                return Err(Error::UnsafeMigration(format!(
+                    "foreign key '{}.{}' target '{}.id' must be an i64 primary key",
+                    model.table, field.name, foreign_key.table
+                )));
+            }
+            if foreign_key.on_delete == ForeignKeyAction::SetNull && !field.nullable {
+                return Err(Error::UnsafeMigration(format!(
+                    "foreign key '{}.{}' uses SET NULL but is not nullable",
+                    model.table, field.name
+                )));
+            }
+            if foreign_key.on_delete == ForeignKeyAction::SetDefault
+                && field.default.is_none()
+                && !field.auto_now
+                && !field.auto_now_add
+            {
+                return Err(Error::UnsafeMigration(format!(
+                    "foreign key '{}.{}' uses SET DEFAULT without a default",
+                    model.table, field.name
+                )));
+            }
+            if field.ty != FieldType::Integer {
+                return Err(Error::UnsafeMigration(format!(
+                    "foreign key '{}.{}' must be an INTEGER id reference to '{}'",
+                    model.table, field.name, foreign_key.table
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn requires_existing_value(field: &FieldSchema) -> bool {
     !field.nullable && !field.primary_key && !field.auto && !field.auto_now && !field.auto_now_add
 }
 
 pub fn sqlite_migration_sql(migration: &Migration) -> String {
+    let changes = ordered_changes(migration);
     let mut statements = Vec::new();
-    let mut rebuilt_tables = Vec::new();
+    let rebuilt_tables = rebuild_tables(&changes);
 
-    for change in &migration.changes {
-        if let SchemaChange::DropColumn { table, .. } | SchemaChange::AlterColumn { table, .. } =
-            change
-            && !rebuilt_tables.iter().any(|rebuilt| *rebuilt == table)
-        {
-            rebuilt_tables.push(table);
-        }
-    }
-
-    for change in &migration.changes {
+    for change in &changes {
         match change {
             SchemaChange::DropColumn { table, .. } | SchemaChange::AlterColumn { table, .. } => {
                 if let Some(model) = migration
@@ -179,23 +236,164 @@ pub fn sqlite_migration_sql(migration: &Migration) -> String {
                         statement.contains(&format!("__che_orm_new_{}", model.table))
                     })
                 {
-                    statements.push(rebuild_table_sql(model, &migration.changes));
+                    statements.push(rebuild_table_sql(model, &changes));
+                }
+            }
+            SchemaChange::AddColumn { table, field }
+                if field.foreign_key.is_some() && field.default.is_some() =>
+            {
+                if let Some(model) = migration
+                    .schema
+                    .models
+                    .iter()
+                    .find(|model| model.table == *table)
+                    && !statements.iter().any(|statement: &String| {
+                        statement.contains(&format!("__che_orm_new_{}", model.table))
+                    })
+                {
+                    statements.push(rebuild_table_sql(model, &changes));
                 }
             }
             SchemaChange::AddColumn { table, .. }
-                if rebuilt_tables.iter().any(|rebuilt| *rebuilt == table) => {}
+                if rebuilt_tables.iter().any(|rebuilt| rebuilt == table) => {}
             SchemaChange::CreateIndex { table, .. }
-                if rebuilt_tables.iter().any(|rebuilt| *rebuilt == table) => {}
+                if rebuilt_tables.iter().any(|rebuilt| rebuilt == table) => {}
             SchemaChange::DropIndex { table, .. }
-                if rebuilt_tables.iter().any(|rebuilt| *rebuilt == table) => {}
+                if rebuilt_tables.iter().any(|rebuilt| rebuilt == table) => {}
             _ => statements.push(sqlite_change_sql(change)),
         }
     }
 
-    statements.join("\n\n")
+    let sql = statements.join("\n\n");
+    if requires_fk_safe_rebuild(migration, &rebuilt_tables) {
+        format!("{SQLITE_FK_REBUILD_DIRECTIVE}\n{sql}")
+    } else {
+        sql
+    }
 }
 
-fn rebuild_table_sql(model: &ModelSchema, changes: &[SchemaChange]) -> String {
+fn rebuild_tables(changes: &[&SchemaChange]) -> Vec<String> {
+    let mut tables = Vec::new();
+    for change in changes {
+        let table = match *change {
+            SchemaChange::DropColumn { table, .. } | SchemaChange::AlterColumn { table, .. } => {
+                Some(table.clone())
+            }
+            SchemaChange::AddColumn { table, field }
+                if field.foreign_key.is_some() && field.default.is_some() =>
+            {
+                Some(table.clone())
+            }
+            _ => None,
+        };
+        if let Some(table) = table
+            && !tables.contains(&table)
+        {
+            tables.push(table);
+        }
+    }
+    tables
+}
+
+fn requires_fk_safe_rebuild(migration: &Migration, rebuilt_tables: &[String]) -> bool {
+    migration
+        .old_schema
+        .models
+        .iter()
+        .chain(migration.schema.models.iter())
+        .any(|model| {
+            model.fields.iter().any(|field| {
+                field
+                    .foreign_key
+                    .as_ref()
+                    .is_some_and(|foreign_key| rebuilt_tables.contains(&foreign_key.table))
+            })
+        })
+}
+
+fn ordered_changes<'a>(migration: &'a Migration) -> Vec<&'a SchemaChange> {
+    let mut dependencies = BTreeMap::<String, BTreeSet<String>>::new();
+    for model in migration
+        .old_schema
+        .models
+        .iter()
+        .chain(migration.schema.models.iter())
+    {
+        let parents = model
+            .fields
+            .iter()
+            .filter_map(|field| {
+                field
+                    .foreign_key
+                    .as_ref()
+                    .map(|foreign_key| foreign_key.table.clone())
+            })
+            .filter(|parent| parent != &model.table)
+            .collect::<BTreeSet<_>>();
+        dependencies
+            .entry(model.table.clone())
+            .or_default()
+            .extend(parents);
+    }
+
+    let mut order: Vec<String> = Vec::new();
+    while order.len() < dependencies.len() {
+        let next = dependencies
+            .iter()
+            .filter(|(table, parents)| {
+                !order.contains(table) && parents.iter().all(|parent| order.contains(parent))
+            })
+            .map(|(table, _)| table.clone())
+            .next();
+        let Some(table) = next else {
+            // Keep cyclic dependency output deterministic; SQLite permits cyclic FK declarations.
+            let remaining = dependencies
+                .keys()
+                .filter(|table| !order.contains(table))
+                .cloned()
+                .collect::<Vec<_>>();
+            order.extend(remaining);
+            break;
+        };
+        order.push(table);
+    }
+
+    let rank = |table: &str| {
+        order
+            .iter()
+            .position(|candidate| candidate == table)
+            .unwrap_or(usize::MAX)
+    };
+    let mut indexed = migration.changes.iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by_key(|(position, change)| {
+        let table = match change {
+            SchemaChange::CreateTable(model) => model.table.as_str(),
+            SchemaChange::DropTable { table }
+            | SchemaChange::AddColumn { table, .. }
+            | SchemaChange::DropColumn { table, .. }
+            | SchemaChange::AlterColumn { table, .. }
+            | SchemaChange::CreateIndex { table, .. }
+            | SchemaChange::DropIndex { table, .. } => table.as_str(),
+        };
+        let reverse = matches!(
+            change,
+            SchemaChange::DropTable { .. }
+                | SchemaChange::DropColumn { .. }
+                | SchemaChange::AlterColumn { .. }
+        );
+        (
+            if reverse {
+                usize::MAX - rank(table)
+            } else {
+                rank(table)
+            },
+            *position,
+        )
+    });
+    indexed.into_iter().map(|(_, change)| change).collect()
+}
+
+fn rebuild_table_sql(model: &ModelSchema, changes: &[&SchemaChange]) -> String {
     let temporary_table = format!("__che_orm_new_{}", model.table);
     let columns = model
         .fields
@@ -227,7 +425,7 @@ fn rebuild_table_sql(model: &ModelSchema, changes: &[SchemaChange]) -> String {
         .join("\n");
 
     format!(
-        "PRAGMA defer_foreign_keys = ON;\nCREATE TABLE {temporary} (\n    {columns}\n);\nINSERT INTO {temporary} ({copied}) SELECT {copied} FROM {table};\nDROP TABLE {table};\nALTER TABLE {temporary} RENAME TO {table};{indexes}",
+        "CREATE TABLE {temporary} (\n    {columns}\n);\nINSERT INTO {temporary} ({copied}) SELECT {copied} FROM {table};\nDROP TABLE {table};\nALTER TABLE {temporary} RENAME TO {table};{indexes}",
         temporary = quote_identifier(&temporary_table),
         columns = columns,
         copied = copied_columns,
@@ -355,10 +553,10 @@ fn column_parts(
         parts.push("DEFAULT CURRENT_TIMESTAMP".to_string());
     }
     if let Some(foreign_key) = foreign_key {
-        parts.push(format!(
-            "REFERENCES {}({})",
-            foreign_key.table, foreign_key.column
-        ));
+        parts.push(format!("REFERENCES {}(id)", foreign_key.table));
+        if foreign_key.on_delete != ForeignKeyAction::NoAction {
+            parts.push(format!("ON DELETE {}", action_sql(foreign_key.on_delete)));
+        }
     }
     if let Some(choices) = choices {
         let values = choices
@@ -373,6 +571,16 @@ fn column_parts(
     }
 
     parts.join(" ")
+}
+
+fn action_sql(action: ForeignKeyAction) -> &'static str {
+    match action {
+        ForeignKeyAction::NoAction => "NO ACTION",
+        ForeignKeyAction::Restrict => "RESTRICT",
+        ForeignKeyAction::Cascade => "CASCADE",
+        ForeignKeyAction::SetNull => "SET NULL",
+        ForeignKeyAction::SetDefault => "SET DEFAULT",
+    }
 }
 
 fn quote_identifier(identifier: &str) -> String {

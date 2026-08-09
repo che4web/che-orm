@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData};
 
 use sqlx::{
     Sqlite,
@@ -6,7 +6,11 @@ use sqlx::{
     sqlite::SqliteArguments,
 };
 
-use crate::{Error, Model, ModelField, Result, SqliteBackend, SqliteModel, SqliteValue};
+use crate::{
+    BelongsTo, Error, HasMany, Model, ModelField, Result, SqliteBackend, SqliteModel, SqliteValue,
+};
+
+const SQLITE_BIND_CHUNK_SIZE: usize = 900;
 
 pub trait QueryField<M> {
     fn db_name(&self) -> &str;
@@ -48,6 +52,36 @@ pub struct QueryBuilder<'db, M: Model> {
     limit: Option<u32>,
     offset: Option<u32>,
     _model: PhantomData<M>,
+}
+
+pub struct SelectRelatedQuery<'db, M: Model, R: Model> {
+    query: QueryBuilder<'db, M>,
+    relation: BelongsTo<M, R>,
+}
+
+pub struct PrefetchQuery<'db, M: Model, R: Model> {
+    query: QueryBuilder<'db, M>,
+    relation: HasMany<M, R>,
+}
+
+#[derive(Debug)]
+pub struct Prefetched<M, R> {
+    pub parents: Vec<M>,
+    related: HashMap<String, Vec<R>>,
+}
+
+impl<M: Model, R> Prefetched<M, R> {
+    pub fn related_for(&self, parent: &M) -> &[R] {
+        let key = parent
+            .get_value(
+                M::primary_key()
+                    .map(|field| field.db_name)
+                    .unwrap_or_default(),
+            )
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        self.related.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -264,6 +298,26 @@ where
             None => expression,
         });
         self
+    }
+
+    pub fn select_related<R>(self, relation: BelongsTo<M, R>) -> SelectRelatedQuery<'db, M, R>
+    where
+        R: Model,
+    {
+        SelectRelatedQuery {
+            query: self,
+            relation,
+        }
+    }
+
+    pub fn prefetch_related<R>(self, relation: HasMany<M, R>) -> PrefetchQuery<'db, M, R>
+    where
+        R: Model,
+    {
+        PrefetchQuery {
+            query: self,
+            relation,
+        }
     }
 
     pub fn order_by<F>(mut self, field: F) -> Self
@@ -488,6 +542,108 @@ where
             .await?;
         row.map(|row| M::from_row(&row).map_err(Into::into))
             .transpose()
+    }
+}
+
+impl<'db, M, R> SelectRelatedQuery<'db, M, R>
+where
+    M: SqliteModel,
+    R: SqliteModel + Clone,
+{
+    pub async fn all(self) -> Result<Vec<(M, Option<R>)>> {
+        let db = self.query.db;
+        let relation = self.relation;
+        relation.validate()?;
+        let parents = self.query.all().await?;
+        let mut values = Vec::new();
+        for parent in &parents {
+            if let Some(value) = parent.get_value(relation.source_field()) {
+                if let Some(value) = json_to_sqlite_value(value) {
+                    values.push(value);
+                }
+            }
+        }
+        let mut related = HashMap::new();
+        for chunk in values.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            for model in R::objects(db)
+                .query()
+                .filter(ModelField::<R>::new("id").in_values(chunk.iter().cloned()))
+                .all()
+                .await?
+            {
+                if let Some(value) = model.get_value("id") {
+                    related.insert(value.to_string(), model);
+                }
+            }
+        }
+        Ok(parents
+            .into_iter()
+            .map(|parent| {
+                let related = parent
+                    .get_value(relation.source_field())
+                    .and_then(|value| related.get(&value.to_string()).cloned());
+                (parent, related)
+            })
+            .collect())
+    }
+}
+
+impl<'db, M, R> PrefetchQuery<'db, M, R>
+where
+    M: SqliteModel,
+    R: SqliteModel,
+{
+    pub async fn all(self) -> Result<Prefetched<M, R>> {
+        let db = self.query.db;
+        let relation = self.relation;
+        relation.validate()?;
+        let parents = self.query.all().await?;
+        let mut parent_ids = Vec::new();
+        for parent in &parents {
+            if let Some(value) =
+                parent.get_value(M::primary_key().ok_or(Error::MissingPrimaryKey)?.db_name)
+            {
+                if let Some(value) = json_to_sqlite_value(value) {
+                    parent_ids.push(value);
+                }
+            }
+        }
+        let mut children = Vec::new();
+        for chunk in parent_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            children.extend(
+                R::objects(db)
+                    .query()
+                    .filter(
+                        ModelField::<R>::new(relation.child_field())
+                            .in_values(chunk.iter().cloned()),
+                    )
+                    .all()
+                    .await?,
+            );
+        }
+        let mut related = HashMap::new();
+        for child in children {
+            if let Some(value) = child.get_value(relation.child_field()) {
+                related
+                    .entry(value.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(child);
+            }
+        }
+        Ok(Prefetched { parents, related })
+    }
+}
+
+fn json_to_sqlite_value(value: crate::__private::serde_json::Value) -> Option<SqliteValue> {
+    match value {
+        crate::__private::serde_json::Value::Null => Some(SqliteValue::Null),
+        crate::__private::serde_json::Value::Bool(value) => Some(SqliteValue::Bool(value)),
+        crate::__private::serde_json::Value::String(value) => Some(SqliteValue::String(value)),
+        crate::__private::serde_json::Value::Number(value) => value
+            .as_i64()
+            .map(SqliteValue::I64)
+            .or_else(|| value.as_f64().map(SqliteValue::F64)),
+        _ => None,
     }
 }
 

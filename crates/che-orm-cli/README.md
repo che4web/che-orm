@@ -113,6 +113,15 @@ schemas. Before generating a migration, `makemigrations` rejects a new required
 column without a default and a nullable-to-required change without a default.
 Column and table renames are currently treated as remove/add operations.
 
+When a generated rebuild changes a table referenced by another table, the
+runtime uses a dedicated SQLite connection, temporarily disables FK checks,
+runs `PRAGMA foreign_key_check`, and restores enforcement before completing the
+migration. This prevents SQLite `ON DELETE` actions from mutating child rows
+during the temporary table drop.
+
+Run `migrate` from exactly one process at a time for a database. Concurrent
+migration runners are not supported.
+
 Use `status` to inspect migration files and their applied state:
 
 ```bash
@@ -135,3 +144,4 @@ cargo run -p che-orm-cli -- migrate --config app.toml
 - The CLI is SQLite-focused in the current MVP.
 - SQL execution is hidden behind the `che-orm` runtime API; application code does not need to call `sqlx` directly.
 - Keep generated migration files under version control.
+- Run `migrate` from one process at a time per database.

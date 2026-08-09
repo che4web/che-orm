@@ -36,12 +36,30 @@ pub enum Error {
     #[error("invalid aggregate field: {0}")]
     InvalidAggregateField(String),
 
+    #[error("invalid relation: {0}")]
+    InvalidRelation(String),
+
     #[error("migration checksum mismatch for {name}: expected {expected}, found {actual}")]
     MigrationChecksumMismatch {
         name: String,
         expected: String,
         actual: String,
     },
+
+    #[error("foreign key check failed: {0}")]
+    ForeignKeyCheckFailed(String),
+
+    #[error(
+        "migration failed ({original}) and foreign key enforcement could not be restored: {restore}"
+    )]
+    ForeignKeyRestoreFailed {
+        original: String,
+        #[source]
+        restore: sqlx::Error,
+    },
+
+    #[error("migration committed, but foreign key enforcement could not be restored: {0}")]
+    ForeignKeyEnforcementRestoreFailed(#[source] sqlx::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

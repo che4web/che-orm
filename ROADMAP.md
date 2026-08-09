@@ -30,10 +30,10 @@ Current baseline:
 
 ## 4. Relations
 
-- Add configurable `on_delete`, `on_update`, and foreign-key target columns.
-- Order migrations by foreign-key dependencies.
-- Add typed reverse lookups.
-- Add `select_related` and batched `prefetch_related`.
+- Add configurable `on_delete` for immutable `id: i64` foreign keys. (implemented)
+- Order migrations by foreign-key dependencies. (in progress)
+- Add static typed relation descriptors and reverse lookups. (implemented)
+- Add `select_related` and batched `prefetch_related`. (implemented)
 - Add many-to-many relations through explicit models.
 
 ## 5. Type-Safe Queries

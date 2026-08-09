@@ -109,12 +109,13 @@ struct Post {
 }
 ```
 
-`#[field(foreign_key = Author)]` generates schema metadata and SQLite `REFERENCES authors(id)`.
+`#[field(foreign_key = Author)]` generates schema metadata, static relation
+descriptors, and SQLite `REFERENCES authors(id)`.
 Create the referenced table before the table that contains the foreign key, or
 generate/apply migrations in dependency order.
 
 ```rust
-# use che_orm::{Model, SqliteBackend};
+# use che_orm::{HasMany, Model, SqliteBackend};
 # #[derive(Debug, Clone, Model)]
 # #[model(table = "authors")]
 # struct Author { #[field(primary_key)] id: i64, name: String }
@@ -138,19 +139,36 @@ let post = Post::objects(&db)
     .execute()
     .await?;
 
-let loaded_author = Post::objects(&db)
-    .get_related::<Author>(post.author_id)
+let loaded_author = PostRelations::AUTHOR
+    .get(&db, post.author_id)
     .await?;
-assert_eq!(loaded_author.name, "Alice");
+assert_eq!(loaded_author.unwrap().name, "Alice");
 
-let author_posts = Post::objects(&db)
-    .query()
-    .filter(PostFields::AUTHOR_ID.eq(author.id))
+let author_posts = PostRelations::AUTHOR.reverse()
+    .query(&db, author.id)
     .all()
     .await?;
 assert_eq!(author_posts.len(), 1);
 # Ok(())
 # }
+```
+
+For eager loading, use the generated descriptors. `select_related` loads a
+forward relation in a second batched query, while `prefetch_related` loads a
+reverse relation without an N+1 query:
+
+```rust
+let posts = Post::objects(&db)
+    .query()
+    .select_related(PostRelations::AUTHOR)
+    .all()
+    .await?;
+
+let authors = Author::objects(&db)
+    .query()
+    .prefetch_related(PostRelations::AUTHOR.reverse())
+    .all()
+    .await?;
 ```
 
 ## Queries
@@ -308,11 +326,15 @@ schema.save("che_orm_schema.json")?;
 ```
 
 The CLI uses this snapshot as the current schema input for `makemigrations`.
+Schema snapshots are tied to the current ORM schema format and are not backward-compatible.
 
 Schema diffs detect changes to field properties such as type, nullability,
 defaults, uniqueness, timestamps, foreign keys, choices, and `max_length`.
 SQLite table rebuilds are generated when a column must be altered or removed,
 and values in shared columns are preserved.
+When a rebuilt table has inbound foreign keys, the SQLite runner uses a
+dedicated connection with checks temporarily disabled, verifies the result with
+`PRAGMA foreign_key_check`, and restores foreign-key enforcement before return.
 
 `makemigrations` rejects a new required column without a default and a change
 from nullable to required without a default. Add a default or write a manual
@@ -345,6 +367,8 @@ let applied = db.apply_migrations_dir("migrations").await?;
 # }
 ```
 
+Run migration application from exactly one process at a time for a database.
+
 ## Supported Field Attributes
 
 - `#[field(primary_key)]`
@@ -357,6 +381,10 @@ let applied = db.apply_migrations_dir("migrations").await?;
 - `#[field(default = true)]`
 - `#[field(rename = "db_column")]`
 - `#[field(foreign_key = OtherModel)]`
+- `#[field(foreign_key = OtherModel, on_delete = Cascade)]`
+
+Foreign keys support `NoAction`, `Restrict`, `Cascade`, `SetNull`, and
+`SetDefault`. All foreign keys target the immutable `id: i64` primary key.
 
 ## Current Limitations
 
@@ -364,6 +392,8 @@ let applied = db.apply_migrations_dir("migrations").await?;
 - Query expressions support Django-style `filter`, `Q` composition, `IN`, NULL checks, ordering, pagination, and numeric aggregates.
 - Relations are minimal and currently use explicit FK ids.
 - Migration diff supports field-property changes, modeled indexes, and SQLite table rebuilds, but not rename detection or rollback migrations.
+- Schema snapshots are not backward-compatible between ORM schema format changes.
+- Run migrations from one process at a time per database.
 
 ## Examples
 

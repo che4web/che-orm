@@ -101,6 +101,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let update_name = format_ident!("{}Update", model_name);
     let fields_name = format_ident!("{}Fields", model_name);
+    let relations_name = format_ident!("{}Relations", model_name);
 
     let mut infos = Vec::new();
     let mut row_fields = Vec::new();
@@ -108,9 +109,12 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut update_values = Vec::new();
     let mut id_ty = None;
     let mut id_ident = None;
+    let mut primary_key_count = 0;
     let mut save_values = Vec::new();
     let mut value_arms = Vec::new();
     let mut field_constants = Vec::new();
+    let mut relation_constants = Vec::new();
+    let mut relation_names = Vec::new();
 
     for field in fields {
         let ident = field.ident.expect("named field");
@@ -135,6 +139,52 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let max_length = attrs.max_length;
         let default = attrs.default;
         let foreign_key = attrs.foreign_key;
+        let on_delete = attrs.on_delete;
+
+        if foreign_key.is_some() {
+            if !is_i64_or_option_i64(&ty) {
+                return Err(syn::Error::new_spanned(
+                    &ty,
+                    "foreign key fields must be i64 or Option<i64>",
+                ));
+            }
+            if matches!(on_delete.as_deref(), Some("SetNull")) && !is_option_i64(&ty) {
+                return Err(syn::Error::new_spanned(
+                    &ty,
+                    "SET NULL foreign keys must be Option<i64>",
+                ));
+            }
+            if matches!(on_delete.as_deref(), Some("SetDefault")) && default.is_none() {
+                return Err(syn::Error::new_spanned(
+                    &ident,
+                    "SET DEFAULT foreign keys require a default",
+                ));
+            }
+        } else if on_delete.is_some() {
+            return Err(syn::Error::new_spanned(
+                &ident,
+                "on_delete requires foreign_key",
+            ));
+        }
+
+        if let Some(foreign_model) = foreign_key.clone() {
+            let forward_name = rust_name
+                .strip_suffix("_id")
+                .unwrap_or(&rust_name)
+                .to_ascii_uppercase();
+            if relation_names.contains(&forward_name) {
+                return Err(syn::Error::new_spanned(
+                    &ident,
+                    format!("duplicate relation descriptor name: {forward_name}"),
+                ));
+            }
+            relation_names.push(forward_name.clone());
+            let forward_name = format_ident!("{forward_name}");
+            relation_constants.push(quote! {
+                pub const #forward_name: ::che_orm::BelongsTo<#model_name, #foreign_model> =
+                    ::che_orm::BelongsTo::new(#db_name);
+            });
+        }
         let auto_now_add = attrs.auto_now_add;
         let auto_now = attrs.auto_now;
 
@@ -163,6 +213,13 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
 
         if primary_key {
+            primary_key_count += 1;
+            if primary_key_count > 1 {
+                return Err(syn::Error::new_spanned(
+                    &ident,
+                    "Model must have exactly one primary_key field",
+                ));
+            }
             id_ty = Some(ty.clone());
             id_ident = Some(ident.clone());
         }
@@ -176,10 +233,13 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             None => quote!(None),
         };
         let foreign_key_tokens = match foreign_key {
-            Some(model) => quote!(Some(::che_orm::ForeignKeyInfo {
-                table: <#model as ::che_orm::Model>::table_name(),
-                column: "id",
-            })),
+            Some(model) => {
+                let on_delete = action_tokens(on_delete.as_deref(), "NoAction");
+                quote!(Some(::che_orm::ForeignKeyInfo {
+                    table: <#model as ::che_orm::Model>::table_name(),
+                    on_delete: #on_delete,
+                }))
+            }
             None => quote!(None),
         };
         let choices_tokens = match choice_type {
@@ -226,6 +286,15 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let id_ident = id_ident.ok_or_else(|| {
         syn::Error::new_spanned(&model_name, "Model requires #[field(primary_key)]")
     })?;
+    if primary_key_count != 1
+        || id_ident != syn::Ident::new("id", id_ident.span())
+        || !is_i64(&id_ty)
+    {
+        return Err(syn::Error::new_spanned(
+            &id_ident,
+            "the primary key must be an immutable id: i64 field",
+        ));
+    }
 
     Ok(quote! {
         #[derive(Debug, Clone, Default)]
@@ -237,6 +306,12 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         impl #fields_name {
             #(#field_constants)*
+        }
+
+        pub struct #relations_name;
+
+        impl #relations_name {
+            #(#relation_constants)*
         }
 
         impl ::che_orm::Model for #model_name {
@@ -305,6 +380,7 @@ struct FieldAttrs {
     default: Option<String>,
     rename: Option<String>,
     foreign_key: Option<Path>,
+    on_delete: Option<String>,
 }
 
 fn model_table_name(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
@@ -377,12 +453,32 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
                 let value = meta.value()?;
                 result.foreign_key = Some(value.parse()?);
                 Ok(())
+            } else if meta.path.is_ident("on_delete") {
+                let value: syn::Path = meta.value()?.parse()?;
+                let action = value
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .ok_or_else(|| meta.error("action must be an identifier"))?;
+                if !matches!(
+                    action.as_str(),
+                    "NoAction" | "Restrict" | "Cascade" | "SetNull" | "SetDefault"
+                ) {
+                    return Err(meta.error("unknown foreign key action"));
+                }
+                result.on_delete = Some(action);
+                Ok(())
             } else {
                 Err(meta.error("unsupported field attribute"))
             }
         })?;
     }
     Ok(result)
+}
+
+fn action_tokens(action: Option<&str>, default: &str) -> proc_macro2::TokenStream {
+    let action = syn::Ident::new(action.unwrap_or(default), proc_macro2::Span::call_site());
+    quote!(::che_orm::ForeignKeyAction::#action)
 }
 
 fn field_type(ty: &Type) -> syn::Result<proc_macro2::TokenStream> {
@@ -702,6 +798,14 @@ fn is_i64(ty: &Type) -> bool {
     is_type(ty, "i64")
 }
 
+fn is_option_i64(ty: &Type) -> bool {
+    option_inner(ty).is_some_and(is_i64)
+}
+
+fn is_i64_or_option_i64(ty: &Type) -> bool {
+    is_i64(ty) || is_option_i64(ty)
+}
+
 fn is_naive_datetime(ty: &Type) -> bool {
     is_type(ty, "NaiveDateTime")
 }
@@ -731,4 +835,60 @@ fn snake_case(input: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::parse_quote;
+
+    use super::expand_model;
+
+    #[test]
+    fn rejects_non_integer_foreign_key() {
+        let input = parse_quote! {
+            struct Post {
+                #[field(primary_key)] id: i64,
+                #[field(foreign_key = User)] user_id: String,
+            }
+        };
+        assert!(
+            expand_model(input)
+                .unwrap_err()
+                .to_string()
+                .contains("foreign key fields must be i64")
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_primary_keys() {
+        let input = parse_quote! {
+            struct Post {
+                #[field(primary_key)] id: i64,
+                #[field(primary_key)] other_id: i64,
+            }
+        };
+        assert!(
+            expand_model(input)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one primary_key")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_relation_descriptor_names() {
+        let input = parse_quote! {
+            struct Post {
+                #[field(primary_key)] id: i64,
+                #[field(foreign_key = User)] owner_id: i64,
+                #[field(foreign_key = User)] owner: i64,
+            }
+        };
+        assert!(
+            expand_model(input)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate relation descriptor name")
+        );
+    }
 }
