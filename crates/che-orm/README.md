@@ -81,48 +81,42 @@ The external API does not require application code to use `sqlx` directly. `sqlx
 
 ## Signals
 
-Register asynchronous handlers on a backend to observe successful model writes.
-`post_save` receives creates and updates, while `post_update` receives updates only:
+Subscribe to model events on a backend and process them in your own task:
 
 ```rust
-use che_orm::{
-    Model, PostSaveEvent, PostSaveHandler, PostUpdateEvent, PostUpdateHandler,
-    SignalError, SqliteBackend, async_trait,
-};
-
-struct SaveHandler;
-struct UpdateHandler;
-
-#[async_trait]
-impl PostSaveHandler for SaveHandler {
-    async fn handle(&self, event: PostSaveEvent) -> Result<(), SignalError> {
-        println!("saved {}: {}", event.table, event.object);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl PostUpdateHandler for UpdateHandler {
-    async fn handle(&self, event: PostUpdateEvent) -> Result<(), SignalError> {
-        println!("updated {}: {}", event.table, event.object);
-        Ok(())
-    }
-}
+use che_orm::{Model, ModelEvent, SqliteBackend};
 
 let db = SqliteBackend::connect("sqlite::memory:").await?;
-db.signals().post_save::<User>(SaveHandler);
-db.signals().post_update::<User>(UpdateHandler);
+let mut events = db.signals().subscribe::<User>();
+
+tokio::spawn(async move {
+    loop {
+        let event = match events.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
+        match event {
+            ModelEvent::PostSave(event) => {
+                println!("saved {}: {}", event.table, event.object);
+            }
+            ModelEvent::PostUpdate(event) => {
+                println!("updated {}: {}", event.table, event.object);
+            }
+        }
+    }
+});
 ```
 
-`post_save` runs after successful create and update operations; its `created` flag distinguishes
-them. `post_update` runs after each successful update. Handlers are registered per Rust model type,
-not merely per table name.
+`PostSave` is emitted after successful create and update operations; its `created` flag
+distinguishes them. `PostUpdate` is emitted after each successful update. Each `subscribe::<Model>()`
+receiver only receives events from its specified Rust model, including when multiple models map to
+the same table.
 
-Events are best-effort and at-most-once. They enter a bounded queue of 1024 events, and one Tokio
-dispatcher invokes handlers in FIFO order. CRUD calls do not wait for handlers. A slow handler can
-fill the queue; subsequent events are logged and dropped. Handler errors and panics are logged and
-do not affect an already committed write. Dropping the final `SqliteBackend` clone aborts its
-dispatcher and pending handler work.
+Events are best-effort and at-most-once. Each subscriber has a per-model bounded queue of 1024
+events. CRUD calls do not wait for subscribers. A subscriber that falls behind receives
+`tokio::sync::broadcast::error::RecvError::Lagged` and should decide whether to resync or continue.
+Dropping the final `SqliteBackend` clone closes all event receivers.
 
 Events contain the table name and a JSON snapshot of the saved model. Raw SQL and changes made
 outside this ORM do not emit signals.
