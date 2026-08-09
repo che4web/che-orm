@@ -39,6 +39,16 @@ enum Command {
         #[arg(long, default_value = "migrations")]
         migrations_dir: PathBuf,
     },
+    Status {
+        #[arg(long)]
+        database_url: Option<String>,
+
+        #[arg(long, default_value = "app.toml")]
+        config: PathBuf,
+
+        #[arg(long, default_value = "migrations")]
+        migrations_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -56,6 +66,11 @@ async fn main() -> Result<()> {
             config,
             migrations_dir,
         } => migrate(database_url, &config, &migrations_dir).await,
+        Command::Status {
+            database_url,
+            config,
+            migrations_dir,
+        } => status(database_url, &config, &migrations_dir).await,
     }
 }
 
@@ -107,6 +122,23 @@ async fn migrate(database_url: Option<String>, config: &Path, migrations_dir: &P
         println!("Applied {name}");
     }
 
+    Ok(())
+}
+
+async fn status(database_url: Option<String>, config: &Path, migrations_dir: &Path) -> Result<()> {
+    let database_url = match database_url {
+        Some(database_url) => database_url,
+        None => database_url_from_config(config)?,
+    };
+    let db = SqliteBackend::connect(&database_url).await?;
+    for migration in db.migration_status(migrations_dir).await? {
+        let state = if migration.applied {
+            "applied"
+        } else {
+            "pending"
+        };
+        println!("{state:7} {}", migration.name);
+    }
     Ok(())
 }
 

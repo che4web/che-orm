@@ -13,6 +13,16 @@ pub struct Schema {
 pub struct ModelSchema {
     pub table: String,
     pub fields: Vec<FieldSchema>,
+    #[serde(default)]
+    pub indexes: Vec<IndexSchema>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexSchema {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +116,15 @@ impl ModelSchema {
                     choices: field
                         .choices
                         .map(|choices| choices.iter().map(|choice| choice.to_string()).collect()),
+                })
+                .collect(),
+            indexes: M::fields()
+                .iter()
+                .filter(|field| field.index)
+                .map(|field| IndexSchema {
+                    name: format!("{}_{}_idx", M::table_name(), field.db_name),
+                    columns: vec![field.db_name.to_string()],
+                    unique: false,
                 })
                 .collect(),
         }

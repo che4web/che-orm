@@ -293,6 +293,63 @@ async fn applies_migration_files_without_exposing_sqlx() {
 }
 
 #[tokio::test]
+async fn migration_checksums_reject_modified_applied_files() {
+    let migrations_dir = std::env::temp_dir().join(format!(
+        "che_orm_checksum_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&migrations_dir).unwrap();
+    let migration_path = migrations_dir.join("0001_initial.sql");
+    std::fs::write(
+        &migration_path,
+        "CREATE TABLE checksum_test (id INTEGER PRIMARY KEY);",
+    )
+    .unwrap();
+
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.apply_migrations_dir(&migrations_dir).await.unwrap();
+    let status = db.migration_status(&migrations_dir).await.unwrap();
+    assert!(status[0].applied);
+    assert!(status[0].checksum.is_some());
+
+    std::fs::write(
+        &migration_path,
+        "CREATE TABLE checksum_test (id INTEGER PRIMARY KEY, value TEXT);",
+    )
+    .unwrap();
+    assert!(db.apply_migrations_dir(&migrations_dir).await.is_err());
+
+    std::fs::remove_dir_all(migrations_dir).unwrap();
+}
+
+#[tokio::test]
+async fn migration_sql_parser_handles_strings_and_triggers() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.apply_sql(
+        r#"
+        CREATE TABLE trigger_source (value TEXT);
+        CREATE TABLE trigger_log (value TEXT);
+        CREATE TRIGGER copy_trigger AFTER INSERT ON trigger_source FOR EACH ROW
+        BEGIN
+            INSERT INTO trigger_log(value) VALUES ('contains;semicolon');
+        END;
+        INSERT INTO trigger_source(value) VALUES ('source');
+        "#,
+    )
+    .await
+    .unwrap();
+
+    let value: String = sqlx::query_scalar("SELECT value FROM trigger_log")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(value, "contains;semicolon");
+}
+
+#[tokio::test]
 async fn update_fields_rejects_empty_and_readonly_updates() {
     let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
@@ -438,6 +495,48 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn update_one_returning_updates_only_the_first_match() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+
+    for name in ["first", "second"] {
+        User::objects(&db)
+            .create()
+            .set("email", format!("{name}@example.com"))
+            .set("name", name)
+            .set("is_active", true)
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    let updated = User::objects(&db)
+        .query()
+        .filter(UserFields::IS_ACTIVE.eq(true))
+        .order_by(UserFields::ID)
+        .update_one_returning([("name", "claimed")])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.id, 1);
+
+    let claimed = User::objects(&db)
+        .query()
+        .filter(UserFields::NAME.eq("claimed"))
+        .count()
+        .await
+        .unwrap();
+    let remaining = User::objects(&db)
+        .query()
+        .filter(UserFields::IS_ACTIVE.eq(true))
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(claimed, 1);
+    assert_eq!(remaining, 2);
 }
 
 #[tokio::test]

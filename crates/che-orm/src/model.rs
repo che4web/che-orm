@@ -31,6 +31,7 @@ pub struct FieldInfo {
     pub nullable: bool,
     pub auto: bool,
     pub unique: bool,
+    pub index: bool,
     pub max_length: Option<u32>,
     pub default: Option<&'static str>,
     pub auto_now_add: bool,

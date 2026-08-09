@@ -106,11 +106,21 @@ Currently supported:
 - new column -> `ALTER TABLE ... ADD COLUMN ...`
 - changed column properties -> SQLite table rebuild
 - removed column -> SQLite table rebuild
+- added/removed modeled indexes -> `CREATE INDEX` / `DROP INDEX`
 
 The generated rebuild preserves values in columns shared by the old and new
 schemas. Before generating a migration, `makemigrations` rejects a new required
 column without a default and a nullable-to-required change without a default.
 Column and table renames are currently treated as remove/add operations.
+
+Use `status` to inspect migration files and their applied state:
+
+```bash
+cargo run -p che-orm-cli -- status --config app.toml
+```
+
+Applied migration files are checksum-validated. Editing a migration after it
+has been applied causes `migrate` to fail instead of silently accepting drift.
 
 ## End-To-End Example
 

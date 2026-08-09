@@ -3,13 +3,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sha2::{Digest, Sha256};
+use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 
-use crate::{Model, Result, create_table_sql};
+use crate::{Error, Model, Result, create_table_sql};
 
 #[derive(Debug, Clone)]
 pub struct SqliteBackend {
     pool: SqlitePool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationStatus {
+    pub name: String,
+    pub applied: bool,
+    pub checksum: Option<String>,
 }
 
 impl SqliteBackend {
@@ -55,6 +63,37 @@ impl SqliteBackend {
             .await
     }
 
+    pub async fn migration_status(
+        &self,
+        migrations_dir: impl AsRef<Path>,
+    ) -> Result<Vec<MigrationStatus>> {
+        self.ensure_migrations_table().await?;
+        let applied: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT name, checksum FROM _che_orm_migrations ORDER BY name")
+                .fetch_all(&self.pool)
+                .await?;
+        let mut files = migration_files(migrations_dir.as_ref())?;
+        files.sort();
+        let mut statuses = Vec::new();
+        for path in files {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let checksum = migration_checksum(&fs::read(&path)?);
+            let stored = applied.iter().find(|(stored_name, _)| stored_name == &name);
+            statuses.push(MigrationStatus {
+                name,
+                applied: stored.is_some(),
+                checksum: stored
+                    .and_then(|(_, stored_checksum)| stored_checksum.clone())
+                    .or(Some(checksum)),
+            });
+        }
+        Ok(statuses)
+    }
+
     async fn apply_migrations_dir_inner(
         &self,
         namespace: Option<&str>,
@@ -76,23 +115,43 @@ impl SqliteBackend {
                 Some(namespace) => format!("{namespace}/{file_name}"),
                 None => file_name,
             };
-            let already_applied: Option<i64> =
-                sqlx::query_scalar("SELECT id FROM _che_orm_migrations WHERE name = ?1")
+            let sql = fs::read(&path)?;
+            let checksum = migration_checksum(&sql);
+            let existing: Option<(i64, Option<String>)> =
+                sqlx::query_as("SELECT id, checksum FROM _che_orm_migrations WHERE name = ?1")
                     .bind(&name)
                     .fetch_optional(&self.pool)
                     .await?;
 
-            if already_applied.is_some() {
+            if let Some((id, stored_checksum)) = existing {
+                if let Some(stored_checksum) = stored_checksum {
+                    if stored_checksum != checksum {
+                        return Err(Error::MigrationChecksumMismatch {
+                            name,
+                            expected: stored_checksum,
+                            actual: checksum,
+                        });
+                    }
+                } else {
+                    sqlx::query("UPDATE _che_orm_migrations SET checksum = ?1 WHERE id = ?2")
+                        .bind(&checksum)
+                        .bind(id)
+                        .execute(&self.pool)
+                        .await?;
+                }
                 continue;
             }
 
-            let sql = fs::read_to_string(&path)?;
             let mut tx = self.pool.begin().await?;
-            for statement in executable_statements(&sql) {
+            for statement in executable_statements(
+                std::str::from_utf8(&sql)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+            ) {
                 sqlx::query(&statement).execute(&mut *tx).await?;
             }
-            sqlx::query("INSERT INTO _che_orm_migrations (name) VALUES (?1)")
+            sqlx::query("INSERT INTO _che_orm_migrations (name, checksum) VALUES (?1, ?2)")
                 .bind(&name)
+                .bind(&checksum)
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -108,11 +167,23 @@ impl SqliteBackend {
             "CREATE TABLE IF NOT EXISTS _che_orm_migrations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                checksum TEXT,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );",
         )
         .execute(&self.pool)
         .await?;
+        let columns = sqlx::query("PRAGMA table_info(_che_orm_migrations)")
+            .fetch_all(&self.pool)
+            .await?;
+        if !columns
+            .iter()
+            .any(|column| column.get::<String, _>("name") == "checksum")
+        {
+            sqlx::query("ALTER TABLE _che_orm_migrations ADD COLUMN checksum TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 }
@@ -132,16 +203,91 @@ fn migration_files(migrations_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn migration_checksum(sql: &[u8]) -> String {
+    let digest = Sha256::digest(sql);
+    format!("{digest:x}")
+}
+
 fn executable_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
-        .filter(|statement| {
-            statement
-                .lines()
-                .map(str::trim)
-                .any(|line| !line.is_empty() && !line.starts_with("--"))
-        })
-        .map(str::to_string)
-        .collect()
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while let Some(ch) = chars.next() {
+        if line_comment {
+            current.push(ch);
+            if ch == '\n' {
+                line_comment = false;
+            }
+            continue;
+        }
+        if block_comment {
+            current.push(ch);
+            if ch == '*' && chars.peek() == Some(&'/') {
+                current.push(chars.next().unwrap());
+                block_comment = false;
+            }
+            continue;
+        }
+        if !single_quote && !double_quote && ch == '-' && chars.peek() == Some(&'-') {
+            current.push(ch);
+            current.push(chars.next().unwrap());
+            line_comment = true;
+            continue;
+        }
+        if !single_quote && !double_quote && ch == '/' && chars.peek() == Some(&'*') {
+            current.push(ch);
+            current.push(chars.next().unwrap());
+            block_comment = true;
+            continue;
+        }
+        if ch == '\'' && !double_quote {
+            if single_quote && chars.peek() == Some(&'\'') {
+                current.push(ch);
+                current.push(chars.next().unwrap());
+                continue;
+            }
+            single_quote = !single_quote;
+        } else if ch == '"' && !single_quote {
+            if double_quote && chars.peek() == Some(&'"') {
+                current.push(ch);
+                current.push(chars.next().unwrap());
+                continue;
+            }
+            double_quote = !double_quote;
+        }
+        if ch == ';' && !single_quote && !double_quote {
+            let trimmed = current.trim();
+            let upper = trimmed.to_ascii_uppercase();
+            if upper.contains("CREATE TRIGGER")
+                && upper.contains("BEGIN")
+                && !upper.ends_with("END")
+            {
+                current.push(ch);
+            } else {
+                push_statement(&mut statements, &mut current);
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    push_statement(&mut statements, &mut current);
+    statements
+}
+
+fn push_statement(statements: &mut Vec<String>, current: &mut String) {
+    let statement = current.trim();
+    if !statement.is_empty()
+        && statement
+            .lines()
+            .map(str::trim)
+            .any(|line| !line.is_empty() && !line.starts_with("--") && !line.starts_with("/*"))
+    {
+        statements.push(statement.to_string());
+    }
+    current.clear();
 }

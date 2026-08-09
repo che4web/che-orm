@@ -402,11 +402,27 @@ where
 
         let where_sql =
             append_where::<M>(self.predicate.as_ref(), &mut bindings, values.len() + 1)?;
+        let pk = M::primary_key().ok_or(Error::MissingPrimaryKey)?;
+        let ordering = if self.orderings.is_empty() {
+            vec![Ordering {
+                field: pk.db_name.to_string(),
+                descending: false,
+            }]
+        } else {
+            self.orderings
+        };
+        let order_sql = render_ordering::<M>(&ordering)?;
+        let subquery = format!(
+            "SELECT {pk} FROM {table}{where_sql} ORDER BY {order_sql} LIMIT 1",
+            pk = pk.db_name,
+            table = M::table_name(),
+        );
         let sql = format!(
-            "UPDATE {} SET {}{} RETURNING *",
+            "UPDATE {} SET {} WHERE {} = ({}) RETURNING *",
             M::table_name(),
             assignments.join(", "),
-            where_sql,
+            pk.db_name,
+            subquery,
         );
         let row = bind_values(sqlx::query(&sql), bindings)
             .fetch_optional(self.db.pool())

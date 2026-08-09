@@ -37,6 +37,15 @@ struct CurrentUser {
     name: String,
 }
 
+#[derive(Debug, Clone, Model)]
+#[model(table = "indexed_users")]
+struct IndexedUser {
+    #[field(primary_key)]
+    id: i64,
+    #[field(index)]
+    email: String,
+}
+
 #[test]
 fn diff_empty_schema_creates_table() {
     let old = Schema::empty();
@@ -54,10 +63,12 @@ fn diff_added_field_generates_add_column() {
     let old = Schema::from_models(vec![ModelSchema {
         table: "users".to_string(),
         fields: vec![id_field()],
+        indexes: Vec::new(),
     }]);
     let new = Schema::from_models(vec![ModelSchema {
         table: "users".to_string(),
         fields: vec![id_field(), email_field()],
+        indexes: Vec::new(),
     }]);
 
     let migration = diff_schemas(&old, &new);
@@ -76,10 +87,12 @@ fn diff_removed_field_generates_table_rebuild_sql() {
     let old = Schema::from_models(vec![ModelSchema {
         table: "users".to_string(),
         fields: vec![id_field(), email_field()],
+        indexes: Vec::new(),
     }]);
     let new = Schema::from_models(vec![ModelSchema {
         table: "users".to_string(),
         fields: vec![id_field()],
+        indexes: Vec::new(),
     }]);
 
     let migration = diff_schemas(&old, &new);
@@ -108,10 +121,12 @@ fn diff_changed_field_generates_alter_column() {
         &Schema::from_models(vec![ModelSchema {
             table: "users".to_string(),
             fields: vec![id_field(), old_email],
+            indexes: Vec::new(),
         }]),
         &Schema::from_models(vec![ModelSchema {
             table: "users".to_string(),
             fields: vec![id_field(), new_email],
+            indexes: Vec::new(),
         }]),
     );
 
@@ -134,6 +149,7 @@ fn unsafe_required_column_requires_default() {
         &Schema::from_models(vec![ModelSchema {
             table: "users".to_string(),
             fields: vec![id_field(), email_field(), is_admin_field()],
+            indexes: Vec::new(),
         }]),
     );
 
@@ -168,6 +184,43 @@ fn migration_sql_for_create_table() {
     assert!(sql.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"));
     assert!(sql.contains("email TEXT NOT NULL"));
     assert!(sql.contains("is_active BOOLEAN NOT NULL DEFAULT true"));
+}
+
+#[test]
+fn indexed_fields_generate_index_sql() {
+    let migration = diff_schemas(&Schema::empty(), &Schema::from_model::<IndexedUser>());
+    assert!(matches!(
+        migration.changes.as_slice(),
+        [SchemaChange::CreateTable(model)] if model.table == "indexed_users"
+    ));
+    let sql = sqlite_migration_sql(&migration);
+    assert!(sql.contains("CREATE INDEX IF NOT EXISTS \"indexed_users_email_idx\""));
+    assert!(sql.contains("ON \"indexed_users\" (\"email\")"));
+}
+
+#[test]
+fn index_changes_generate_create_index() {
+    let old = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), email_field()],
+        indexes: Vec::new(),
+    }]);
+    let new = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), email_field()],
+        indexes: vec![che_orm::IndexSchema {
+            name: "users_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+        }],
+    }]);
+    let migration = diff_schemas(&old, &new);
+    assert!(matches!(
+        migration.changes.as_slice(),
+        [SchemaChange::CreateIndex { table, index }]
+            if table == "users" && index.name == "users_email_idx"
+    ));
+    assert!(sqlite_migration_sql(&migration).contains("CREATE INDEX IF NOT EXISTS"));
 }
 
 #[tokio::test]
@@ -230,10 +283,12 @@ async fn migration_rebuilds_table_when_field_properties_change() {
         &Schema::from_models(vec![ModelSchema {
             table: "users".to_string(),
             fields: vec![id_field(), old_email],
+            indexes: Vec::new(),
         }]),
         &Schema::from_models(vec![ModelSchema {
             table: "users".to_string(),
             fields: vec![id_field(), new_email],
+            indexes: Vec::new(),
         }]),
     );
 

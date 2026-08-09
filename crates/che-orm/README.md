@@ -352,6 +352,7 @@ let applied = db.apply_migrations_dir("migrations").await?;
 - `#[field(auto_now_add)]`
 - `#[field(auto_now)]`
 - `#[field(unique)]`
+- `#[field(index)]`
 - `#[field(max_length = 255)]`
 - `#[field(default = true)]`
 - `#[field(rename = "db_column")]`
@@ -362,7 +363,7 @@ let applied = db.apply_migrations_dir("migrations").await?;
 - SQLite only.
 - Query expressions support Django-style `filter`, `Q` composition, `IN`, NULL checks, ordering, pagination, and numeric aggregates.
 - Relations are minimal and currently use explicit FK ids.
-- Migration diff supports field-property changes and SQLite table rebuilds, but not rename detection, custom indexes, or rollback migrations.
+- Migration diff supports field-property changes, modeled indexes, and SQLite table rebuilds, but not rename detection or rollback migrations.
 
 ## Examples
 

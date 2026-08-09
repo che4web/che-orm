@@ -131,6 +131,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let auto = attrs.auto || primary_key && is_i64(&ty);
         let nullable = is_option(&ty);
         let unique = attrs.unique;
+        let index = attrs.index;
         let max_length = attrs.max_length;
         let default = attrs.default;
         let foreign_key = attrs.foreign_key;
@@ -195,6 +196,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 nullable: #nullable,
                 auto: #auto,
                 unique: #unique,
+                index: #index,
                 max_length: #max_length_tokens,
                 default: #default_tokens,
                 auto_now_add: #auto_now_add,
@@ -298,6 +300,7 @@ struct FieldAttrs {
     auto_now_add: bool,
     auto_now: bool,
     unique: bool,
+    index: bool,
     max_length: Option<u32>,
     default: Option<String>,
     rename: Option<String>,
@@ -343,6 +346,9 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
                 Ok(())
             } else if meta.path.is_ident("unique") {
                 result.unique = true;
+                Ok(())
+            } else if meta.path.is_ident("index") {
+                result.index = true;
                 Ok(())
             } else if meta.path.is_ident("max_length") {
                 let value = meta.value()?;

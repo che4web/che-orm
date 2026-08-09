@@ -35,6 +35,13 @@ pub enum Error {
 
     #[error("invalid aggregate field: {0}")]
     InvalidAggregateField(String),
+
+    #[error("migration checksum mismatch for {name}: expected {expected}, found {actual}")]
+    MigrationChecksumMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

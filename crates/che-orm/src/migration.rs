@@ -1,4 +1,7 @@
-use crate::{Error, FieldSchema, FieldType, ForeignKeySchema, Model, ModelSchema, Result, Schema};
+use crate::{
+    Error, FieldSchema, FieldType, ForeignKeySchema, IndexSchema, Model, ModelSchema, Result,
+    Schema,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
@@ -24,6 +27,14 @@ pub enum SchemaChange {
         table: String,
         old: FieldSchema,
         new: FieldSchema,
+    },
+    CreateIndex {
+        table: String,
+        index: IndexSchema,
+    },
+    DropIndex {
+        table: String,
+        name: String,
     },
 }
 
@@ -74,6 +85,23 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Migration {
                 changes.push(SchemaChange::DropColumn {
                     table: old_model.table.clone(),
                     column: old_field.name.clone(),
+                });
+            }
+        }
+
+        for new_index in &new_model.indexes {
+            if !old_model.indexes.iter().any(|index| index == new_index) {
+                changes.push(SchemaChange::CreateIndex {
+                    table: new_model.table.clone(),
+                    index: new_index.clone(),
+                });
+            }
+        }
+        for old_index in &old_model.indexes {
+            if !new_model.indexes.iter().any(|index| index == old_index) {
+                changes.push(SchemaChange::DropIndex {
+                    table: old_model.table.clone(),
+                    name: old_index.name.clone(),
                 });
             }
         }
@@ -156,6 +184,10 @@ pub fn sqlite_migration_sql(migration: &Migration) -> String {
             }
             SchemaChange::AddColumn { table, .. }
                 if rebuilt_tables.iter().any(|rebuilt| *rebuilt == table) => {}
+            SchemaChange::CreateIndex { table, .. }
+                if rebuilt_tables.iter().any(|rebuilt| *rebuilt == table) => {}
+            SchemaChange::DropIndex { table, .. }
+                if rebuilt_tables.iter().any(|rebuilt| *rebuilt == table) => {}
             _ => statements.push(sqlite_change_sql(change)),
         }
     }
@@ -187,12 +219,24 @@ fn rebuild_table_sql(model: &ModelSchema, changes: &[SchemaChange]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
+    let indexes = model
+        .indexes
+        .iter()
+        .map(|index| index_sql(&model.table, index))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     format!(
-        "PRAGMA defer_foreign_keys = ON;\nCREATE TABLE {temporary} (\n    {columns}\n);\nINSERT INTO {temporary} ({copied}) SELECT {copied} FROM {table};\nDROP TABLE {table};\nALTER TABLE {temporary} RENAME TO {table};",
+        "PRAGMA defer_foreign_keys = ON;\nCREATE TABLE {temporary} (\n    {columns}\n);\nINSERT INTO {temporary} ({copied}) SELECT {copied} FROM {table};\nDROP TABLE {table};\nALTER TABLE {temporary} RENAME TO {table};{indexes}",
         temporary = quote_identifier(&temporary_table),
         columns = columns,
         copied = copied_columns,
         table = quote_identifier(&model.table),
+        indexes = if indexes.is_empty() {
+            String::new()
+        } else {
+            format!("\n{indexes}")
+        },
     )
 }
 
@@ -204,9 +248,21 @@ fn create_table_model_sql(model: &ModelSchema) -> String {
         .collect::<Vec<_>>()
         .join(",\n    ");
 
+    let indexes = model
+        .indexes
+        .iter()
+        .map(|index| index_sql(&model.table, index))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "CREATE TABLE IF NOT EXISTS {} (\n    {}\n);",
-        model.table, columns
+        "CREATE TABLE IF NOT EXISTS {} (\n    {}\n);{}",
+        model.table,
+        columns,
+        if indexes.is_empty() {
+            String::new()
+        } else {
+            format!("\n{indexes}")
+        }
     )
 }
 
@@ -220,10 +276,29 @@ fn sqlite_change_sql(change: &SchemaChange) -> String {
                 column_schema_sql(field)
             )
         }
+        SchemaChange::CreateIndex { table, index } => index_sql(table, index),
+        SchemaChange::DropIndex { name, .. } => {
+            format!("DROP INDEX IF EXISTS {};", quote_identifier(name))
+        }
         SchemaChange::DropColumn { .. } | SchemaChange::AlterColumn { .. } => {
             unreachable!("drop columns are handled by table rebuild")
         }
     }
+}
+
+fn index_sql(table: &str, index: &IndexSchema) -> String {
+    let unique = if index.unique { "UNIQUE " } else { "" };
+    let columns = index
+        .columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({columns});",
+        quote_identifier(&index.name),
+        quote_identifier(table),
+    )
 }
 
 fn column_schema_sql(field: &FieldSchema) -> String {

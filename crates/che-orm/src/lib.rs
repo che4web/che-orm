@@ -20,8 +20,8 @@ pub use migration::{
 pub use model::{
     Choice, FieldInfo, FieldType, ForeignKeyInfo, Model, ModelField, SqliteModel, SqliteValue,
 };
-pub use schema::{FieldSchema, ForeignKeySchema, ModelSchema, Schema};
-pub use sqlite::SqliteBackend;
+pub use schema::{FieldSchema, ForeignKeySchema, IndexSchema, ModelSchema, Schema};
+pub use sqlite::{MigrationStatus, SqliteBackend};
 
 #[doc(hidden)]
 pub mod __private {
