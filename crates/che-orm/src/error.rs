@@ -32,6 +32,9 @@ pub enum Error {
 
     #[error("unsafe migration: {0}")]
     UnsafeMigration(String),
+
+    #[error("invalid aggregate field: {0}")]
+    InvalidAggregateField(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -104,9 +104,13 @@ Currently supported:
 - new table -> `CREATE TABLE IF NOT EXISTS ...`
 - removed table -> `DROP TABLE IF EXISTS ...`
 - new column -> `ALTER TABLE ... ADD COLUMN ...`
-- removed column -> generated comment requiring manual review
+- changed column properties -> SQLite table rebuild
+- removed column -> SQLite table rebuild
 
-SQLite column drops are intentionally not executed automatically yet because safe support requires table rebuild logic.
+The generated rebuild preserves values in columns shared by the old and new
+schemas. Before generating a migration, `makemigrations` rejects a new required
+column without a default and a nullable-to-required change without a default.
+Column and table renames are currently treated as remove/add operations.
 
 ## End-To-End Example
 

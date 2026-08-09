@@ -1,6 +1,10 @@
 use std::marker::PhantomData;
 
-use sqlx::{Sqlite, query::Query, sqlite::SqliteArguments};
+use sqlx::{
+    Sqlite,
+    query::{Query, QueryScalar},
+    sqlite::SqliteArguments,
+};
 
 use crate::{Error, Model, ModelField, Result, SqliteBackend, SqliteModel, SqliteValue};
 
@@ -39,8 +43,8 @@ pub struct UpdateBuilder<'db, M: Model> {
 
 pub struct QueryBuilder<'db, M: Model> {
     db: &'db SqliteBackend,
-    filters: Vec<QueryFilter>,
-    ordering: Option<Ordering>,
+    predicate: Option<Q<M>>,
+    orderings: Vec<Ordering>,
     limit: Option<u32>,
     offset: Option<u32>,
     _model: PhantomData<M>,
@@ -56,10 +60,28 @@ enum QueryOperator {
     Lte,
 }
 
-struct QueryFilter {
-    field: String,
-    operator: QueryOperator,
-    value: SqliteValue,
+enum QNode {
+    Compare {
+        field: String,
+        operator: QueryOperator,
+        value: SqliteValue,
+    },
+    In {
+        field: String,
+        values: Vec<SqliteValue>,
+    },
+    IsNull {
+        field: String,
+        negated: bool,
+    },
+    And(Box<QNode>, Box<QNode>),
+    Or(Box<QNode>, Box<QNode>),
+    Not(Box<QNode>),
+}
+
+pub struct Q<M> {
+    node: QNode,
+    _model: PhantomData<M>,
 }
 
 struct Ordering {
@@ -89,8 +111,8 @@ where
     pub fn query(&self) -> QueryBuilder<'db, M> {
         QueryBuilder {
             db: self.db,
-            filters: Vec::new(),
-            ordering: None,
+            predicate: None,
+            orderings: Vec::new(),
             limit: None,
             offset: None,
             _model: PhantomData,
@@ -189,7 +211,7 @@ where
         F: QueryField<M>,
         V: Into<SqliteValue>,
     {
-        self.filter(field, QueryOperator::Eq, value)
+        self.filter(Q::compare(field, QueryOperator::Eq, value))
     }
 
     pub fn contains<F, V>(self, field: F, value: V) -> Self
@@ -197,7 +219,7 @@ where
         F: QueryField<M>,
         V: Into<SqliteValue>,
     {
-        self.filter(field, QueryOperator::Contains, value)
+        self.filter(Q::compare(field, QueryOperator::Contains, value))
     }
 
     pub fn gt<F, V>(self, field: F, value: V) -> Self
@@ -205,7 +227,7 @@ where
         F: QueryField<M>,
         V: Into<SqliteValue>,
     {
-        self.filter(field, QueryOperator::Gt, value)
+        self.filter(Q::compare(field, QueryOperator::Gt, value))
     }
 
     pub fn gte<F, V>(self, field: F, value: V) -> Self
@@ -213,7 +235,7 @@ where
         F: QueryField<M>,
         V: Into<SqliteValue>,
     {
-        self.filter(field, QueryOperator::Gte, value)
+        self.filter(Q::compare(field, QueryOperator::Gte, value))
     }
 
     pub fn lt<F, V>(self, field: F, value: V) -> Self
@@ -221,7 +243,7 @@ where
         F: QueryField<M>,
         V: Into<SqliteValue>,
     {
-        self.filter(field, QueryOperator::Lt, value)
+        self.filter(Q::compare(field, QueryOperator::Lt, value))
     }
 
     pub fn lte<F, V>(self, field: F, value: V) -> Self
@@ -229,7 +251,19 @@ where
         F: QueryField<M>,
         V: Into<SqliteValue>,
     {
-        self.filter(field, QueryOperator::Lte, value)
+        self.filter(Q::compare(field, QueryOperator::Lte, value))
+    }
+
+    pub fn filter<E>(mut self, expression: E) -> Self
+    where
+        E: Into<Q<M>>,
+    {
+        let expression = expression.into();
+        self.predicate = Some(match self.predicate.take() {
+            Some(existing) => existing.and(expression),
+            None => expression,
+        });
+        self
     }
 
     pub fn order_by<F>(mut self, field: F) -> Self
@@ -240,7 +274,7 @@ where
         let (descending, field) = field
             .strip_prefix('-')
             .map_or((false, field), |field| (true, field));
-        self.ordering = Some(Ordering {
+        self.orderings.push(Ordering {
             field: field.to_string(),
             descending,
         });
@@ -260,48 +294,9 @@ where
     pub async fn all(self) -> Result<Vec<M>> {
         let mut values = Vec::new();
         let mut sql = format!("SELECT * FROM {}", M::table_name());
-
-        if !self.filters.is_empty() {
-            let mut clauses = Vec::new();
-            for filter in self.filters {
-                let field = checked_field::<M>(&filter.field)?;
-                let placeholder = values.len() + 1;
-                let operator = match filter.operator {
-                    QueryOperator::Eq => "=",
-                    QueryOperator::Contains => "LIKE",
-                    QueryOperator::Gt => ">",
-                    QueryOperator::Gte => ">=",
-                    QueryOperator::Lt => "<",
-                    QueryOperator::Lte => "<=",
-                };
-                clauses.push(format!("{field} {operator} ?{placeholder}"));
-                values.push(match filter.operator {
-                    QueryOperator::Contains => contains_value(filter.value),
-                    _ => filter.value,
-                });
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&clauses.join(" AND "));
-        }
-
-        if let Some(ordering) = self.ordering {
-            let field = checked_field::<M>(&ordering.field)?;
-            let direction = if ordering.descending { "DESC" } else { "ASC" };
-            sql.push_str(&format!(" ORDER BY {field} {direction}"));
-        }
-
-        match (self.limit, self.offset) {
-            (Some(limit), Some(offset)) => {
-                sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
-            }
-            (Some(limit), None) => {
-                sql.push_str(&format!(" LIMIT {limit}"));
-            }
-            (None, Some(offset)) => {
-                sql.push_str(&format!(" LIMIT -1 OFFSET {offset}"));
-            }
-            (None, None) => {}
-        }
+        append_query_parts::<M>(&mut sql, self.predicate.as_ref(), &mut values)?;
+        append_ordering::<M>(&mut sql, &self.orderings)?;
+        append_pagination(&mut sql, self.limit, self.offset);
 
         let query = bind_values(sqlx::query(&sql), values);
         let rows = query.fetch_all(self.db.pool()).await?;
@@ -311,47 +306,70 @@ where
             .map_err(Into::into)
     }
 
+    pub async fn first(self) -> Result<Option<M>> {
+        let mut values = Vec::new();
+        let mut sql = format!("SELECT * FROM {}", M::table_name());
+        append_query_parts::<M>(&mut sql, self.predicate.as_ref(), &mut values)?;
+        append_ordering::<M>(&mut sql, &self.orderings)?;
+        append_pagination(&mut sql, Some(1), self.offset);
+        let row = bind_values(sqlx::query(&sql), values)
+            .fetch_optional(self.db.pool())
+            .await?;
+        row.map(|row| M::from_row(&row).map_err(Into::into))
+            .transpose()
+    }
+
     pub async fn count(self) -> Result<i64> {
         let mut values = Vec::new();
         let mut sql = format!("SELECT COUNT(*) FROM {}", M::table_name());
+        append_query_parts::<M>(&mut sql, self.predicate.as_ref(), &mut values)?;
+        Ok(bind_scalar_values(sqlx::query_scalar(&sql), values)
+            .fetch_one(self.db.pool())
+            .await?)
+    }
 
-        if !self.filters.is_empty() {
-            let mut clauses = Vec::new();
-            for filter in self.filters {
-                let field = checked_field::<M>(&filter.field)?;
-                let placeholder = values.len() + 1;
-                let operator = match filter.operator {
-                    QueryOperator::Eq => "=",
-                    QueryOperator::Contains => "LIKE",
-                    QueryOperator::Gt => ">",
-                    QueryOperator::Gte => ">=",
-                    QueryOperator::Lt => "<",
-                    QueryOperator::Lte => "<=",
-                };
-                clauses.push(format!("{field} {operator} ?{placeholder}"));
-                values.push(match filter.operator {
-                    QueryOperator::Contains => contains_value(filter.value),
-                    _ => filter.value,
-                });
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&clauses.join(" AND "));
-        }
+    pub async fn sum<F>(self, field: F) -> Result<Option<f64>>
+    where
+        F: QueryField<M>,
+    {
+        self.aggregate("SUM", field).await
+    }
 
-        let query = values
-            .into_iter()
-            .fold(sqlx::query_scalar(&sql), |query, value| match value {
-                SqliteValue::I64(value) => query.bind(value),
-                SqliteValue::String(value) => query.bind(value),
-                SqliteValue::Bool(value) => query.bind(value),
-                SqliteValue::F64(value) => query.bind(value),
-                SqliteValue::DateTime(value) => query.bind(value),
-                SqliteValue::Json(value) => query.bind(value.to_string()),
-                SqliteValue::Null => query.bind(Option::<i64>::None),
-            });
-        let count = query.fetch_one(self.db.pool()).await?;
+    pub async fn avg<F>(self, field: F) -> Result<Option<f64>>
+    where
+        F: QueryField<M>,
+    {
+        self.aggregate("AVG", field).await
+    }
 
-        Ok(count)
+    pub async fn min<F>(self, field: F) -> Result<Option<f64>>
+    where
+        F: QueryField<M>,
+    {
+        self.aggregate("MIN", field).await
+    }
+
+    pub async fn max<F>(self, field: F) -> Result<Option<f64>>
+    where
+        F: QueryField<M>,
+    {
+        self.aggregate("MAX", field).await
+    }
+
+    async fn aggregate<F>(self, function: &str, field: F) -> Result<Option<f64>>
+    where
+        F: QueryField<M>,
+    {
+        let field = checked_numeric_field::<M>(field.db_name())?;
+        let mut values = Vec::new();
+        let mut sql = format!(
+            "SELECT CAST({function}({field}) AS REAL) FROM {}",
+            M::table_name()
+        );
+        append_query_parts::<M>(&mut sql, self.predicate.as_ref(), &mut values)?;
+        Ok(bind_scalar_values(sqlx::query_scalar(&sql), values)
+            .fetch_one(self.db.pool())
+            .await?)
     }
 
     pub async fn update_one_returning<I, F, V>(self, updates: I) -> Result<Option<M>>
@@ -382,7 +400,8 @@ where
                 .map(|field| format!("{field} = CURRENT_TIMESTAMP")),
         );
 
-        let where_sql = append_where::<M>(&self.filters, &mut bindings, values.len() + 1)?;
+        let where_sql =
+            append_where::<M>(self.predicate.as_ref(), &mut bindings, values.len() + 1)?;
         let sql = format!(
             "UPDATE {} SET {}{} RETURNING *",
             M::table_name(),
@@ -425,20 +444,19 @@ where
                 .map(|field| format!("{field} = CURRENT_TIMESTAMP")),
         );
 
-        let order = self
-            .ordering
-            .as_ref()
-            .map_or(pk.db_name, |ordering| ordering.field.as_str());
-        let direction =
-            self.ordering.as_ref().map_or(
-                "ASC",
-                |ordering| {
-                    if ordering.descending { "DESC" } else { "ASC" }
-                },
-            );
-        let where_sql = append_where::<M>(&self.filters, &mut bindings, values.len() + 1)?;
+        let where_sql =
+            append_where::<M>(self.predicate.as_ref(), &mut bindings, values.len() + 1)?;
+        let ordering = if self.orderings.is_empty() {
+            vec![Ordering {
+                field: pk.db_name.to_string(),
+                descending: false,
+            }]
+        } else {
+            self.orderings
+        };
+        let order_sql = render_ordering::<M>(&ordering)?;
         let subquery = format!(
-            "SELECT {pk} FROM {table}{where_sql} ORDER BY {order} {direction} LIMIT 1",
+            "SELECT {pk} FROM {table}{where_sql} ORDER BY {order_sql} LIMIT 1",
             pk = pk.db_name,
             table = M::table_name(),
         );
@@ -455,19 +473,218 @@ where
         row.map(|row| M::from_row(&row).map_err(Into::into))
             .transpose()
     }
+}
 
-    fn filter<F, V>(mut self, field: F, operator: QueryOperator, value: V) -> Self
+impl<M> Q<M> {
+    fn compare<F, V>(field: F, operator: QueryOperator, value: V) -> Self
     where
         F: QueryField<M>,
         V: Into<SqliteValue>,
     {
-        self.filters.push(QueryFilter {
-            field: field.db_name().to_string(),
-            operator,
-            value: value.into(),
-        });
-        self
+        Self {
+            node: QNode::Compare {
+                field: field.db_name().to_string(),
+                operator,
+                value: value.into(),
+            },
+            _model: PhantomData,
+        }
     }
+
+    pub fn and(self, other: Self) -> Self {
+        Self::combine(QNode::And(Box::new(self.node), Box::new(other.node)))
+    }
+
+    pub fn or(self, other: Self) -> Self {
+        Self::combine(QNode::Or(Box::new(self.node), Box::new(other.node)))
+    }
+
+    pub fn not(self) -> Self {
+        Self::combine(QNode::Not(Box::new(self.node)))
+    }
+
+    fn combine(node: QNode) -> Self {
+        Self {
+            node,
+            _model: PhantomData,
+        }
+    }
+}
+
+impl<M> ModelField<M> {
+    pub fn eq<V>(self, value: V) -> Q<M>
+    where
+        V: Into<SqliteValue>,
+    {
+        Q::compare(self, QueryOperator::Eq, value)
+    }
+
+    pub fn contains<V>(self, value: V) -> Q<M>
+    where
+        V: Into<SqliteValue>,
+    {
+        Q::compare(self, QueryOperator::Contains, value)
+    }
+
+    pub fn gt<V>(self, value: V) -> Q<M>
+    where
+        V: Into<SqliteValue>,
+    {
+        Q::compare(self, QueryOperator::Gt, value)
+    }
+
+    pub fn gte<V>(self, value: V) -> Q<M>
+    where
+        V: Into<SqliteValue>,
+    {
+        Q::compare(self, QueryOperator::Gte, value)
+    }
+
+    pub fn lt<V>(self, value: V) -> Q<M>
+    where
+        V: Into<SqliteValue>,
+    {
+        Q::compare(self, QueryOperator::Lt, value)
+    }
+
+    pub fn lte<V>(self, value: V) -> Q<M>
+    where
+        V: Into<SqliteValue>,
+    {
+        Q::compare(self, QueryOperator::Lte, value)
+    }
+
+    pub fn in_values<I, V>(self, values: I) -> Q<M>
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<SqliteValue>,
+    {
+        Q::combine(QNode::In {
+            field: self.db_name().to_string(),
+            values: values.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    pub fn is_null(self) -> Q<M> {
+        Q::combine(QNode::IsNull {
+            field: self.db_name().to_string(),
+            negated: false,
+        })
+    }
+
+    pub fn is_not_null(self) -> Q<M> {
+        Q::combine(QNode::IsNull {
+            field: self.db_name().to_string(),
+            negated: true,
+        })
+    }
+}
+
+fn append_query_parts<M: Model>(
+    sql: &mut String,
+    predicate: Option<&Q<M>>,
+    values: &mut Vec<SqliteValue>,
+) -> Result<()> {
+    if let Some(predicate) = predicate {
+        sql.push_str(" WHERE ");
+        sql.push_str(&render_predicate::<M>(&predicate.node, values)?);
+    }
+    Ok(())
+}
+
+fn append_ordering<M: Model>(sql: &mut String, orderings: &[Ordering]) -> Result<()> {
+    if !orderings.is_empty() {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&render_ordering::<M>(orderings)?);
+    }
+    Ok(())
+}
+
+fn append_pagination(sql: &mut String, limit: Option<u32>, offset: Option<u32>) {
+    match (limit, offset) {
+        (Some(limit), Some(offset)) => sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}")),
+        (Some(limit), None) => sql.push_str(&format!(" LIMIT {limit}")),
+        (None, Some(offset)) => sql.push_str(&format!(" LIMIT -1 OFFSET {offset}")),
+        (None, None) => {}
+    }
+}
+
+fn render_ordering<M: Model>(orderings: &[Ordering]) -> Result<String> {
+    orderings
+        .iter()
+        .map(|ordering| {
+            let field = checked_field::<M>(&ordering.field)?;
+            let direction = if ordering.descending { "DESC" } else { "ASC" };
+            Ok(format!("{field} {direction}"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join(", "))
+}
+
+fn render_predicate<M: Model>(node: &QNode, values: &mut Vec<SqliteValue>) -> Result<String> {
+    match node {
+        QNode::Compare {
+            field,
+            operator,
+            value,
+        } => {
+            let field = checked_field::<M>(field)?;
+            let placeholder = values.len() + 1;
+            let operator = match operator {
+                QueryOperator::Eq => "=",
+                QueryOperator::Contains => "LIKE",
+                QueryOperator::Gt => ">",
+                QueryOperator::Gte => ">=",
+                QueryOperator::Lt => "<",
+                QueryOperator::Lte => "<=",
+            };
+            values.push(match operator {
+                "LIKE" => contains_value(value.clone()),
+                _ => value.clone(),
+            });
+            Ok(format!("{field} {operator} ?{placeholder}"))
+        }
+        QNode::In {
+            field,
+            values: in_values,
+        } => {
+            let field = checked_field::<M>(field)?;
+            if in_values.is_empty() {
+                return Ok("0".to_string());
+            }
+            let placeholders = in_values
+                .iter()
+                .map(|value| {
+                    values.push(value.clone());
+                    format!("?{}", values.len())
+                })
+                .collect::<Vec<_>>();
+            Ok(format!("{field} IN ({})", placeholders.join(", ")))
+        }
+        QNode::IsNull { field, negated } => {
+            let field = checked_field::<M>(field)?;
+            Ok(format!(
+                "{field} IS {}NULL",
+                if *negated { "NOT " } else { "" }
+            ))
+        }
+        QNode::And(left, right) => render_binary_predicate::<M>("AND", left, right, values),
+        QNode::Or(left, right) => render_binary_predicate::<M>("OR", left, right, values),
+        QNode::Not(node) => Ok(format!("NOT ({})", render_predicate::<M>(node, values)?)),
+    }
+}
+
+fn render_binary_predicate<M: Model>(
+    operator: &str,
+    left: &QNode,
+    right: &QNode,
+    values: &mut Vec<SqliteValue>,
+) -> Result<String> {
+    Ok(format!(
+        "({} {operator} {})",
+        render_predicate::<M>(left, values)?,
+        render_predicate::<M>(right, values)?
+    ))
 }
 
 fn contains_value(value: SqliteValue) -> SqliteValue {
@@ -491,31 +708,36 @@ where
 }
 
 fn append_where<M: Model>(
-    filters: &[QueryFilter],
+    predicate: Option<&Q<M>>,
     bindings: &mut Vec<SqliteValue>,
     start_index: usize,
 ) -> Result<String> {
-    if filters.is_empty() {
+    let Some(predicate) = predicate else {
         return Ok(String::new());
+    };
+    let mut local_bindings = Vec::new();
+    let sql = render_predicate::<M>(&predicate.node, &mut local_bindings)?;
+    bindings.extend(local_bindings);
+    let sql = shift_placeholders(&sql, start_index);
+    Ok(format!(" WHERE {sql}"))
+}
+
+fn shift_placeholders(sql: &str, start_index: usize) -> String {
+    let mut result = String::new();
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '?' {
+            let mut digits = String::new();
+            while chars.peek().is_some_and(char::is_ascii_digit) {
+                digits.push(chars.next().unwrap());
+            }
+            let index = digits.parse::<usize>().unwrap();
+            result.push_str(&format!("?{}", index + start_index - 1));
+        } else {
+            result.push(ch);
+        }
     }
-    let mut clauses = Vec::with_capacity(filters.len());
-    for (offset, filter) in filters.iter().enumerate() {
-        let field = checked_field::<M>(&filter.field)?;
-        let operator = match filter.operator {
-            QueryOperator::Eq => "=",
-            QueryOperator::Contains => "LIKE",
-            QueryOperator::Gt => ">",
-            QueryOperator::Gte => ">=",
-            QueryOperator::Lt => "<",
-            QueryOperator::Lte => "<=",
-        };
-        clauses.push(format!("{field} {operator} ?{}", start_index + offset));
-        bindings.push(match filter.operator {
-            QueryOperator::Contains => contains_value(filter.value.clone()),
-            _ => filter.value.clone(),
-        });
-    }
-    Ok(format!(" WHERE {}", clauses.join(" AND ")))
+    result
 }
 
 impl<'db, M> CreateBuilder<'db, M>
@@ -651,6 +873,17 @@ fn checked_field<M: Model>(field: &str) -> Result<&'static str> {
         .ok_or_else(|| Error::UnknownField(field.to_string()))
 }
 
+fn checked_numeric_field<M: Model>(field: &str) -> Result<&'static str> {
+    let info = M::fields()
+        .iter()
+        .find(|info| info.db_name == field || info.rust_name == field)
+        .ok_or_else(|| Error::UnknownField(field.to_string()))?;
+    if !matches!(info.ty, crate::FieldType::Integer | crate::FieldType::Real) {
+        return Err(Error::InvalidAggregateField(field.to_string()));
+    }
+    Ok(info.db_name)
+}
+
 fn checked_create_field<M: Model>(field: &str) -> Result<&'static str> {
     let info = M::fields()
         .iter()
@@ -701,6 +934,24 @@ fn bind_values<'q, I>(
     query: Query<'q, Sqlite, SqliteArguments<'q>>,
     values: I,
 ) -> Query<'q, Sqlite, SqliteArguments<'q>>
+where
+    I: IntoIterator<Item = SqliteValue>,
+{
+    values.into_iter().fold(query, |query, value| match value {
+        SqliteValue::I64(value) => query.bind(value),
+        SqliteValue::String(value) => query.bind(value),
+        SqliteValue::Bool(value) => query.bind(value),
+        SqliteValue::F64(value) => query.bind(value),
+        SqliteValue::DateTime(value) => query.bind(value),
+        SqliteValue::Json(value) => query.bind(value.to_string()),
+        SqliteValue::Null => query.bind(Option::<i64>::None),
+    })
+}
+
+fn bind_scalar_values<'q, T, I>(
+    query: QueryScalar<'q, Sqlite, T, SqliteArguments<'q>>,
+    values: I,
+) -> QueryScalar<'q, Sqlite, T, SqliteArguments<'q>>
 where
     I: IntoIterator<Item = SqliteValue>,
 {

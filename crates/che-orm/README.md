@@ -2,7 +2,7 @@
 
 `che-orm` is an experimental Rust ORM inspired by Django ORM.
 
-The current MVP focuses on SQLite, model derive macros, basic CRUD, schema metadata, migration SQL generation, and simple foreign-key relations.
+The current MVP focuses on SQLite, model derive macros, CRUD, Django-style queries, schema metadata, migration SQL generation, and simple foreign-key relations.
 
 ## Model Definition
 
@@ -29,8 +29,8 @@ struct User {
 
 - `impl Model for User`
 - `impl SqliteModel for User`
-- `UserCreate`
 - `UserUpdate` for low-level update calls
+- `UserFields` typed query fields
 - schema metadata used by migrations
 
 ## CRUD
@@ -51,11 +51,11 @@ let db = SqliteBackend::connect("sqlite::memory:").await?;
 db.create_table::<User>().await?;
 
 let user = User::objects(&db)
-    .create(UserCreate {
-        email: "alice@example.com".to_string(),
-        name: "Alice".to_string(),
-        is_active: true,
-    })
+    .create()
+    .set("email", "alice@example.com")
+    .set("name", "Alice")
+    .set("is_active", true)
+    .execute()
     .await?;
 
 let mut fetched = User::objects(&db).get(user.id).await?;
@@ -144,12 +144,68 @@ let loaded_author = Post::objects(&db)
 assert_eq!(loaded_author.name, "Alice");
 
 let author_posts = Post::objects(&db)
-    .filter_by_i64("author_id", author.id)
+    .query()
+    .filter(PostFields::AUTHOR_ID.eq(author.id))
+    .all()
     .await?;
 assert_eq!(author_posts.len(), 1);
 # Ok(())
 # }
 ```
+
+## Queries
+
+Use generated `ModelFields` constants with the Django-style query builder:
+
+```rust
+let users = User::objects(&db)
+    .query()
+    .filter(UserFields::IS_ACTIVE.eq(true))
+    .filter(UserFields::NAME.contains("Ali"))
+    .order_by("-name")
+    .order_by(UserFields::ID)
+    .limit(20)
+    .all()
+    .await?;
+```
+
+Repeated `filter` calls are combined with `AND`. Use `Q` for grouped boolean
+expressions:
+
+```rust
+use che_orm::Q;
+
+let user = User::objects(&db)
+    .query()
+    .filter(
+        Q::from(UserFields::NAME.contains("Ali"))
+            .or(UserFields::ID.in_values([1_i64, 2, 3]))
+            .and(UserFields::EMAIL.is_not_null()),
+    )
+    .first()
+    .await?;
+```
+
+Supported predicates include `eq`, `contains`, `gt`, `gte`, `lt`, `lte`,
+`in_values`, `is_null`, and `is_not_null`. An empty `in_values` list matches no
+rows. `first()` returns `Option<User>` and preserves ordering and offset.
+
+The query builder also supports `count()` and numeric aggregates:
+
+```rust
+let active_count = User::objects(&db)
+    .query()
+    .filter(UserFields::IS_ACTIVE.eq(true))
+    .count()
+    .await?;
+let highest_id = User::objects(&db)
+    .query()
+    .max(UserFields::ID)
+    .await?;
+```
+
+`sum`, `avg`, `min`, and `max` return `Option<f64>` and accept integer and
+real fields. An empty result returns `None`.
 
 For REST serializers, keep the foreign key id as a normal writable field and add
 a read-only related field when you want nested output:
@@ -253,6 +309,15 @@ schema.save("che_orm_schema.json")?;
 
 The CLI uses this snapshot as the current schema input for `makemigrations`.
 
+Schema diffs detect changes to field properties such as type, nullability,
+defaults, uniqueness, timestamps, foreign keys, choices, and `max_length`.
+SQLite table rebuilds are generated when a column must be altered or removed,
+and values in shared columns are preserved.
+
+`makemigrations` rejects a new required column without a default and a change
+from nullable to required without a default. Add a default or write a manual
+data migration before applying such a schema change.
+
 ## Migration API
 
 Create one table directly from a model:
@@ -295,10 +360,9 @@ let applied = db.apply_migrations_dir("migrations").await?;
 ## Current Limitations
 
 - SQLite only.
-- QuerySet-style filtering is not implemented yet.
+- Query expressions support Django-style `filter`, `Q` composition, `IN`, NULL checks, ordering, pagination, and numeric aggregates.
 - Relations are minimal and currently use explicit FK ids.
-- Migration diff supports create table, drop table, add column, and manual comments for dropped columns.
-- Rename detection and safe SQLite table rebuilds are not implemented yet.
+- Migration diff supports field-property changes and SQLite table rebuilds, but not rename detection, custom indexes, or rollback migrations.
 
 ## Examples
 

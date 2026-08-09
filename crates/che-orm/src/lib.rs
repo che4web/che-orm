@@ -12,7 +12,7 @@ pub mod sqlite;
 
 pub use error::{Error, Result};
 pub use files::{FilePath, FileStorage, LocalFileStorage};
-pub use manager::{ModelManager, QueryBuilder, QueryField, UpdateBuilder};
+pub use manager::{ModelManager, Q, QueryBuilder, QueryField, UpdateBuilder};
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, sqlite_migration_sql,
     validate_migration,

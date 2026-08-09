@@ -40,6 +40,29 @@ let user = user.save(&db).await?;
 # }
 ```
 
+## Query Example
+
+The generated `UserFields` constants support Django-style filters and `Q`
+expressions:
+
+```rust
+use che_orm::Q;
+
+let user = User::objects(&db)
+    .query()
+    .filter(UserFields::IS_ACTIVE.eq(true))
+    .filter(
+        Q::from(UserFields::NAME.contains("Ali"))
+            .or(UserFields::ID.in_values([1_i64, 2, 3])),
+    )
+    .order_by("-id")
+    .first()
+    .await?;
+```
+
+Queries also support NULL checks, pagination, multiple ordering expressions,
+`count`, and numeric `sum`/`avg`/`min`/`max` aggregates.
+
 ## Examples
 
 ```bash
@@ -63,6 +86,11 @@ cargo run -p che-orm-cli -- makemigrations --schema che_orm_schema.json --name i
 cargo run -p che-orm-cli -- migrate --database-url sqlite://example.sqlite
 ```
 
+Schema changes to field properties are detected. SQLite migrations rebuild a
+table when a column must be altered or removed, preserving shared column data.
+The CLI rejects required columns without defaults when existing rows may not be
+populated safely.
+
 ## Status
 
-This is an early MVP. SQLite CRUD, simple relations, schema snapshots, and migration SQL generation are implemented. QuerySet-style filtering and production-grade migration operations are still in progress.
+This is an early MVP. SQLite CRUD, Django-style query expressions, simple relations, schema snapshots, and migration SQL generation are implemented. Query joins, custom indexes, rename detection, and rollback migrations are still in progress.

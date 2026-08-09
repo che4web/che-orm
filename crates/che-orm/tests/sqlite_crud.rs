@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use che_orm::{Choice, Model, NaiveDateTime, SqliteBackend, SqliteValue, create_table_sql};
+use che_orm::{Choice, Model, NaiveDateTime, Q, SqliteBackend, SqliteValue, create_table_sql};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Model)]
@@ -59,6 +59,15 @@ struct JsonTask {
     metadata: Value,
 
     optional_metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Model)]
+#[model(table = "metrics")]
+struct Metric {
+    #[field(primary_key)]
+    id: i64,
+    score: Option<i64>,
+    value: f64,
 }
 
 #[tokio::test]
@@ -372,4 +381,128 @@ async fn query_builder_filters_orders_and_limits() {
 
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].name, "Alicia");
+}
+
+#[tokio::test]
+async fn query_supports_q_in_null_first_and_multiple_orderings() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+
+    for (email, name, is_active) in [
+        ("alice@example.com", "Alex", true),
+        ("bob@example.com", "Alex", false),
+        ("carol@example.com", "Carol", true),
+    ] {
+        User::objects(&db)
+            .create()
+            .set("email", email)
+            .set("name", name)
+            .set("is_active", is_active)
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    let users = User::objects(&db)
+        .query()
+        .filter(
+            Q::from(UserFields::NAME.eq("Alex"))
+                .or(UserFields::ID.in_values([3_i64]))
+                .and(UserFields::IS_ACTIVE.eq(true).not()),
+        )
+        .order_by("name")
+        .order_by("-id")
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        users.iter().map(|user| user.id).collect::<Vec<_>>(),
+        vec![2]
+    );
+
+    let first = User::objects(&db)
+        .query()
+        .filter(UserFields::ID.in_values([1_i64, 2]))
+        .order_by("-id")
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.id, 2);
+    assert!(
+        User::objects(&db)
+            .query()
+            .filter(UserFields::ID.in_values(Vec::<i64>::new()))
+            .first()
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn query_supports_null_predicates_and_numeric_aggregates() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<Metric>().await.unwrap();
+
+    for (score, value) in [(Some(10_i64), 1.5), (None, 2.5), (Some(30_i64), 3.5)] {
+        let mut create = Metric::objects(&db).create().set("value", value);
+        create = match score {
+            Some(score) => create.set("score", score),
+            None => create.set_null("score"),
+        };
+        create.execute().await.unwrap();
+    }
+
+    assert_eq!(
+        Metric::objects(&db)
+            .query()
+            .filter(MetricFields::SCORE.is_null())
+            .count()
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        Metric::objects(&db)
+            .query()
+            .filter(MetricFields::SCORE.is_not_null())
+            .sum(MetricFields::SCORE)
+            .await
+            .unwrap(),
+        Some(40.0)
+    );
+    assert_eq!(
+        Metric::objects(&db)
+            .query()
+            .avg(MetricFields::VALUE)
+            .await
+            .unwrap(),
+        Some(2.5)
+    );
+    assert_eq!(
+        Metric::objects(&db)
+            .query()
+            .min(MetricFields::VALUE)
+            .await
+            .unwrap(),
+        Some(1.5)
+    );
+    assert_eq!(
+        Metric::objects(&db)
+            .query()
+            .max(MetricFields::VALUE)
+            .await
+            .unwrap(),
+        Some(3.5)
+    );
+    assert_eq!(
+        Metric::objects(&db)
+            .query()
+            .filter(MetricFields::ID.gt(100_i64))
+            .sum(MetricFields::VALUE)
+            .await
+            .unwrap(),
+        None
+    );
 }
