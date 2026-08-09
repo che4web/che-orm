@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("file storage error: {0}")]
     Storage(String),
+
+    #[error("unsafe migration: {0}")]
+    UnsafeMigration(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

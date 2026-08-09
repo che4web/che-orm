@@ -7,7 +7,7 @@ use std::{
 
 use che_orm::{
     FieldSchema, FieldType, Model, ModelSchema, Schema, SchemaChange, diff_schemas,
-    sqlite_migration_sql,
+    sqlite_migration_sql, validate_migration,
 };
 
 #[derive(Debug, Clone, Model)]
@@ -97,6 +97,51 @@ fn diff_removed_field_generates_table_rebuild_sql() {
 }
 
 #[test]
+fn diff_changed_field_generates_alter_column() {
+    let mut old_email = email_field();
+    old_email.nullable = true;
+    let mut new_email = email_field();
+    new_email.unique = true;
+    new_email.max_length = Some(255);
+
+    let migration = diff_schemas(
+        &Schema::from_models(vec![ModelSchema {
+            table: "users".to_string(),
+            fields: vec![id_field(), old_email],
+        }]),
+        &Schema::from_models(vec![ModelSchema {
+            table: "users".to_string(),
+            fields: vec![id_field(), new_email],
+        }]),
+    );
+
+    assert!(matches!(
+        migration.changes.as_slice(),
+        [SchemaChange::AlterColumn { table, old, new }]
+            if table == "users" && old.nullable && new.unique
+    ));
+
+    let sql = sqlite_migration_sql(&migration);
+    assert!(sql.contains("CREATE TABLE \"__che_orm_new_users\""));
+    assert!(sql.contains("email TEXT NOT NULL UNIQUE"));
+    assert!(sql.contains("CHECK (length(email) <= 255)"));
+}
+
+#[test]
+fn unsafe_required_column_requires_default() {
+    let migration = diff_schemas(
+        &Schema::from_model::<User>(),
+        &Schema::from_models(vec![ModelSchema {
+            table: "users".to_string(),
+            fields: vec![id_field(), email_field(), is_admin_field()],
+        }]),
+    );
+
+    let error = validate_migration(&migration).unwrap_err();
+    assert!(error.to_string().contains("users.is_admin"));
+}
+
+#[test]
 fn schema_snapshot_roundtrip_json() {
     let schema = Schema::from_model::<User>();
     let path = std::env::temp_dir().join(format!(
@@ -164,6 +209,53 @@ async fn migration_rebuilds_table_when_column_is_removed() {
     fs::remove_dir_all(migrations_dir).unwrap();
 }
 
+#[tokio::test]
+async fn migration_rebuilds_table_when_field_properties_change() {
+    let db = che_orm::SqliteBackend::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db.apply_sql(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT);\
+         INSERT INTO users (email) VALUES ('old@example.com');",
+    )
+    .await
+    .unwrap();
+
+    let mut old_email = email_field();
+    old_email.nullable = true;
+    let mut new_email = email_field();
+    new_email.unique = true;
+    new_email.default = Some("'unknown@example.com'".to_string());
+    let migration = diff_schemas(
+        &Schema::from_models(vec![ModelSchema {
+            table: "users".to_string(),
+            fields: vec![id_field(), old_email],
+        }]),
+        &Schema::from_models(vec![ModelSchema {
+            table: "users".to_string(),
+            fields: vec![id_field(), new_email],
+        }]),
+    );
+
+    db.apply_sql(&sqlite_migration_sql(&migration))
+        .await
+        .unwrap();
+
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = 1")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(email, "old@example.com");
+
+    let nullable: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'email' AND \"notnull\" = 1",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(nullable, 1);
+}
+
 fn id_field() -> FieldSchema {
     FieldSchema {
         name: "id".to_string(),
@@ -185,6 +277,23 @@ fn email_field() -> FieldSchema {
     FieldSchema {
         name: "email".to_string(),
         ty: FieldType::Text,
+        primary_key: false,
+        nullable: false,
+        auto: false,
+        unique: false,
+        max_length: None,
+        default: None,
+        auto_now_add: false,
+        auto_now: false,
+        foreign_key: None,
+        choices: None,
+    }
+}
+
+fn is_admin_field() -> FieldSchema {
+    FieldSchema {
+        name: "is_admin".to_string(),
+        ty: FieldType::Boolean,
         primary_key: false,
         nullable: false,
         auto: false,

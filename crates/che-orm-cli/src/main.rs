@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use che_orm::{Result, Schema, SqliteBackend, diff_schemas, sqlite_migration_sql};
+use che_orm::{
+    Result, Schema, SqliteBackend, diff_schemas, sqlite_migration_sql, validate_migration,
+};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
@@ -74,6 +76,7 @@ fn makemigrations(schema_path: &Path, migrations_dir: &Path, name: &str) -> Resu
     let old_schema = Schema::load_or_empty(&snapshot_path)?;
     let new_schema = Schema::load(schema_path)?;
     let migration = diff_schemas(&old_schema, &new_schema);
+    validate_migration(&migration)?;
 
     if migration.changes.is_empty() {
         println!("No schema changes detected");

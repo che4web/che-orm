@@ -1,4 +1,4 @@
-use crate::{FieldSchema, FieldType, ForeignKeySchema, Model, ModelSchema, Schema};
+use crate::{Error, FieldSchema, FieldType, ForeignKeySchema, Model, ModelSchema, Result, Schema};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
@@ -9,9 +9,22 @@ pub struct Migration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaChange {
     CreateTable(ModelSchema),
-    DropTable { table: String },
-    AddColumn { table: String, field: FieldSchema },
-    DropColumn { table: String, column: String },
+    DropTable {
+        table: String,
+    },
+    AddColumn {
+        table: String,
+        field: FieldSchema,
+    },
+    DropColumn {
+        table: String,
+        column: String,
+    },
+    AlterColumn {
+        table: String,
+        old: FieldSchema,
+        new: FieldSchema,
+    },
 }
 
 pub fn create_table_sql<M: Model>() -> String {
@@ -32,15 +45,23 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Migration {
         };
 
         for new_field in &new_model.fields {
-            if !old_model
+            match old_model
                 .fields
                 .iter()
-                .any(|field| field.name == new_field.name)
+                .find(|field| field.name == new_field.name)
             {
-                changes.push(SchemaChange::AddColumn {
+                Some(old_field) if old_field != new_field => {
+                    changes.push(SchemaChange::AlterColumn {
+                        table: new_model.table.clone(),
+                        old: old_field.clone(),
+                        new: new_field.clone(),
+                    });
+                }
+                None => changes.push(SchemaChange::AddColumn {
                     table: new_model.table.clone(),
                     field: new_field.clone(),
-                });
+                }),
+                _ => {}
             }
         }
 
@@ -76,12 +97,42 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Migration {
     }
 }
 
+pub fn validate_migration(migration: &Migration) -> Result<()> {
+    for change in &migration.changes {
+        match change {
+            SchemaChange::AddColumn { table, field }
+                if requires_existing_value(field) && field.default.is_none() =>
+            {
+                return Err(Error::UnsafeMigration(format!(
+                    "adding required column '{}.{}' needs a default",
+                    table, field.name
+                )));
+            }
+            SchemaChange::AlterColumn { table, old, new }
+                if old.nullable && requires_existing_value(new) && new.default.is_none() =>
+            {
+                return Err(Error::UnsafeMigration(format!(
+                    "making column '{}.{}' required needs a default",
+                    table, new.name
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn requires_existing_value(field: &FieldSchema) -> bool {
+    !field.nullable && !field.primary_key && !field.auto && !field.auto_now && !field.auto_now_add
+}
+
 pub fn sqlite_migration_sql(migration: &Migration) -> String {
     let mut statements = Vec::new();
     let mut rebuilt_tables = Vec::new();
 
     for change in &migration.changes {
-        if let SchemaChange::DropColumn { table, .. } = change
+        if let SchemaChange::DropColumn { table, .. } | SchemaChange::AlterColumn { table, .. } =
+            change
             && !rebuilt_tables.iter().any(|rebuilt| *rebuilt == table)
         {
             rebuilt_tables.push(table);
@@ -90,7 +141,7 @@ pub fn sqlite_migration_sql(migration: &Migration) -> String {
 
     for change in &migration.changes {
         match change {
-            SchemaChange::DropColumn { table, .. } => {
+            SchemaChange::DropColumn { table, .. } | SchemaChange::AlterColumn { table, .. } => {
                 if let Some(model) = migration
                     .schema
                     .models
@@ -169,7 +220,7 @@ fn sqlite_change_sql(change: &SchemaChange) -> String {
                 column_schema_sql(field)
             )
         }
-        SchemaChange::DropColumn { .. } => {
+        SchemaChange::DropColumn { .. } | SchemaChange::AlterColumn { .. } => {
             unreachable!("drop columns are handled by table rebuild")
         }
     }
@@ -188,6 +239,7 @@ fn column_schema_sql(field: &FieldSchema) -> String {
         field.auto_now,
         field.foreign_key.as_ref(),
         field.choices.as_deref(),
+        field.max_length,
     )
 }
 
@@ -203,6 +255,7 @@ fn column_parts(
     auto_now: bool,
     foreign_key: Option<&ForeignKeySchema>,
     choices: Option<&[String]>,
+    max_length: Option<u32>,
 ) -> String {
     let mut parts = vec![name.to_string()];
 
@@ -239,6 +292,9 @@ fn column_parts(
             .collect::<Vec<_>>()
             .join(", ");
         parts.push(format!("CHECK ({name} IN ({values}))"));
+    }
+    if let Some(max_length) = max_length {
+        parts.push(format!("CHECK (length({name}) <= {max_length})"));
     }
 
     parts.join(" ")

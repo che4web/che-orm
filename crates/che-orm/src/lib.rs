@@ -15,6 +15,7 @@ pub use files::{FilePath, FileStorage, LocalFileStorage};
 pub use manager::{ModelManager, QueryBuilder, QueryField, UpdateBuilder};
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, sqlite_migration_sql,
+    validate_migration,
 };
 pub use model::{
     Choice, FieldInfo, FieldType, ForeignKeyInfo, Model, ModelField, SqliteModel, SqliteValue,
