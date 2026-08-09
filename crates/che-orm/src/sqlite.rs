@@ -6,11 +6,14 @@ use std::{
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 
-use crate::{Error, Model, Result, create_table_sql, migration::SQLITE_FK_REBUILD_DIRECTIVE};
+use crate::{
+    Error, Model, Result, Signals, create_table_sql, migration::SQLITE_FK_REBUILD_DIRECTIVE,
+};
 
 #[derive(Debug, Clone)]
 pub struct SqliteBackend {
     pool: SqlitePool,
+    signals: Signals,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,11 +42,18 @@ impl SqliteBackend {
             })
             .connect(url)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            signals: Signals::new(),
+        })
     }
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub fn signals(&self) -> &Signals {
+        &self.signals
     }
 
     pub async fn create_table<M: Model>(&self) -> Result<()> {

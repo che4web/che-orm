@@ -79,6 +79,54 @@ User::objects(&db).delete(user.id).await?;
 
 The external API does not require application code to use `sqlx` directly. `sqlx` is currently an internal SQLite implementation detail.
 
+## Signals
+
+Register asynchronous handlers on a backend to observe successful model writes.
+`post_save` receives creates and updates, while `post_update` receives updates only:
+
+```rust
+use che_orm::{
+    Model, PostSaveEvent, PostSaveHandler, PostUpdateEvent, PostUpdateHandler,
+    SignalError, SqliteBackend, async_trait,
+};
+
+struct SaveHandler;
+struct UpdateHandler;
+
+#[async_trait]
+impl PostSaveHandler for SaveHandler {
+    async fn handle(&self, event: PostSaveEvent) -> Result<(), SignalError> {
+        println!("saved {}: {}", event.table, event.object);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PostUpdateHandler for UpdateHandler {
+    async fn handle(&self, event: PostUpdateEvent) -> Result<(), SignalError> {
+        println!("updated {}: {}", event.table, event.object);
+        Ok(())
+    }
+}
+
+let db = SqliteBackend::connect("sqlite::memory:").await?;
+db.signals().post_save::<User>(SaveHandler);
+db.signals().post_update::<User>(UpdateHandler);
+```
+
+`post_save` runs after successful create and update operations; its `created` flag distinguishes
+them. `post_update` runs after each successful update. Handlers are registered per Rust model type,
+not merely per table name.
+
+Events are best-effort and at-most-once. They enter a bounded queue of 1024 events, and one Tokio
+dispatcher invokes handlers in FIFO order. CRUD calls do not wait for handlers. A slow handler can
+fill the queue; subsequent events are logged and dropped. Handler errors and panics are logged and
+do not affect an already committed write. Dropping the final `SqliteBackend` clone aborts its
+dispatcher and pending handler work.
+
+Events contain the table name and a JSON snapshot of the saved model. Raw SQL and changes made
+outside this ORM do not emit signals.
+
 ## Relations
 
 Use `#[field(foreign_key = OtherModel)]` on an integer id field to declare a

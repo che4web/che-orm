@@ -11,13 +11,14 @@ keywords = ["orm", "sqlite", "database", "migrations", "django"]
 categories = ["database"]
 
 [dependencies]
+async-trait.workspace = true
 che-orm-macros.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
 tokio.workspace = true
+tracing.workspace = true

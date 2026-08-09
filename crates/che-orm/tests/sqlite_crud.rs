@@ -1,7 +1,12 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use che_orm::{Choice, Model, NaiveDateTime, Q, SqliteBackend, SqliteValue, create_table_sql};
+use async_trait::async_trait;
+use che_orm::{
+    Choice, Model, NaiveDateTime, PostSaveEvent, PostSaveHandler, PostUpdateEvent,
+    PostUpdateHandler, Q, SignalError, SqliteBackend, SqliteValue, create_table_sql,
+};
 use serde_json::{Value, json};
+use tokio::{sync::mpsc, time::timeout};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "users")]
@@ -68,6 +73,138 @@ struct Metric {
     id: i64,
     score: Option<i64>,
     value: f64,
+}
+
+struct CapturePostSave(mpsc::UnboundedSender<PostSaveEvent>);
+
+#[async_trait]
+impl PostSaveHandler for CapturePostSave {
+    async fn handle(&self, event: PostSaveEvent) -> Result<(), SignalError> {
+        self.0.send(event).unwrap();
+        Ok(())
+    }
+}
+
+struct CapturePostUpdate(mpsc::UnboundedSender<PostUpdateEvent>);
+
+#[async_trait]
+impl PostUpdateHandler for CapturePostUpdate {
+    async fn handle(&self, event: PostUpdateEvent) -> Result<(), SignalError> {
+        self.0.send(event).unwrap();
+        Ok(())
+    }
+}
+
+struct BlockingPostSave;
+
+#[async_trait]
+impl PostSaveHandler for BlockingPostSave {
+    async fn handle(&self, _event: PostSaveEvent) -> Result<(), SignalError> {
+        std::future::pending().await
+    }
+}
+
+struct FailingPostSave;
+
+#[async_trait]
+impl PostSaveHandler for FailingPostSave {
+    async fn handle(&self, _event: PostSaveEvent) -> Result<(), SignalError> {
+        Err("expected handler failure".into())
+    }
+}
+
+struct PanickingPostSave;
+
+#[async_trait]
+impl PostSaveHandler for PanickingPostSave {
+    async fn handle(&self, _event: PostSaveEvent) -> Result<(), SignalError> {
+        panic!("expected handler panic");
+    }
+}
+
+#[tokio::test]
+async fn post_save_and_post_update_signals_receive_snapshots() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+    let (post_save_sender, mut post_save_events) = mpsc::unbounded_channel();
+    let (post_update_sender, mut post_update_events) = mpsc::unbounded_channel();
+    db.signals()
+        .post_save::<User>(CapturePostSave(post_save_sender));
+    db.signals()
+        .post_update::<User>(CapturePostUpdate(post_update_sender));
+
+    let user = User::objects(&db)
+        .create()
+        .set("email", "signals@example.com")
+        .set("name", "Before")
+        .execute()
+        .await
+        .unwrap();
+    User::objects(&db)
+        .update_fields(user.id)
+        .set("name", "After")
+        .execute()
+        .await
+        .unwrap();
+
+    let first = timeout(Duration::from_secs(1), post_save_events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = timeout(Duration::from_secs(1), post_save_events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first.created);
+    assert_eq!(first.object["name"], "Before");
+    assert!(!second.created);
+    assert_eq!(second.object["name"], "After");
+
+    let update = timeout(Duration::from_secs(1), post_update_events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(update.object["name"], "After");
+}
+
+#[tokio::test]
+async fn signal_handlers_do_not_block_writes() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+    db.signals().post_save::<User>(BlockingPostSave);
+
+    let user = User::objects(&db)
+        .create()
+        .set("email", "nonblocking@example.com")
+        .set("name", "Nonblocking")
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(user.name, "Nonblocking");
+}
+
+#[tokio::test]
+async fn signal_handler_failures_do_not_stop_following_handlers() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+    let (sender, mut events) = mpsc::unbounded_channel();
+    db.signals().post_save::<User>(FailingPostSave);
+    db.signals().post_save::<User>(PanickingPostSave);
+    db.signals().post_save::<User>(CapturePostSave(sender));
+
+    User::objects(&db)
+        .create()
+        .set("email", "failure-isolation@example.com")
+        .set("name", "Failure isolation")
+        .execute()
+        .await
+        .unwrap();
+
+    let event = timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.object["name"], "Failure isolation");
 }
 
 #[tokio::test]

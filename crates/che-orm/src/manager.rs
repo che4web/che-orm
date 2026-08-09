@@ -8,6 +8,7 @@ use sqlx::{
 
 use crate::{
     BelongsTo, Error, HasMany, Model, ModelField, Result, SqliteBackend, SqliteModel, SqliteValue,
+    signals::{PostSaveEvent, PostUpdateEvent, snapshot},
 };
 
 const SQLITE_BIND_CHUNK_SIZE: usize = 900;
@@ -481,8 +482,12 @@ where
         let row = bind_values(sqlx::query(&sql), bindings)
             .fetch_optional(self.db.pool())
             .await?;
-        row.map(|row| M::from_row(&row).map_err(Into::into))
-            .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let model = M::from_row(&row)?;
+        dispatch_post_update(self.db, &model);
+        Ok(Some(model))
     }
 
     pub async fn claim_next_returning<I, F, V>(self, updates: I) -> Result<Option<M>>
@@ -540,8 +545,12 @@ where
         let row = bind_values(sqlx::query(&sql), bindings)
             .fetch_optional(self.db.pool())
             .await?;
-        row.map(|row| M::from_row(&row).map_err(Into::into))
-            .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let model = M::from_row(&row)?;
+        dispatch_post_update(self.db, &model);
+        Ok(Some(model))
     }
 }
 
@@ -934,7 +943,9 @@ where
         if self.values.is_empty() && timestamp_fields.is_empty() {
             let sql = format!("INSERT INTO {} DEFAULT VALUES RETURNING *", M::table_name());
             let row = sqlx::query(&sql).fetch_one(self.db.pool()).await?;
-            return Ok(M::from_row(&row)?);
+            let model = M::from_row(&row)?;
+            dispatch_post_save(self.db, &model, true);
+            return Ok(model);
         }
 
         let mut values = Vec::with_capacity(self.values.len());
@@ -961,7 +972,9 @@ where
             values.into_iter().map(|(_, value)| value),
         );
         let row = query.fetch_one(self.db.pool()).await?;
-        Ok(M::from_row(&row)?)
+        let model = M::from_row(&row)?;
+        dispatch_post_save(self.db, &model, true);
+        Ok(model)
     }
 }
 
@@ -1034,7 +1047,30 @@ where
     )
     .bind(id);
     let row = query.fetch_one(db.pool()).await?;
-    Ok(M::from_row(&row)?)
+    let model = M::from_row(&row)?;
+    dispatch_post_update(db, &model);
+    Ok(model)
+}
+
+fn dispatch_post_save<M: Model>(db: &SqliteBackend, model: &M, created: bool) {
+    db.signals().dispatch_post_save::<M>(PostSaveEvent {
+        table: M::table_name(),
+        created,
+        object: snapshot(model),
+    });
+}
+
+fn dispatch_post_update<M: Model>(db: &SqliteBackend, model: &M) {
+    let object = snapshot(model);
+    db.signals().dispatch_post_save::<M>(PostSaveEvent {
+        table: M::table_name(),
+        created: false,
+        object: object.clone(),
+    });
+    db.signals().dispatch_post_update::<M>(PostUpdateEvent {
+        table: M::table_name(),
+        object,
+    });
 }
 
 fn checked_field<M: Model>(field: &str) -> Result<&'static str> {

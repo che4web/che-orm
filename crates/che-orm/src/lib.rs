@@ -1,3 +1,4 @@
+pub use async_trait::async_trait;
 pub use che_orm_macros::{Choice, Model};
 pub use chrono;
 pub use chrono::NaiveDateTime;
@@ -9,6 +10,7 @@ pub mod migration;
 pub mod model;
 pub mod relation;
 pub mod schema;
+pub mod signals;
 pub mod sqlite;
 
 pub use error::{Error, Result};
@@ -27,6 +29,9 @@ pub use model::{
 };
 pub use relation::{BelongsTo, HasMany};
 pub use schema::{FieldSchema, ForeignKeySchema, IndexSchema, ModelSchema, Schema};
+pub use signals::{
+    PostSaveEvent, PostSaveHandler, PostUpdateEvent, PostUpdateHandler, SignalError, Signals,
+};
 pub use sqlite::{MigrationStatus, SqliteBackend};
 
 #[doc(hidden)]
