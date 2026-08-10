@@ -200,13 +200,13 @@ forward relation in a second batched query, while `prefetch_related` loads a
 reverse relation without an N+1 query:
 
 ```rust
-let posts = Post::objects(&db)
+let posts: Vec<(Post, Option<Author>)> = Post::objects(&db)
     .query()
     .select_related(PostRelations::AUTHOR)
     .all()
     .await?;
 
-let authors = Author::objects(&db)
+let authors: che_orm::Prefetched<Author, Post> = Author::objects(&db)
     .query()
     .prefetch_related(PostRelations::AUTHOR.reverse())
     .all()
@@ -313,8 +313,8 @@ let highest_id = User::objects(&db)
     .await?;
 ```
 
-`sum`, `avg`, `min`, and `max` return `Option<f64>` and accept integer and
-real fields. An empty result returns `None`.
+`avg` returns `Option<f64>`. `sum`, `min`, and `max` return `Option<T>` for
+the field's typed value `T`; an empty result returns `None`.
 
 For REST serializers, keep the foreign key id as a normal writable field and add
 a read-only related field when you want nested output:

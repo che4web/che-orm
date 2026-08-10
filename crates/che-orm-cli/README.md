@@ -93,6 +93,7 @@ The CLI creates and uses this bookkeeping table:
 CREATE TABLE IF NOT EXISTS _che_orm_migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
+    checksum TEXT,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -111,7 +112,8 @@ Currently supported:
 The generated rebuild preserves values in columns shared by the old and new
 schemas. Before generating a migration, `makemigrations` rejects a new required
 column without a default and a nullable-to-required change without a default.
-Column and table renames are currently treated as remove/add operations.
+Type changes are rejected and require an explicit data migration. Column and
+table renames are currently treated as remove/add operations.
 
 When a generated rebuild changes a table referenced by another table, the
 runtime uses a dedicated SQLite connection, temporarily disables FK checks,

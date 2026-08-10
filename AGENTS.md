@@ -16,7 +16,7 @@
 - The CLI does not inspect Rust models; a program must write `che_orm_schema.json` using `Schema`/`ModelSchema` first. The example generator is `cargo run -p che-orm-examples --bin schema_snapshot`.
 - `makemigrations` compares `--schema` against `migrations/schema.json`, writes numbered `*.sql`, then updates `migrations/schema.json` as the next diff baseline.
 - `migrate` defaults to `--config app.toml` with `[database].url`; `--database-url` overrides config. Default migrations dir is `migrations`.
-- SQLite column drops are intentionally generated as review comments, not executable drop-column SQL.
+- SQLite column drops are executed through table rebuilds that preserve shared columns; direct SQLite drop-column SQL is not generated.
 
 ## Testing Notes
 - Tests use `sqlite::memory:` and temp files; no external database service is required.
@@ -25,5 +25,5 @@
 
 ## Implementation Gotchas
 - `SqliteBackend::connect` enables `PRAGMA foreign_keys = ON`; keep relation tests in mind when changing connection setup.
-- Migration application splits SQL on `;` and ignores comment-only statements; avoid adding migration SQL syntax that depends on semicolons inside strings/triggers without changing that parser.
+- Migration application uses a quote/comment-aware SQL statement parser and ignores comment-only statements; avoid adding migration SQL syntax that depends on unsupported dialect constructs without extending that parser.
 - The derive macro requires named structs and exactly relies on a `#[field(primary_key)]`; `i64` primary keys are auto-increment by default.

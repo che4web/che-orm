@@ -21,6 +21,8 @@ struct User {
     id: i64,
     email: String,
     name: String,
+    #[field(default = false)]
+    is_active: bool,
 }
 
 # async fn example() -> che_orm::Result<()> {

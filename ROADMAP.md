@@ -31,7 +31,7 @@ Current baseline:
 ## 4. Relations
 
 - Add configurable `on_delete` for immutable `id: i64` foreign keys. (implemented)
-- Order migrations by foreign-key dependencies. (in progress)
+- Order migrations by foreign-key dependencies. (implemented)
 - Add static typed relation descriptors and reverse lookups. (implemented)
 - Add `select_related` and batched `prefetch_related`. (implemented)
 - Add many-to-many relations through explicit models.
@@ -40,7 +40,7 @@ Current baseline:
 
 - Evolve `ModelField<M>` to carry the field value type. (implemented)
 - Reject invalid values such as `ID.eq("text")` at compile time. (implemented)
-- Return type-appropriate aggregate results. (in progress)
+- Return type-appropriate aggregate results. (implemented)
 - Add `distinct` and typed field projections. (implemented)
 - Add `group_by`, `having`, and `annotate`. (implemented)
 
