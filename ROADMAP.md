@@ -38,10 +38,11 @@ Current baseline:
 
 ## 5. Type-Safe Queries
 
-- Evolve `ModelField<M>` to carry the field value type.
-- Reject invalid values such as `ID.eq("text")` at compile time.
-- Return type-appropriate aggregate results.
-- Add `distinct`, projections, `group_by`, `having`, and `annotate`.
+- Evolve `ModelField<M>` to carry the field value type. (implemented)
+- Reject invalid values such as `ID.eq("text")` at compile time. (implemented)
+- Return type-appropriate aggregate results. (in progress)
+- Add `distinct` and typed field projections. (implemented)
+- Add `group_by`, `having`, and `annotate`. (implemented)
 
 ## 6. Data Operations
 

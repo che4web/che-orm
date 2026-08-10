@@ -215,6 +215,11 @@ let authors = Author::objects(&db)
 
 ## Queries
 
+The typed query API is a breaking API change: generated fields are now
+`ModelField<M, T>`, descending ordering uses `order_by_desc`, and dynamic field
+names require the explicit raw methods. Direct `ModelField::new` construction
+is unsafe; use generated field constants.
+
 Use generated `ModelFields` constants with the Django-style query builder:
 
 ```rust
@@ -222,7 +227,7 @@ let users = User::objects(&db)
     .query()
     .filter(UserFields::IS_ACTIVE.eq(true))
     .filter(UserFields::NAME.contains("Ali"))
-    .order_by("-name")
+    .order_by_desc(UserFields::NAME)
     .order_by(UserFields::ID)
     .limit(20)
     .all()
@@ -243,6 +248,50 @@ let user = User::objects(&db)
             .and(UserFields::EMAIL.is_not_null()),
     )
     .first()
+    .await?;
+```
+
+For dynamic field names, use the explicitly unchecked `eq_raw`, `in_raw`,
+`contains_raw`, or `order_by_raw` methods.
+
+Typed projections can be combined with `distinct`:
+
+```rust
+let names = User::objects(&db)
+    .query()
+    .values([UserFields::NAME])?
+    .distinct()
+    .all()
+    .await?;
+```
+
+For statically typed tuple results, use `select`:
+
+```rust
+let rows: Vec<(i64, String)> = User::objects(&db)
+    .query()
+    .select((UserFields::ID, UserFields::NAME))?
+    .all()
+    .await?;
+```
+
+Nullable fields can be projected with `UserFields::OPTIONAL_FIELD.optional()`;
+Choice and `FilePath` fields are decoded into their Rust types as well.
+
+Grouped queries support typed `having` predicates and aggregate annotations:
+
+```rust
+let total = AnnotationField::<i64>::new("total");
+let repeated = AnnotationField::<i64>::new("repeated");
+let grouped: Vec<(bool, i64, i64)> = User::objects(&db)
+    .query()
+    .values([UserFields::IS_ACTIVE])?
+    .group_by()
+    .annotate_count_field(&total, UserFields::ID)?
+    .annotate_count_field(&repeated, UserFields::ID)?
+    .having(UserFields::IS_ACTIVE.eq(true))
+    .having_annotation_field(total.clone().gte(2_i64))
+    .all_typed((UserFields::IS_ACTIVE, total, repeated))
     .await?;
 ```
 

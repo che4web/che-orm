@@ -55,7 +55,7 @@ let user = User::objects(&db)
         Q::from(UserFields::NAME.contains("Ali"))
             .or(UserFields::ID.in_values([1_i64, 2, 3])),
     )
-    .order_by("-id")
+    .order_by_desc(UserFields::ID)
     .first()
     .await?;
 ```

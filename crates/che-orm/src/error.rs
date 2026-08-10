@@ -39,6 +39,12 @@ pub enum Error {
     #[error("invalid relation: {0}")]
     InvalidRelation(String),
 
+    #[error("projection decode failed: {0}")]
+    ProjectionDecode(String),
+
+    #[error("invalid annotation: {0}")]
+    InvalidAnnotation(String),
+
     #[error("migration checksum mismatch for {name}: expected {expected}, found {actual}")]
     MigrationChecksumMismatch {
         name: String,

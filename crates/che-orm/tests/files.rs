@@ -60,3 +60,40 @@ async fn file_path_model_roundtrips() {
         FilePath::new("aa/bb/report.txt").unwrap()
     );
 }
+
+#[tokio::test]
+async fn typed_projection_decodes_file_paths_and_nullable_values() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<Asset>().await.unwrap();
+    let path = FilePath::new("typed/report.txt").unwrap();
+    let asset = Asset::objects(&db)
+        .create()
+        .set("path", path.clone())
+        .execute()
+        .await
+        .unwrap();
+
+    let projected: FilePath = Asset::objects(&db)
+        .query()
+        .filter(AssetFields::ID.eq(asset.id))
+        .select(AssetFields::PATH)
+        .unwrap()
+        .all()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(projected, path);
+
+    let optional: Option<FilePath> = Asset::objects(&db)
+        .query()
+        .filter(AssetFields::ID.eq(asset.id))
+        .select(AssetFields::OPTIONAL_PATH.optional())
+        .unwrap()
+        .all()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(optional, None);
+}

@@ -74,6 +74,40 @@ fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 &[#(#value_literals),*]
             }
         }
+
+        impl ::che_orm::QueryValue<#enum_name> for #enum_name {
+            fn into_query_value(self) -> ::che_orm::SqliteValue {
+                ::che_orm::SqliteValue::String(
+                    <#enum_name as ::che_orm::Choice>::as_str(&self).to_string()
+                )
+            }
+        }
+
+        impl ::che_orm::ProjectionValue for #enum_name {
+            fn from_projection_row(
+                row: &::che_orm::__private::sqlx::sqlite::SqliteRow,
+                field: &str,
+            ) -> ::che_orm::Result<Self> {
+                let value: ::std::string::String =
+                    ::che_orm::__private::sqlx::Row::try_get(row, field)?;
+                <#enum_name as ::che_orm::Choice>::from_str(&value)
+                    .map_err(::che_orm::Error::ProjectionDecode)
+            }
+        }
+
+        impl ::che_orm::OptionalProjectionValue for #enum_name {
+            fn from_optional_projection_row(
+                row: &::che_orm::__private::sqlx::sqlite::SqliteRow,
+                field: &str,
+            ) -> ::che_orm::Result<::std::option::Option<Self>> {
+                let value: ::std::option::Option<::std::string::String> =
+                    ::che_orm::__private::sqlx::Row::try_get(row, field)?;
+                value
+                    .map(|value| <#enum_name as ::che_orm::Choice>::from_str(&value)
+                        .map_err(::che_orm::Error::ProjectionDecode))
+                    .transpose()
+            }
+        }
     })
 }
 
@@ -123,6 +157,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let rust_name = ident.to_string();
         let db_name = attrs.rename.unwrap_or_else(|| rust_name.clone());
         let field_constant = format_ident!("{}", rust_name.to_ascii_uppercase());
+        let query_ty = query_field_type(&ty);
         let choice_type = choice_type(&ty);
         let field_type = if is_file_path(&ty) {
             quote!(::che_orm::FieldType::FilePath)
@@ -189,8 +224,8 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let auto_now = attrs.auto_now;
 
         field_constants.push(quote! {
-            pub const #field_constant: ::che_orm::ModelField<#model_name> =
-                ::che_orm::ModelField::new(#db_name);
+            pub const #field_constant: ::che_orm::ModelField<#model_name, #query_ty> =
+                unsafe { ::che_orm::ModelField::new(#db_name) };
         });
 
         if auto_now_add && auto_now {
@@ -366,6 +401,25 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
 
     })
+}
+
+fn query_field_type(ty: &Type) -> Type {
+    let Type::Path(path) = ty else {
+        return ty.clone();
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return ty.clone();
+    };
+    if segment.ident != "Option" {
+        return ty.clone();
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return ty.clone();
+    };
+    let Some(syn::GenericArgument::Type(inner)) = arguments.args.first() else {
+        return ty.clone();
+    };
+    inner.clone()
 }
 
 #[derive(Default)]
