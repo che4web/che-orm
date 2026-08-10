@@ -1240,6 +1240,34 @@ where
         self.filter(Q::compare_raw(field, QueryOperator::Contains, value.into()))
     }
 
+    pub fn gt_raw<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(Q::compare_raw(field, QueryOperator::Gt, value.into()))
+    }
+
+    pub fn gte_raw<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(Q::compare_raw(field, QueryOperator::Gte, value.into()))
+    }
+
+    pub fn lt_raw<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(Q::compare_raw(field, QueryOperator::Lt, value.into()))
+    }
+
+    pub fn lte_raw<V>(self, field: &str, value: V) -> Self
+    where
+        V: Into<SqliteValue>,
+    {
+        self.filter(Q::compare_raw(field, QueryOperator::Lte, value.into()))
+    }
+
     pub fn order_by_raw(mut self, field: &str, descending: bool) -> Self {
         self.orderings.push(Ordering {
             field: field.to_string(),

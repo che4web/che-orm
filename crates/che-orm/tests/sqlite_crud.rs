@@ -838,6 +838,40 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
 }
 
 #[tokio::test]
+async fn query_supports_raw_range_filters_and_ordering() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+
+    for (email, name) in [
+        ("a@example.com", "A"),
+        ("b@example.com", "B"),
+        ("c@example.com", "C"),
+    ] {
+        User::objects(&db)
+            .create()
+            .set("email", email)
+            .set("name", name)
+            .set("is_active", true)
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    let users = User::objects(&db)
+        .query()
+        .gte_raw("id", 2_i64)
+        .lt_raw("id", 4_i64)
+        .order_by_raw("id", true)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(
+        users.iter().map(|user| user.id).collect::<Vec<_>>(),
+        vec![3, 2]
+    );
+}
+
+#[tokio::test]
 async fn update_one_returning_updates_only_the_first_match() {
     let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
