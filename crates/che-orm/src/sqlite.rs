@@ -3,8 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqlitePoolOptions};
 
 use crate::{
     Error, Model, Result, Signals, create_table_sql, migration::SQLITE_FK_REBUILD_DIRECTIVE,
@@ -21,6 +22,7 @@ pub struct MigrationStatus {
     pub name: String,
     pub applied: bool,
     pub checksum: Option<String>,
+    pub checksum_mismatch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,7 @@ impl SqliteBackend {
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
+        run_preflight(sql, &mut *tx).await?;
         for statement in executable_statements(sql) {
             sqlx::query(&statement).execute(&mut *tx).await?;
         }
@@ -110,12 +113,16 @@ impl SqliteBackend {
                 .to_string();
             let checksum = migration_checksum(&fs::read(&path)?);
             let stored = applied.iter().find(|(stored_name, _)| stored_name == &name);
+            let checksum_mismatch = stored
+                .and_then(|(_, stored_checksum)| stored_checksum.as_deref())
+                .is_some_and(|stored_checksum| stored_checksum != checksum);
             statuses.push(MigrationStatus {
                 name,
                 applied: stored.is_some(),
                 checksum: stored
                     .and_then(|(_, stored_checksum)| stored_checksum.clone())
                     .or(Some(checksum)),
+                checksum_mismatch,
             });
         }
         Ok(statuses)
@@ -181,6 +188,7 @@ impl SqliteBackend {
                 }
             } else {
                 let mut tx = self.pool.begin().await?;
+                run_preflight(sql, &mut *tx).await?;
                 for statement in executable_statements(sql) {
                     sqlx::query(&statement).execute(&mut *tx).await?;
                 }
@@ -263,6 +271,7 @@ impl SqliteBackend {
                     return Ok(SafeMigrationResult::AlreadyApplied);
                 }
             }
+            run_preflight(sql, &mut *connection).await?;
             for statement in executable_statements(sql) {
                 sqlx::query(&statement).execute(&mut *connection).await?;
             }
@@ -334,6 +343,153 @@ fn migration_checksum(sql: &[u8]) -> String {
     format!("{digest:x}")
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind")]
+enum PreflightRule {
+    #[serde(rename = "unique")]
+    Unique { table: String, columns: Vec<String> },
+    #[serde(rename = "foreign_key")]
+    ForeignKey {
+        table: String,
+        column: String,
+        target_table: String,
+    },
+    #[serde(rename = "choices")]
+    Choices {
+        table: String,
+        column: String,
+        values: Vec<String>,
+    },
+    #[serde(rename = "max_length")]
+    MaxLength {
+        table: String,
+        column: String,
+        max_length: u32,
+    },
+}
+
+async fn run_preflight(sql: &str, connection: &mut SqliteConnection) -> Result<()> {
+    for line in sql.lines() {
+        let Some(payload) = line.strip_prefix("-- che-orm: preflight ") else {
+            continue;
+        };
+        let rule: PreflightRule = serde_json::from_str(payload).map_err(|error| {
+            Error::UnsafeMigration(format!("invalid preflight directive: {error}"))
+        })?;
+        match rule {
+            PreflightRule::Unique { table, columns } => {
+                if columns.is_empty() {
+                    return Err(Error::UnsafeMigration(
+                        "unique preflight requires at least one column".to_string(),
+                    ));
+                }
+                let columns = columns
+                    .iter()
+                    .map(|column| quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let non_null = columns
+                    .split(", ")
+                    .map(|column| format!("{column} IS NOT NULL"))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let sql = format!(
+                    "SELECT EXISTS (SELECT 1 FROM {table} WHERE {non_null} GROUP BY {columns} HAVING COUNT(*) > 1)",
+                    table = quote_identifier(&table),
+                    columns = columns,
+                    non_null = non_null,
+                );
+                let violated: i64 = sqlx::query_scalar(&sql).fetch_one(&mut *connection).await?;
+                if violated != 0 {
+                    return Err(Error::MigrationPreflightFailed {
+                        rule: "unique".to_string(),
+                        details: format!("duplicate values found in {table} ({columns})"),
+                    });
+                }
+            }
+            PreflightRule::ForeignKey {
+                table,
+                column,
+                target_table,
+            } => {
+                let sql = format!(
+                    "SELECT EXISTS (SELECT 1 FROM {table} AS source LEFT JOIN {target_table} AS target ON target.\"id\" = source.{column} WHERE source.{column} IS NOT NULL AND target.\"id\" IS NULL)",
+                    table = quote_identifier(&table),
+                    target_table = quote_identifier(&target_table),
+                    column = quote_identifier(&column),
+                );
+                let violated: i64 = sqlx::query_scalar(&sql).fetch_one(&mut *connection).await?;
+                if violated != 0 {
+                    return Err(Error::MigrationPreflightFailed {
+                        rule: "foreign_key".to_string(),
+                        details: format!("orphaned values found in {table}.{column}"),
+                    });
+                }
+            }
+            PreflightRule::Choices {
+                table,
+                column,
+                values,
+            } => {
+                let placeholders = (1..=values.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = if values.is_empty() {
+                    format!(
+                        "SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)",
+                        table = quote_identifier(&table),
+                        column = quote_identifier(&column)
+                    )
+                } else {
+                    format!(
+                        "SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL AND {column} NOT IN ({placeholders}))",
+                        table = quote_identifier(&table),
+                        column = quote_identifier(&column)
+                    )
+                };
+                let mut query = sqlx::query_scalar(&sql);
+                for value in &values {
+                    query = query.bind(value);
+                }
+                let violated: i64 = query.fetch_one(&mut *connection).await?;
+                if violated != 0 {
+                    return Err(Error::MigrationPreflightFailed {
+                        rule: "choices".to_string(),
+                        details: format!(
+                            "values outside the allowed set found in {table}.{column}"
+                        ),
+                    });
+                }
+            }
+            PreflightRule::MaxLength {
+                table,
+                column,
+                max_length,
+            } => {
+                let sql = format!(
+                    "SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL AND length({column}) > ?1)",
+                    table = quote_identifier(&table),
+                    column = quote_identifier(&column),
+                );
+                let violated: i64 = sqlx::query_scalar(&sql)
+                    .bind(max_length)
+                    .fetch_one(&mut *connection)
+                    .await?;
+                if violated != 0 {
+                    return Err(Error::MigrationPreflightFailed {
+                        rule: "max_length".to_string(),
+                        details: format!(
+                            "values exceeding {max_length} characters found in {table}.{column}"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn requires_fk_safe_rebuild(sql: &str) -> bool {
     sql.lines()
         .map(str::trim)
@@ -397,7 +553,7 @@ fn executable_statements(sql: &str) -> Vec<String> {
             let upper = trimmed.to_ascii_uppercase();
             if upper.contains("CREATE TRIGGER")
                 && upper.contains("BEGIN")
-                && !upper.ends_with("END")
+                && !ends_with_end(trimmed)
             {
                 current.push(ch);
             } else {
@@ -411,6 +567,31 @@ fn executable_statements(sql: &str) -> Vec<String> {
     statements
 }
 
+fn ends_with_end(statement: &str) -> bool {
+    let mut end = statement.len();
+    loop {
+        let trimmed = statement[..end].trim_end();
+        if let Some(comment_start) = trimmed.rfind("/*")
+            && trimmed[comment_start + 2..]
+                .find("*/")
+                .is_some_and(|offset| comment_start + 2 + offset + 2 == trimmed.len())
+        {
+            end = comment_start;
+            continue;
+        }
+        let line_start = trimmed.rfind('\n').map_or(0, |position| position + 1);
+        if let Some(comment_start) = trimmed[line_start..].find("--") {
+            end = line_start + comment_start;
+            continue;
+        }
+        return trimmed
+            .rsplit_once(|character: char| character.is_whitespace())
+            .map_or(trimmed.eq_ignore_ascii_case("END"), |(_, word)| {
+                word.eq_ignore_ascii_case("END")
+            });
+    }
+}
+
 fn push_statement(statements: &mut Vec<String>, current: &mut String) {
     let statement = current.trim();
     if !statement.is_empty()
@@ -422,4 +603,8 @@ fn push_statement(statements: &mut Vec<String>, current: &mut String) {
         statements.push(statement.to_string());
     }
     current.clear();
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }

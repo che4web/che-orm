@@ -49,6 +49,9 @@ pub enum Error {
     #[error("foreign key check failed: {0}")]
     ForeignKeyCheckFailed(String),
 
+    #[error("migration preflight failed for {rule}: {details}")]
+    MigrationPreflightFailed { rule: String, details: String },
+
     #[error(
         "migration failed ({original}) and foreign key enforcement could not be restored: {restore}"
     )]

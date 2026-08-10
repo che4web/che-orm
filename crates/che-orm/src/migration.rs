@@ -2,6 +2,7 @@ use crate::{
     Error, FieldSchema, FieldType, ForeignKeyAction, ForeignKeySchema, IndexSchema, Model,
     ModelSchema, Result, Schema,
 };
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const SQLITE_FK_REBUILD_DIRECTIVE: &str = "-- che-orm: sqlite-fk-rebuild";
@@ -93,19 +94,19 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Migration {
             }
         }
 
-        for new_index in &new_model.indexes {
-            if !old_model.indexes.iter().any(|index| index == new_index) {
-                changes.push(SchemaChange::CreateIndex {
-                    table: new_model.table.clone(),
-                    index: new_index.clone(),
-                });
-            }
-        }
         for old_index in &old_model.indexes {
             if !new_model.indexes.iter().any(|index| index == old_index) {
                 changes.push(SchemaChange::DropIndex {
                     table: old_model.table.clone(),
                     name: old_index.name.clone(),
+                });
+            }
+        }
+        for new_index in &new_model.indexes {
+            if !old_model.indexes.iter().any(|index| index == new_index) {
+                changes.push(SchemaChange::CreateIndex {
+                    table: new_model.table.clone(),
+                    index: new_index.clone(),
                 });
             }
         }
@@ -148,6 +149,12 @@ pub fn validate_migration(migration: &Migration) -> Result<()> {
                 return Err(Error::UnsafeMigration(format!(
                     "making column '{}.{}' required needs a default",
                     table, new.name
+                )));
+            }
+            SchemaChange::AlterColumn { table, old, new } if old.ty != new.ty => {
+                return Err(Error::UnsafeMigration(format!(
+                    "changing column '{}.{}' from {:?} to {:?} requires an explicit data conversion",
+                    table, new.name, old.ty, new.ty
                 )));
             }
             _ => {}
@@ -221,10 +228,13 @@ fn requires_existing_value(field: &FieldSchema) -> bool {
 
 pub fn sqlite_migration_sql(migration: &Migration) -> String {
     let changes = ordered_changes(migration);
-    let mut statements = Vec::new();
+    let mut statements = preflight_directives(migration);
     let rebuilt_tables = rebuild_tables(&changes);
 
     for change in &changes {
+        if is_destructive(change) {
+            statements.push("-- che-orm: destructive".to_string());
+        }
         match change {
             SchemaChange::DropColumn { table, .. } | SchemaChange::AlterColumn { table, .. } => {
                 if let Some(model) = migration
@@ -270,6 +280,105 @@ pub fn sqlite_migration_sql(migration: &Migration) -> String {
     } else {
         sql
     }
+}
+
+fn preflight_directives(migration: &Migration) -> Vec<String> {
+    let mut directives = Vec::new();
+    for change in &migration.changes {
+        match change {
+            SchemaChange::AlterColumn { table, old, new } => {
+                if !old.unique && new.unique {
+                    directives.push(preflight_unique(table, &new.name));
+                }
+                if new.choices != old.choices {
+                    if let Some(values) = &new.choices {
+                        directives.push(preflight_choices(table, &new.name, values));
+                    }
+                }
+                let max_length_tightened = match (old.max_length, new.max_length) {
+                    (None, Some(_)) => true,
+                    (Some(old), Some(new)) => new < old,
+                    _ => false,
+                };
+                if max_length_tightened {
+                    if let Some(max_length) = new.max_length {
+                        directives.push(preflight_max_length(table, &new.name, max_length));
+                    }
+                }
+                if old.foreign_key != new.foreign_key {
+                    if let Some(foreign_key) = &new.foreign_key {
+                        directives.push(preflight_foreign_key(
+                            table,
+                            &new.name,
+                            &foreign_key.table,
+                        ));
+                    }
+                }
+            }
+            SchemaChange::CreateIndex { table, index } if index.unique => {
+                directives.push(preflight_unique_columns(table, &index.columns));
+            }
+            _ => {}
+        }
+    }
+    directives
+}
+
+fn preflight_unique(table: &str, column: &str) -> String {
+    preflight_json(json!({
+        "kind": "unique",
+        "table": table,
+        "columns": [column],
+    }))
+}
+
+fn preflight_unique_columns(table: &str, columns: &[String]) -> String {
+    preflight_json(json!({
+        "kind": "unique",
+        "table": table,
+        "columns": columns,
+    }))
+}
+
+fn preflight_foreign_key(table: &str, column: &str, target_table: &str) -> String {
+    preflight_json(json!({
+        "kind": "foreign_key",
+        "table": table,
+        "column": column,
+        "target_table": target_table,
+    }))
+}
+
+fn preflight_choices(table: &str, column: &str, values: &[String]) -> String {
+    preflight_json(json!({
+        "kind": "choices",
+        "table": table,
+        "column": column,
+        "values": values,
+    }))
+}
+
+fn preflight_max_length(table: &str, column: &str, max_length: u32) -> String {
+    preflight_json(json!({
+        "kind": "max_length",
+        "table": table,
+        "column": column,
+        "max_length": max_length,
+    }))
+}
+
+fn preflight_json(rule: serde_json::Value) -> String {
+    format!("-- che-orm: preflight {}", rule)
+}
+
+fn is_destructive(change: &SchemaChange) -> bool {
+    matches!(
+        change,
+        SchemaChange::DropTable { .. }
+            | SchemaChange::DropColumn { .. }
+            | SchemaChange::DropIndex { .. }
+            | SchemaChange::AlterColumn { .. }
+    )
 }
 
 fn rebuild_tables(changes: &[&SchemaChange]) -> Vec<String> {

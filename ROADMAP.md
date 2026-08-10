@@ -8,24 +8,24 @@ Current baseline:
 
 ## 1. Correctness
 
-- Fix `update_one_returning` so it updates only one matching row.
-- Select the target primary key with `LIMIT 1`, like `claim_next_returning`.
-- Add tests for multiple matches, no matches, ordering, and concurrent claims.
+- Fix `update_one_returning` so it updates only one matching row. (implemented)
+- Select the target primary key with `LIMIT 1`, like `claim_next_returning`. (implemented)
+- Add tests for multiple matches, no matches, ordering, and concurrent claims. (implemented)
 
 ## 2. Migration Runner
 
-- Store a checksum for every applied migration.
-- Reject modified historical migration files.
-- Replace naive `split(';')` SQL execution.
-- Add a CLI `status` command.
-- Add preflight checks for uniqueness, foreign keys, choices, max length, and type conversions.
-- Mark destructive operations explicitly.
+- Store a checksum for every applied migration. (implemented)
+- Reject modified historical migration files. (implemented)
+- Replace naive `split(';')` SQL execution. (implemented)
+- Add a CLI `status` command. (implemented)
+- Add preflight checks for uniqueness, foreign keys, choices, max length, and type conversions. (implemented)
+- Mark destructive operations explicitly. (implemented)
 
 ## 3. Schema Evolution
 
-- Add `IndexSchema` and model/field index attributes.
-- Generate index create/drop migrations.
-- Recreate modeled indexes after SQLite table rebuilds.
+- Add `IndexSchema` and model/field index attributes. (implemented)
+- Generate index create/drop migrations. (implemented)
+- Recreate modeled indexes after SQLite table rebuilds. (implemented)
 - Add explicit `rename_from` support for tables and columns.
 
 ## 4. Relations

@@ -418,6 +418,8 @@ async fn migration_checksums_reject_modified_applied_files() {
         "CREATE TABLE checksum_test (id INTEGER PRIMARY KEY, value TEXT);",
     )
     .unwrap();
+    let status = db.migration_status(&migrations_dir).await.unwrap();
+    assert!(status[0].checksum_mismatch);
     assert!(db.apply_migrations_dir(&migrations_dir).await.is_err());
 
     std::fs::remove_dir_all(migrations_dir).unwrap();
@@ -433,7 +435,8 @@ async fn migration_sql_parser_handles_strings_and_triggers() {
         CREATE TRIGGER copy_trigger AFTER INSERT ON trigger_source FOR EACH ROW
         BEGIN
             INSERT INTO trigger_log(value) VALUES ('contains;semicolon');
-        END;
+        END -- trigger comment
+        ;
         INSERT INTO trigger_source(value) VALUES ('source');
         "#,
     )
@@ -635,6 +638,91 @@ async fn update_one_returning_updates_only_the_first_match() {
         .unwrap();
     assert_eq!(claimed, 1);
     assert_eq!(remaining, 2);
+}
+
+#[tokio::test]
+async fn update_one_returning_handles_no_match_and_descending_order() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+    for name in ["first", "second"] {
+        User::objects(&db)
+            .create()
+            .set("email", format!("{name}-order@example.com"))
+            .set("name", name)
+            .set("is_active", true)
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        User::objects(&db)
+            .query()
+            .filter(UserFields::NAME.eq("missing"))
+            .update_one_returning([("name", "never")])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let updated = User::objects(&db)
+        .query()
+        .filter(UserFields::IS_ACTIVE.eq(true))
+        .order_by("-id")
+        .update_one_returning([("name", "descending")])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.id, 2);
+}
+
+#[tokio::test]
+async fn concurrent_claims_return_distinct_rows() {
+    let path = std::env::temp_dir().join(format!(
+        "che_orm_claims_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::File::create(&path).unwrap();
+    let url = format!("sqlite://{}", path.display());
+    let setup = SqliteBackend::connect(&url).await.unwrap();
+    setup.create_table::<User>().await.unwrap();
+    for index in 0..2 {
+        User::objects(&setup)
+            .create()
+            .set("email", format!("claim-{index}@example.com"))
+            .set("name", format!("claim-{index}"))
+            .set("is_active", true)
+            .execute()
+            .await
+            .unwrap();
+    }
+    let first = SqliteBackend::connect(&url).await.unwrap();
+    let second = SqliteBackend::connect(&url).await.unwrap();
+    let (left, right) = tokio::join!(
+        User::objects(&first)
+            .query()
+            .filter(UserFields::IS_ACTIVE.eq(true))
+            .claim_next_returning([("is_active", false)]),
+        User::objects(&second)
+            .query()
+            .filter(UserFields::IS_ACTIVE.eq(true))
+            .claim_next_returning([("is_active", false)])
+    );
+    let left = left.unwrap().unwrap();
+    let right = right.unwrap().unwrap();
+    assert_ne!(left.id, right.id);
+    assert_eq!(
+        User::objects(&setup)
+            .query()
+            .filter(UserFields::IS_ACTIVE.eq(true))
+            .count()
+            .await
+            .unwrap(),
+        0
+    );
+    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]

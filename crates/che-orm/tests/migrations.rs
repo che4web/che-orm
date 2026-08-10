@@ -6,8 +6,9 @@ use std::{
 };
 
 use che_orm::{
-    FieldSchema, FieldType, ForeignKeyAction, ForeignKeySchema, Model, ModelSchema, Schema,
-    SchemaChange, SqliteBackend, diff_schemas, sqlite_migration_sql, validate_migration,
+    Error, FieldSchema, FieldType, ForeignKeyAction, ForeignKeySchema, IndexSchema, Model,
+    ModelSchema, Schema, SchemaChange, SqliteBackend, diff_schemas, sqlite_migration_sql,
+    validate_migration,
 };
 
 #[derive(Debug, Clone, Model)]
@@ -140,6 +141,38 @@ fn diff_changed_field_generates_alter_column() {
     assert!(sql.contains("CREATE TABLE \"__che_orm_new_users\""));
     assert!(sql.contains("email TEXT NOT NULL UNIQUE"));
     assert!(sql.contains("CHECK (length(email) <= 255)"));
+}
+
+#[test]
+fn type_changes_require_explicit_data_conversion() {
+    let old = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), email_field()],
+        indexes: Vec::new(),
+    }]);
+    let mut new_email = email_field();
+    new_email.ty = FieldType::Integer;
+    let new = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), new_email],
+        indexes: Vec::new(),
+    }]);
+
+    let error = validate_migration(&diff_schemas(&old, &new)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires an explicit data conversion")
+    );
+}
+
+#[test]
+fn destructive_changes_are_marked_in_sql() {
+    let old = Schema::from_model::<User>();
+    let new = Schema::empty();
+    let sql = sqlite_migration_sql(&diff_schemas(&old, &new));
+    assert!(sql.contains("-- che-orm: destructive"));
+    assert!(sql.contains("DROP TABLE IF EXISTS users;"));
 }
 
 #[test]
@@ -613,6 +646,44 @@ fn index_changes_generate_create_index() {
 }
 
 #[tokio::test]
+async fn migration_replaces_changed_index_with_same_name() {
+    let old = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), email_field()],
+        indexes: vec![IndexSchema {
+            name: "users_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+        }],
+    }]);
+    let new = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), email_field()],
+        indexes: vec![IndexSchema {
+            name: "users_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+        }],
+    }]);
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.apply_sql(&sqlite_migration_sql(&diff_schemas(&Schema::empty(), &old)))
+        .await
+        .unwrap();
+
+    let sql = sqlite_migration_sql(&diff_schemas(&old, &new));
+    assert!(sql.find("DROP INDEX").unwrap() < sql.find("CREATE UNIQUE INDEX").unwrap());
+    db.apply_sql(&sql).await.unwrap();
+
+    let index_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'users_email_idx'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert!(index_sql.starts_with("CREATE UNIQUE INDEX"));
+}
+
+#[tokio::test]
 async fn migration_rebuilds_table_when_column_is_removed() {
     let db = che_orm::SqliteBackend::connect("sqlite::memory:")
         .await
@@ -649,6 +720,84 @@ async fn migration_rebuilds_table_when_column_is_removed() {
     let current_user = CurrentUser::objects(&db).get(old_user.id).await.unwrap();
     assert_eq!(current_user.name, "Alice");
     fs::remove_dir_all(migrations_dir).unwrap();
+}
+
+#[tokio::test]
+async fn migration_preflight_rejects_duplicate_unique_values() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.apply_sql(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT);\
+         INSERT INTO users (email) VALUES ('duplicate@example.com'), ('duplicate@example.com');",
+    )
+    .await
+    .unwrap();
+    let old = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), email_field()],
+        indexes: Vec::new(),
+    }]);
+    let mut new_email = email_field();
+    new_email.unique = true;
+    let new = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), new_email],
+        indexes: Vec::new(),
+    }]);
+
+    let error = db
+        .apply_sql(&sqlite_migration_sql(&diff_schemas(&old, &new)))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::MigrationPreflightFailed { .. }));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn migration_preflight_rejects_choice_and_length_violations() {
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.apply_sql("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT); INSERT INTO users (email) VALUES ('too-long');")
+        .await
+        .unwrap();
+    let old = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), email_field()],
+        indexes: Vec::new(),
+    }]);
+    let mut new_email = email_field();
+    new_email.max_length = Some(3);
+    let new = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), new_email],
+        indexes: Vec::new(),
+    }]);
+    let error = db
+        .apply_sql(&sqlite_migration_sql(&diff_schemas(&old, &new)))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::MigrationPreflightFailed { .. }));
+
+    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    db.apply_sql("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT); INSERT INTO users (email) VALUES ('legacy');")
+        .await
+        .unwrap();
+    let mut new_email = email_field();
+    new_email.choices = Some(vec!["active".to_string(), "disabled".to_string()]);
+    let new = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), new_email],
+        indexes: Vec::new(),
+    }]);
+    let error = db
+        .apply_sql(&sqlite_migration_sql(&diff_schemas(&old, &new)))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::MigrationPreflightFailed { .. }));
 }
 
 #[tokio::test]

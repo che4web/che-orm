@@ -132,7 +132,9 @@ async fn status(database_url: Option<String>, config: &Path, migrations_dir: &Pa
     };
     let db = SqliteBackend::connect(&database_url).await?;
     for migration in db.migration_status(migrations_dir).await? {
-        let state = if migration.applied {
+        let state = if migration.checksum_mismatch {
+            "mismatch"
+        } else if migration.applied {
             "applied"
         } else {
             "pending"
