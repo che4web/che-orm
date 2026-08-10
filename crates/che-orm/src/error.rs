@@ -9,6 +9,9 @@ pub enum Error {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+
     #[error("model has no primary key field")]
     MissingPrimaryKey,
 
@@ -44,13 +47,6 @@ pub enum Error {
 
     #[error("invalid annotation: {0}")]
     InvalidAnnotation(String),
-
-    #[error("migration checksum mismatch for {name}: expected {expected}, found {actual}")]
-    MigrationChecksumMismatch {
-        name: String,
-        expected: String,
-        actual: String,
-    },
 
     #[error("foreign key check failed: {0}")]
     ForeignKeyCheckFailed(String),

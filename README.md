@@ -88,6 +88,10 @@ cargo run -p che-orm-cli -- makemigrations --schema che_orm_schema.json --name i
 cargo run -p che-orm-cli -- migrate --database-url sqlite://example.sqlite
 ```
 
+Migration execution is provided by SQLx and is tracked in `_sqlx_migrations`.
+Existing development databases using the old `_che_orm_migrations` table must
+be recreated.
+
 Schema changes to field properties are detected. SQLite migrations rebuild a
 table when a column must be altered or removed, preserving shared column data.
 The CLI rejects required columns without defaults when existing rows may not be

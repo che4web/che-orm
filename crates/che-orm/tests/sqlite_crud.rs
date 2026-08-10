@@ -386,7 +386,7 @@ async fn applies_migration_files_without_exposing_sqlx() {
 
     let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
     let applied = db.apply_migrations_dir(&migrations_dir).await.unwrap();
-    assert_eq!(applied, vec!["0001_initial.sql"]);
+    assert_eq!(applied, vec!["initial"]);
 
     let user = User::objects(&db)
         .create()

@@ -1,11 +1,7 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{SqliteConnection, SqlitePool, migrate::Migrator, sqlite::SqlitePoolOptions};
 
 use crate::{
     Error, Model, Result, Signals, create_table_sql, migration::SQLITE_FK_REBUILD_DIRECTIVE,
@@ -23,12 +19,6 @@ pub struct MigrationStatus {
     pub applied: bool,
     pub checksum: Option<String>,
     pub checksum_mismatch: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SafeMigrationResult {
-    Applied,
-    AlreadyApplied,
 }
 
 impl SqliteBackend {
@@ -64,7 +54,7 @@ impl SqliteBackend {
 
     pub async fn apply_sql(&self, sql: &str) -> Result<()> {
         if requires_fk_safe_rebuild(sql) {
-            self.apply_fk_safe_sql(sql, None).await?;
+            self.apply_fk_safe_sql(sql).await?;
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
@@ -80,162 +70,50 @@ impl SqliteBackend {
         &self,
         migrations_dir: impl AsRef<Path>,
     ) -> Result<Vec<String>> {
-        self.apply_migrations_dir_inner(None, migrations_dir.as_ref())
-            .await
-    }
-
-    pub async fn apply_migrations_dir_with_namespace(
-        &self,
-        namespace: &str,
-        migrations_dir: impl AsRef<Path>,
-    ) -> Result<Vec<String>> {
-        self.apply_migrations_dir_inner(Some(namespace), migrations_dir.as_ref())
-            .await
+        let migrator = Migrator::new(migrations_dir.as_ref()).await?;
+        let applied_before: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
+        migrator.run(&self.pool).await?;
+        Ok(migrator
+            .iter()
+            .filter(|migration| !applied_before.contains(&migration.version))
+            .map(|migration| migration.description.to_string())
+            .collect())
     }
 
     pub async fn migration_status(
         &self,
         migrations_dir: impl AsRef<Path>,
     ) -> Result<Vec<MigrationStatus>> {
-        self.ensure_migrations_table().await?;
-        let applied: Vec<(String, Option<String>)> =
-            sqlx::query_as("SELECT name, checksum FROM _che_orm_migrations ORDER BY name")
-                .fetch_all(&self.pool)
-                .await?;
-        let mut files = migration_files(migrations_dir.as_ref())?;
-        files.sort();
-        let mut statuses = Vec::new();
-        for path in files {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let checksum = migration_checksum(&fs::read(&path)?);
-            let stored = applied.iter().find(|(stored_name, _)| stored_name == &name);
-            let checksum_mismatch = stored
-                .and_then(|(_, stored_checksum)| stored_checksum.as_deref())
-                .is_some_and(|stored_checksum| stored_checksum != checksum);
-            statuses.push(MigrationStatus {
-                name,
-                applied: stored.is_some(),
-                checksum: stored
-                    .and_then(|(_, stored_checksum)| stored_checksum.clone())
-                    .or(Some(checksum)),
-                checksum_mismatch,
-            });
-        }
-        Ok(statuses)
-    }
-
-    async fn apply_migrations_dir_inner(
-        &self,
-        namespace: Option<&str>,
-        migrations_dir: &Path,
-    ) -> Result<Vec<String>> {
-        self.ensure_migrations_table().await?;
-
-        let mut files = migration_files(migrations_dir)?;
-        files.sort();
-
-        let mut applied = Vec::new();
-        for path in files {
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let name = match namespace {
-                Some(namespace) => format!("{namespace}/{file_name}"),
-                None => file_name,
-            };
-            let sql = fs::read(&path)?;
-            let checksum = migration_checksum(&sql);
-            let existing: Option<(i64, Option<String>)> =
-                sqlx::query_as("SELECT id, checksum FROM _che_orm_migrations WHERE name = ?1")
-                    .bind(&name)
-                    .fetch_optional(&self.pool)
-                    .await?;
-
-            if let Some((id, stored_checksum)) = existing {
-                if let Some(stored_checksum) = stored_checksum {
-                    if stored_checksum != checksum {
-                        return Err(Error::MigrationChecksumMismatch {
-                            name,
-                            expected: stored_checksum,
-                            actual: checksum,
-                        });
-                    }
-                } else {
-                    sqlx::query("UPDATE _che_orm_migrations SET checksum = ?1 WHERE id = ?2")
-                        .bind(&checksum)
-                        .bind(id)
-                        .execute(&self.pool)
-                        .await?;
-                }
-                continue;
-            }
-
-            let sql = std::str::from_utf8(&sql)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            if requires_fk_safe_rebuild(sql) {
-                if self
-                    .apply_fk_safe_sql(sql, Some((&name, &checksum)))
-                    .await?
-                    == SafeMigrationResult::AlreadyApplied
-                {
-                    continue;
-                }
-            } else {
-                let mut tx = self.pool.begin().await?;
-                run_preflight(sql, &mut *tx).await?;
-                for statement in executable_statements(sql) {
-                    sqlx::query(&statement).execute(&mut *tx).await?;
-                }
-                sqlx::query("INSERT INTO _che_orm_migrations (name, checksum) VALUES (?1, ?2)")
-                    .bind(&name)
-                    .bind(&checksum)
-                    .execute(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-            }
-
-            applied.push(name);
-        }
-
-        Ok(applied)
-    }
-
-    async fn ensure_migrations_table(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS _che_orm_migrations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                checksum TEXT,
-                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );",
+        let migrator = Migrator::new(migrations_dir.as_ref()).await?;
+        let applied: Vec<(i64, bool, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
         )
-        .execute(&self.pool)
-        .await?;
-        let columns = sqlx::query("PRAGMA table_info(_che_orm_migrations)")
-            .fetch_all(&self.pool)
-            .await?;
-        if !columns
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        Ok(migrator
             .iter()
-            .any(|column| column.get::<String, _>("name") == "checksum")
-        {
-            sqlx::query("ALTER TABLE _che_orm_migrations ADD COLUMN checksum TEXT")
-                .execute(&self.pool)
-                .await?;
-        }
-        Ok(())
+            .map(|migration| {
+                let stored = applied.iter().find(|row| row.0 == migration.version);
+                let checksum = stored
+                    .map(|row| checksum_hex(&row.2))
+                    .or_else(|| Some(checksum_hex(migration.checksum.as_ref())));
+                MigrationStatus {
+                    name: migration.description.to_string(),
+                    applied: stored.is_some_and(|row| row.1),
+                    checksum,
+                    checksum_mismatch: stored
+                        .is_some_and(|row| row.2.as_slice() != migration.checksum.as_ref()),
+                }
+            })
+            .collect())
     }
 
-    async fn apply_fk_safe_sql(
-        &self,
-        sql: &str,
-        migration: Option<(&str, &str)>,
-    ) -> Result<SafeMigrationResult> {
+    async fn apply_fk_safe_sql(&self, sql: &str) -> Result<()> {
         let mut connection = self.pool.acquire().await?;
         sqlx::query("PRAGMA foreign_keys = OFF")
             .execute(&mut *connection)
@@ -245,42 +123,9 @@ impl SqliteBackend {
             sqlx::query("BEGIN EXCLUSIVE")
                 .execute(&mut *connection)
                 .await?;
-            if let Some((name, checksum)) = migration {
-                let existing: Option<(i64, Option<String>)> =
-                    sqlx::query_as("SELECT id, checksum FROM _che_orm_migrations WHERE name = ?1")
-                        .bind(name)
-                        .fetch_optional(&mut *connection)
-                        .await?;
-                if let Some((id, stored_checksum)) = existing {
-                    if let Some(stored_checksum) = stored_checksum {
-                        if stored_checksum != checksum {
-                            return Err(Error::MigrationChecksumMismatch {
-                                name: name.to_string(),
-                                expected: stored_checksum,
-                                actual: checksum.to_string(),
-                            });
-                        }
-                    } else {
-                        sqlx::query("UPDATE _che_orm_migrations SET checksum = ?1 WHERE id = ?2")
-                            .bind(checksum)
-                            .bind(id)
-                            .execute(&mut *connection)
-                            .await?;
-                    }
-                    sqlx::query("COMMIT").execute(&mut *connection).await?;
-                    return Ok(SafeMigrationResult::AlreadyApplied);
-                }
-            }
             run_preflight(sql, &mut *connection).await?;
             for statement in executable_statements(sql) {
                 sqlx::query(&statement).execute(&mut *connection).await?;
-            }
-            if let Some((name, checksum)) = migration {
-                sqlx::query("INSERT INTO _che_orm_migrations (name, checksum) VALUES (?1, ?2)")
-                    .bind(name)
-                    .bind(checksum)
-                    .execute(&mut *connection)
-                    .await?;
             }
             let violations: Vec<(String, i64, String, i64)> =
                 sqlx::query_as("PRAGMA foreign_key_check")
@@ -298,7 +143,7 @@ impl SqliteBackend {
                 ));
             }
             sqlx::query("COMMIT").execute(&mut *connection).await?;
-            Ok(SafeMigrationResult::Applied)
+            Ok(())
         }
         .await;
 
@@ -321,26 +166,6 @@ impl SqliteBackend {
             (Ok(result), Ok(_)) => Ok(result),
         }
     }
-}
-
-fn migration_files(migrations_dir: &Path) -> Result<Vec<PathBuf>> {
-    if !migrations_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut files = Vec::new();
-    for entry in fs::read_dir(migrations_dir)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "sql") {
-            files.push(path);
-        }
-    }
-    Ok(files)
-}
-
-fn migration_checksum(sql: &[u8]) -> String {
-    let digest = Sha256::digest(sql);
-    format!("{digest:x}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -607,4 +432,8 @@ fn push_statement(statements: &mut Vec<String>, current: &mut String) {
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn checksum_hex(checksum: &[u8]) -> String {
+    checksum.iter().map(|byte| format!("{byte:02x}")).collect()
 }

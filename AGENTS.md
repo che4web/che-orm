@@ -15,7 +15,7 @@
 ## Migrations
 - The CLI does not inspect Rust models; a program must write `che_orm_schema.json` using `Schema`/`ModelSchema` first. The example generator is `cargo run -p che-orm-examples --bin schema_snapshot`.
 - `makemigrations` compares `--schema` against `migrations/schema.json`, writes numbered `*.sql`, then updates `migrations/schema.json` as the next diff baseline.
-- `migrate` defaults to `--config app.toml` with `[database].url`; `--database-url` overrides config. Default migrations dir is `migrations`.
+- `migrate` uses SQLx's migration runner and `_sqlx_migrations`; it defaults to `--config app.toml` with `[database].url`; `--database-url` overrides config. Default migrations dir is `migrations`.
 - SQLite column drops are executed through table rebuilds that preserve shared columns; direct SQLite drop-column SQL is not generated.
 
 ## Testing Notes

@@ -87,14 +87,17 @@ You can still override the config with an explicit database URL:
 cargo run -p che-orm-cli -- migrate --database-url sqlite://app.sqlite?mode=rwc
 ```
 
-The CLI creates and uses this bookkeeping table:
+The CLI delegates migration execution and bookkeeping to SQLx. It creates and
+uses this table:
 
 ```sql
-CREATE TABLE IF NOT EXISTS _che_orm_migrations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    checksum TEXT,
-    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+    version BIGINT PRIMARY KEY NOT NULL,
+    description TEXT NOT NULL,
+    installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    success BOOLEAN NOT NULL,
+    checksum BLOB NOT NULL,
+    execution_time BIGINT NOT NULL
 );
 ```
 
@@ -116,13 +119,12 @@ Type changes are rejected and require an explicit data migration. Column and
 table renames are currently treated as remove/add operations.
 
 When a generated rebuild changes a table referenced by another table, the
-runtime uses a dedicated SQLite connection, temporarily disables FK checks,
-runs `PRAGMA foreign_key_check`, and restores enforcement before completing the
-migration. This prevents SQLite `ON DELETE` actions from mutating child rows
-during the temporary table drop.
+generated SQL currently contains che-orm-specific handling that is intended for
+`apply_sql`. Such migrations need to be reviewed before being run through SQLx.
 
-Run `migrate` from exactly one process at a time for a database. Concurrent
-migration runners are not supported.
+SQLx validates checksums of previously applied migrations and fails if a
+migration file is edited after application. Existing development databases that
+use `_che_orm_migrations` must be recreated in this breaking release.
 
 Use `status` to inspect migration files and their applied state:
 
@@ -130,8 +132,9 @@ Use `status` to inspect migration files and their applied state:
 cargo run -p che-orm-cli -- status --config app.toml
 ```
 
-Applied migration files are checksum-validated. Editing a migration after it
-has been applied causes `migrate` to fail instead of silently accepting drift.
+Applied migration files are checksum-validated by SQLx. Editing a migration
+after it has been applied causes `migrate` to fail instead of silently
+accepting drift.
 
 ## End-To-End Example
 

@@ -458,6 +458,9 @@ let applied = db.apply_migrations_dir("migrations").await?;
 # }
 ```
 
+The directory is executed by SQLx's migration runner. Applied migrations and
+their checksums are stored in `_sqlx_migrations`.
+
 Run migration application from exactly one process at a time for a database.
 
 ## Supported Field Attributes
