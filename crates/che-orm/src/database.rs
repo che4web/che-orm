@@ -1,8 +1,10 @@
+#[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
+use std::fs;
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 use std::path::PathBuf;
 #[cfg(feature = "migration-atlas")]
 use std::process::Command;
-#[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
-use std::{fs, path::Path};
 
 #[cfg(feature = "postgres")]
 use crate::PostgresBackend;
