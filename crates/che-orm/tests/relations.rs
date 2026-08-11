@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use che_orm::{Model, Schema, SqliteBackend, create_table_sql};
+use che_orm::{Database, Model, Schema, create_table_sql};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "relation_users")]
@@ -61,32 +61,29 @@ struct DefaultedPost {
 
 #[tokio::test]
 async fn loads_related_and_reverse_related_objects() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create_table::<Post>().await.unwrap();
 
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("name", "Alice")
         .execute()
         .await
         .unwrap();
-    let post = Post::objects(&db)
-        .create()
+    let post = db
+        .create::<Post>()
         .set("user_id", user.id)
         .set("title", "First post")
         .execute()
         .await
         .unwrap();
 
-    let author = Post::objects(&db)
-        .get_related::<User>(post.user_id)
-        .await
-        .unwrap();
+    let author = db.get::<User>(post.user_id).await.unwrap();
     assert_eq!(author.name, "Alice");
 
     let descriptor_author = PostRelations::USER
-        .get(&db, post.user_id)
+        .get(db.as_sqlite(), post.user_id)
         .await
         .unwrap()
         .unwrap();
@@ -94,15 +91,15 @@ async fn loads_related_and_reverse_related_objects() {
 
     let posts = PostRelations::USER
         .reverse()
-        .query(&db, user.id)
+        .query(db.as_sqlite(), user.id)
         .all()
         .await
         .unwrap();
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].title, "First post");
 
-    let selected = Post::objects(&db)
-        .query()
+    let selected = db
+        .query::<Post>()
         .select_related(PostRelations::USER)
         .all()
         .await
@@ -110,8 +107,8 @@ async fn loads_related_and_reverse_related_objects() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].1.as_ref().unwrap().name, "Alice");
 
-    let prefetched = User::objects(&db)
-        .query()
+    let prefetched = db
+        .query::<User>()
         .prefetch_related(PostRelations::USER.reverse())
         .all()
         .await
@@ -137,17 +134,16 @@ fn foreign_key_is_part_of_schema_and_create_table_sql() {
 
 #[tokio::test]
 async fn foreign_key_actions_are_rendered_and_enforced() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create_table::<CascadePost>().await.unwrap();
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("name", "Alice")
         .execute()
         .await
         .unwrap();
-    CascadePost::objects(&db)
-        .create()
+    db.create::<CascadePost>()
         .set("user_id", user.id)
         .set("title", "First")
         .execute()
@@ -159,35 +155,35 @@ async fn foreign_key_actions_are_rendered_and_enforced() {
     assert_eq!(foreign_key.on_delete, che_orm::ForeignKeyAction::Cascade);
     assert!(create_table_sql::<CascadePost>().contains("ON DELETE CASCADE"));
 
-    User::objects(&db).delete(user.id).await.unwrap();
-    assert_eq!(CascadePost::objects(&db).all().await.unwrap().len(), 0);
+    db.delete::<User>(user.id).await.unwrap();
+    assert_eq!(db.all::<CascadePost>().await.unwrap().len(), 0);
 }
 
 #[tokio::test]
 async fn set_null_action_is_rendered_and_enforced() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create_table::<NullablePost>().await.unwrap();
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("name", "Alice")
         .execute()
         .await
         .unwrap();
-    let post = NullablePost::objects(&db)
-        .create()
+    let post = db
+        .create::<NullablePost>()
         .set("user_id", user.id)
         .execute()
         .await
         .unwrap();
 
     assert!(create_table_sql::<NullablePost>().contains("ON DELETE SET NULL"));
-    User::objects(&db).delete(user.id).await.unwrap();
-    let post = NullablePost::objects(&db).get(post.id).await.unwrap();
+    db.delete::<User>(user.id).await.unwrap();
+    let post = db.get::<NullablePost>(post.id).await.unwrap();
     assert_eq!(post.user_id, None);
     assert!(
         NullablePostRelations::USER
-            .get_optional(&db, post.user_id)
+            .get_optional(db.as_sqlite(), post.user_id)
             .await
             .unwrap()
             .is_none()
@@ -196,69 +192,62 @@ async fn set_null_action_is_rendered_and_enforced() {
 
 #[tokio::test]
 async fn restrict_and_set_default_actions_are_enforced() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create_table::<RestrictedPost>().await.unwrap();
     db.create_table::<DefaultedPost>().await.unwrap();
-    let fallback = User::objects(&db)
-        .create()
+    let fallback = db
+        .create::<User>()
         .set("name", "Fallback")
         .execute()
         .await
         .unwrap();
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("name", "Alice")
         .execute()
         .await
         .unwrap();
-    RestrictedPost::objects(&db)
-        .create()
+    db.create::<RestrictedPost>()
         .set("user_id", user.id)
         .execute()
         .await
         .unwrap();
     assert!(create_table_sql::<RestrictedPost>().contains("ON DELETE RESTRICT"));
-    assert!(User::objects(&db).delete(user.id).await.is_err());
+    assert!(db.delete::<User>(user.id).await.is_err());
 
-    RestrictedPost::objects(&db)
-        .query()
+    db.query::<RestrictedPost>()
         .filter(RestrictedPostFields::USER_ID.eq(user.id))
         .update_one_returning([("user_id", fallback.id)])
         .await
         .unwrap();
-    let post = DefaultedPost::objects(&db)
-        .create()
+    let post = db
+        .create::<DefaultedPost>()
         .set("user_id", user.id)
         .execute()
         .await
         .unwrap();
     assert!(create_table_sql::<DefaultedPost>().contains("ON DELETE SET DEFAULT"));
-    User::objects(&db).delete(user.id).await.unwrap();
+    db.delete::<User>(user.id).await.unwrap();
     assert_eq!(
-        DefaultedPost::objects(&db)
-            .get(post.id)
-            .await
-            .unwrap()
-            .user_id,
+        db.get::<DefaultedPost>(post.id).await.unwrap().user_id,
         fallback.id
     );
 }
 
 #[tokio::test]
 async fn prefetch_related_chunks_large_parent_sets() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create_table::<Post>().await.unwrap();
     for index in 0..901_i64 {
-        let user = User::objects(&db)
-            .create()
+        let user = db
+            .create::<User>()
             .set("name", format!("User {index}"))
             .execute()
             .await
             .unwrap();
-        Post::objects(&db)
-            .create()
+        db.create::<Post>()
             .set("user_id", user.id)
             .set("title", format!("Post {index}"))
             .execute()
@@ -266,8 +255,8 @@ async fn prefetch_related_chunks_large_parent_sets() {
             .unwrap();
     }
 
-    let prefetched = User::objects(&db)
-        .query()
+    let prefetched = db
+        .query::<User>()
         .prefetch_related(PostRelations::USER.reverse())
         .all()
         .await
@@ -278,20 +267,20 @@ async fn prefetch_related_chunks_large_parent_sets() {
 
 #[tokio::test]
 async fn eager_loading_rejects_invalid_relation_descriptors() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create_table::<Post>().await.unwrap();
 
-    let error = Post::objects(&db)
-        .query()
+    let error = db
+        .query::<Post>()
         .select_related(che_orm::BelongsTo::<Post, User>::new("title"))
         .all()
         .await
         .unwrap_err();
     assert!(matches!(error, che_orm::Error::InvalidRelation(_)));
 
-    let error = User::objects(&db)
-        .query()
+    let error = db
+        .query::<User>()
         .prefetch_related(che_orm::HasMany::<User, Post>::new("title"))
         .all()
         .await

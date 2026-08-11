@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use che_orm::{Model, SqliteBackend};
+use che_orm::{Database, Model};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "users")]
@@ -19,11 +19,11 @@ struct User {
 
 #[tokio::main]
 async fn main() -> che_orm::Result<()> {
-    let db = SqliteBackend::connect("sqlite::memory:").await?;
+    let db = Database::connect("sqlite::memory:").await?;
     db.create_table::<User>().await?;
 
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("email", "alice@example.com")
         .set("name", "Alice")
         .set("is_active", true)
@@ -32,18 +32,23 @@ async fn main() -> che_orm::Result<()> {
 
     println!("created: {user:?}");
 
-    let mut fetched = User::objects(&db).get(user.id).await?;
+    let mut fetched = db.get::<User>(user.id).await?;
     println!("fetched: {fetched:?}");
 
     fetched.name = "Alicia".to_string();
     fetched.is_active = false;
-    let updated = fetched.save(&db).await?;
+    let updated = db.save(&fetched).await?;
     println!("updated: {updated:?}");
 
-    let users = User::objects(&db).all().await?;
+    let users = db
+        .query::<User>()
+        .filter(UserFields::EMAIL.contains("@example.com"))
+        .order_by(UserFields::EMAIL)
+        .all()
+        .await?;
     println!("all users: {users:?}");
 
-    User::objects(&db).delete(user.id).await?;
+    db.delete::<User>(user.id).await?;
     println!("deleted user id {}", user.id);
 
     Ok(())

@@ -28,6 +28,51 @@ fn sqlite_derive_and_file_path_codecs_compile() {
 
     assert_model::<BackendCompileModel>();
     assert_codec::<che_orm::FilePath>();
+
+    async fn facade_methods(
+        db: &che_orm::Database,
+        model: &BackendCompileModel,
+    ) -> che_orm::Result<()> {
+        db.create_table::<BackendCompileModel>().await?;
+        db.get::<BackendCompileModel>(1).await?;
+        db.all::<BackendCompileModel>().await?;
+        db.update::<BackendCompileModel>(
+            1,
+            BackendCompileModelUpdate {
+                path: None,
+                status: None,
+            },
+        )
+        .await?;
+        db.save(model).await?;
+        db.delete::<BackendCompileModel>(1).await?;
+        db.query::<BackendCompileModel>()
+            .filter(
+                BackendCompileModelFields::ID
+                    .gte(1_i64)
+                    .and(BackendCompileModelFields::ID.gt(0_i64))
+                    .or(BackendCompileModelFields::ID.lt(10_i64).not())
+                    .and(BackendCompileModelFields::STATUS.eq(BackendCompileStatus::Active)),
+            )
+            .order_by(BackendCompileModelFields::ID)
+            .order_by_desc(BackendCompileModelFields::PATH)
+            .distinct()
+            .limit(10)
+            .offset(0)
+            .all()
+            .await?;
+        db.query::<BackendCompileModel>()
+            .filter(BackendCompileModelFields::ID.eq(1_i64))
+            .first()
+            .await?;
+        db.query::<BackendCompileModel>()
+            .filter(BackendCompileModelFields::ID.lte(10_i64))
+            .count()
+            .await?;
+        Ok(())
+    }
+
+    let _ = facade_methods;
 }
 
 #[cfg(feature = "postgres")]
@@ -44,4 +89,48 @@ fn postgres_derive_and_file_path_codecs_compile() {
 
     assert_model::<BackendCompileModel>();
     assert_codec::<che_orm::FilePath>();
+
+    async fn facade_methods(
+        db: &che_orm::Database,
+        model: &BackendCompileModel,
+    ) -> che_orm::Result<()> {
+        db.get::<BackendCompileModel>(1).await?;
+        db.all::<BackendCompileModel>().await?;
+        db.update::<BackendCompileModel>(
+            1,
+            BackendCompileModelUpdate {
+                path: None,
+                status: None,
+            },
+        )
+        .await?;
+        db.save(model).await?;
+        db.delete::<BackendCompileModel>(1).await?;
+        db.query::<BackendCompileModel>()
+            .filter(
+                BackendCompileModelFields::ID
+                    .gte(1_i64)
+                    .and(BackendCompileModelFields::ID.gt(0_i64))
+                    .or(BackendCompileModelFields::ID.lt(10_i64).not())
+                    .and(BackendCompileModelFields::STATUS.eq(BackendCompileStatus::Active)),
+            )
+            .order_by(BackendCompileModelFields::ID)
+            .order_by_desc(BackendCompileModelFields::PATH)
+            .distinct()
+            .limit(10)
+            .offset(0)
+            .all()
+            .await?;
+        db.query::<BackendCompileModel>()
+            .filter(BackendCompileModelFields::ID.eq(1_i64))
+            .first()
+            .await?;
+        db.query::<BackendCompileModel>()
+            .filter(BackendCompileModelFields::ID.lte(10_i64))
+            .count()
+            .await?;
+        Ok(())
+    }
+
+    let _ = facade_methods;
 }

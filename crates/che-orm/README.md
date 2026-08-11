@@ -7,7 +7,7 @@ The current MVP focuses on SQLite, model derive macros, CRUD, Django-style queri
 ## Model Definition
 
 ```rust
-use che_orm::{Model, SqliteBackend};
+use che_orm::{Database, Model};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "users")]
@@ -36,7 +36,7 @@ struct User {
 ## CRUD
 
 ```rust
-# use che_orm::{Model, SqliteBackend};
+# use che_orm::{Database, Model};
 # #[derive(Debug, Clone, Model)]
 # #[model(table = "users")]
 # struct User {
@@ -47,37 +47,38 @@ struct User {
 #     is_active: bool,
 # }
 # async fn example() -> che_orm::Result<()> {
-let db = SqliteBackend::connect("sqlite::memory:").await?;
+let db = Database::connect("sqlite::memory:").await?;
 db.create_table::<User>().await?;
 
-let user = User::objects(&db)
-    .create()
+let user = db
+    .create::<User>()
     .set("email", "alice@example.com")
     .set("name", "Alice")
     .set("is_active", true)
     .execute()
     .await?;
 
-let mut fetched = User::objects(&db).get(user.id).await?;
+let mut fetched = db.get::<User>(user.id).await?;
 
 fetched.name = "Alicia".to_string();
 fetched.is_active = false;
-let updated = fetched.save(&db).await?;
+let updated = db.save(&fetched).await?;
 
-let updated_without_loading = User::objects(&db)
-    .update_fields(user.id)
-    .set("name", "Alice Updated")
-    .execute()
+let updated_without_loading = db
+    .update::<User>(
+        user.id,
+        UserUpdate { name: Some("Alice Updated".to_string()), ..Default::default() },
+    )
     .await?;
 
-let users = User::objects(&db).all().await?;
+let users = db.all::<User>().await?;
 
-User::objects(&db).delete(user.id).await?;
+db.delete::<User>(user.id).await?;
 # Ok(())
 # }
 ```
 
-The external API does not require application code to use `sqlx` directly. `sqlx` is currently an internal SQLite implementation detail.
+The external API does not require application code to use `sqlx` directly.
 
 ## Signals
 
@@ -157,7 +158,7 @@ Create the referenced table before the table that contains the foreign key, or
 generate/apply migrations in dependency order.
 
 ```rust
-# use che_orm::{HasMany, Model, SqliteBackend};
+# use che_orm::{Database, HasMany, Model};
 # #[derive(Debug, Clone, Model)]
 # #[model(table = "authors")]
 # struct Author { #[field(primary_key)] id: i64, name: String }
@@ -165,29 +166,29 @@ generate/apply migrations in dependency order.
 # #[model(table = "posts")]
 # struct Post { #[field(primary_key)] id: i64, #[field(foreign_key = Author)] author_id: i64, title: String }
 # async fn example() -> che_orm::Result<()> {
-# let db = SqliteBackend::connect("sqlite::memory:").await?;
+# let db = Database::connect("sqlite::memory:").await?;
 # db.create_table::<Author>().await?;
 # db.create_table::<Post>().await?;
-let author = Author::objects(&db)
-    .create()
+let author = db
+    .create::<Author>()
     .set("name", "Alice")
     .execute()
     .await?;
 
-let post = Post::objects(&db)
-    .create()
+let post = db
+    .create::<Post>()
     .set("author_id", author.id)
     .set("title", "Hello")
     .execute()
     .await?;
 
 let loaded_author = PostRelations::AUTHOR
-    .get(&db, post.author_id)
+    .get(db.as_sqlite(), post.author_id)
     .await?;
 assert_eq!(loaded_author.unwrap().name, "Alice");
 
 let author_posts = PostRelations::AUTHOR.reverse()
-    .query(&db, author.id)
+    .query(db.as_sqlite(), author.id)
     .all()
     .await?;
 assert_eq!(author_posts.len(), 1);
@@ -200,14 +201,14 @@ forward relation in a second batched query, while `prefetch_related` loads a
 reverse relation without an N+1 query:
 
 ```rust
-let posts: Vec<(Post, Option<Author>)> = Post::objects(&db)
-    .query()
+let posts: Vec<(Post, Option<Author>)> = db
+    .query::<Post>()
     .select_related(PostRelations::AUTHOR)
     .all()
     .await?;
 
-let authors: che_orm::Prefetched<Author, Post> = Author::objects(&db)
-    .query()
+let authors: che_orm::Prefetched<Author, Post> = db
+    .query::<Author>()
     .prefetch_related(PostRelations::AUTHOR.reverse())
     .all()
     .await?;
@@ -215,16 +216,14 @@ let authors: che_orm::Prefetched<Author, Post> = Author::objects(&db)
 
 ## Queries
 
-The typed query API is a breaking API change: generated fields are now
-`ModelField<M, T>`, descending ordering uses `order_by_desc`, and dynamic field
-names require the explicit raw methods. Direct `ModelField::new` construction
+Generated fields are `ModelField<M, T>`. Direct `ModelField::new` construction
 is unsafe; use generated field constants.
 
 Use generated `ModelFields` constants with the Django-style query builder:
 
 ```rust
-let users = User::objects(&db)
-    .query()
+let users = db
+    .query::<User>()
     .filter(UserFields::IS_ACTIVE.eq(true))
     .filter(UserFields::NAME.contains("Ali"))
     .order_by_desc(UserFields::NAME)
@@ -240,10 +239,10 @@ expressions:
 ```rust
 use che_orm::Q;
 
-let user = User::objects(&db)
-    .query()
+let user = db
+    .query::<User>()
     .filter(
-        Q::from(UserFields::NAME.contains("Ali"))
+        UserFields::NAME.contains("Ali")
             .or(UserFields::ID.in_values([1_i64, 2, 3]))
             .and(UserFields::EMAIL.is_not_null()),
     )
@@ -251,14 +250,11 @@ let user = User::objects(&db)
     .await?;
 ```
 
-For dynamic field names, use the explicitly unchecked `eq_raw`, `in_raw`,
-`contains_raw`, or `order_by_raw` methods.
-
-Typed projections can be combined with `distinct`:
+Typed projections are currently SQLite-only and can be combined with `distinct`:
 
 ```rust
-let names = User::objects(&db)
-    .query()
+let names = db
+    .query::<User>()
     .values([UserFields::NAME])?
     .distinct()
     .all()
@@ -268,8 +264,8 @@ let names = User::objects(&db)
 For statically typed tuple results, use `select`:
 
 ```rust
-let rows: Vec<(i64, String)> = User::objects(&db)
-    .query()
+let rows: Vec<(i64, String)> = db
+    .query::<User>()
     .select((UserFields::ID, UserFields::NAME))?
     .all()
     .await?;
@@ -283,8 +279,8 @@ Grouped queries support typed `having` predicates and aggregate annotations:
 ```rust
 let total = AnnotationField::<i64>::new("total");
 let repeated = AnnotationField::<i64>::new("repeated");
-let grouped: Vec<(bool, i64, i64)> = User::objects(&db)
-    .query()
+let grouped: Vec<(bool, i64, i64)> = db
+    .query::<User>()
     .values([UserFields::IS_ACTIVE])?
     .group_by()
     .annotate_count_field(&total, UserFields::ID)?
@@ -302,13 +298,13 @@ rows. `first()` returns `Option<User>` and preserves ordering and offset.
 The query builder also supports `count()` and numeric aggregates:
 
 ```rust
-let active_count = User::objects(&db)
-    .query()
+let active_count = db
+    .query::<User>()
     .filter(UserFields::IS_ACTIVE.eq(true))
     .count()
     .await?;
-let highest_id = User::objects(&db)
-    .query()
+let highest_id = db
+    .query::<User>()
     .max(UserFields::ID)
     .await?;
 ```
@@ -531,14 +527,12 @@ che-orm = { version = "0.1", default-features = false, features = ["postgres"] }
 The default feature is `sqlite`; the two backend features are mutually
 exclusive and a binary cannot switch between them at runtime. Each backend
 feature enables only its matching SQLx driver. `DatabaseValue`, `FilePath`, and
-the `Model` derive are backend-neutral; SQLite query builders, relations,
-`QueryValue`, and `AggregateValue` are SQLite-only.
+the `Model` derive are backend-neutral.
 
-The PostgreSQL backend provides SQLx migration application plus basic model
-operations through `Model::postgres_objects(&backend)`: `create`, `get`, and
-`all`. JSON model fields use `JSONB`. Filtering, relations, and the shared
-`Model::objects` query API remain SQLite-specific while PostgreSQL query
-support is expanded.
+The `Database` facade provides `create`, `get`, `all`, `update`, `save`,
+`delete`, and typed `query` operations for both backends. JSON model fields use
+`JSONB` in PostgreSQL. Relations, projections, annotations, grouped queries,
+and numeric aggregates remain SQLite-only.
 
 The runnable `manager` example can be started with:
 

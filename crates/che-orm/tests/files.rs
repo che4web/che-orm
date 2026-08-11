@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use che_orm::{FilePath, FileStorage, LocalFileStorage, Model, SqliteBackend};
+use che_orm::{Database, FilePath, FileStorage, LocalFileStorage, Model};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "file_assets")]
@@ -44,11 +44,11 @@ fn local_storage_roundtrip() {
 
 #[tokio::test]
 async fn file_path_model_roundtrips() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<Asset>().await.unwrap();
     let path = FilePath::new("aa/bb/report.txt").unwrap();
-    let asset = Asset::objects(&db)
-        .create()
+    let asset = db
+        .create::<Asset>()
         .set("path", path.clone())
         .execute()
         .await
@@ -56,25 +56,25 @@ async fn file_path_model_roundtrips() {
     assert_eq!(asset.path, path);
     assert!(asset.optional_path.is_none());
     assert_eq!(
-        Asset::objects(&db).get(asset.id).await.unwrap().path,
+        db.get::<Asset>(asset.id).await.unwrap().path,
         FilePath::new("aa/bb/report.txt").unwrap()
     );
 }
 
 #[tokio::test]
 async fn typed_projection_decodes_file_paths_and_nullable_values() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<Asset>().await.unwrap();
     let path = FilePath::new("typed/report.txt").unwrap();
-    let asset = Asset::objects(&db)
-        .create()
+    let asset = db
+        .create::<Asset>()
         .set("path", path.clone())
         .execute()
         .await
         .unwrap();
 
-    let projected: FilePath = Asset::objects(&db)
-        .query()
+    let projected: FilePath = db
+        .query::<Asset>()
         .filter(AssetFields::ID.eq(asset.id))
         .select(AssetFields::PATH)
         .unwrap()
@@ -85,8 +85,8 @@ async fn typed_projection_decodes_file_paths_and_nullable_values() {
         .unwrap();
     assert_eq!(projected, path);
 
-    let optional: Option<FilePath> = Asset::objects(&db)
-        .query()
+    let optional: Option<FilePath> = db
+        .query::<Asset>()
         .filter(AssetFields::ID.eq(asset.id))
         .select(AssetFields::OPTIONAL_PATH.optional())
         .unwrap()

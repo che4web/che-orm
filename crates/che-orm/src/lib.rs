@@ -24,6 +24,7 @@ pub mod migration;
 pub mod model;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod query;
 #[cfg(feature = "sqlite")]
 pub mod relation;
 pub mod schema;
@@ -43,10 +44,10 @@ pub use error::{Error, Result};
 pub use files::{FilePath, FileStorage, LocalFileStorage};
 #[cfg(feature = "sqlite")]
 pub use manager::{
-    AnnotationField, AnnotationPredicate, GroupProjectionSpec, ModelManager, NumericQueryField,
+    AnnotationField, AnnotationPredicate, GroupProjectionSpec, NumericQueryField,
     OptionalProjectionField, OptionalProjectionValue, PrefetchQuery, Prefetched, ProjectionQuery,
-    ProjectionSpec, ProjectionValue, Q, QueryBuilder, QueryField, SelectRelatedQuery,
-    TextQueryField, TypedProjectionQuery, TypedQueryField, UpdateBuilder,
+    ProjectionSpec, ProjectionValue, QueryBuilder, QueryField, SelectRelatedQuery, TextQueryField,
+    TypedProjectionQuery, TypedQueryField, UpdateBuilder,
 };
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, postgres_schema_sql,
@@ -57,13 +58,14 @@ pub use model::PostgresModel;
 #[cfg(feature = "sqlite")]
 pub use model::SqliteModel;
 #[cfg(feature = "sqlite")]
-pub use model::{AggregateValue, QueryValue, SqliteValue};
+pub use model::{AggregateValue, SqliteValue};
 pub use model::{
     Choice, DatabaseValue, FieldInfo, FieldType, ForeignKeyAction, ForeignKeyInfo, Model,
-    ModelField,
+    ModelField, QueryValue,
 };
 #[cfg(feature = "postgres")]
-pub use postgres::{PostgresBackend, PostgresModelManager};
+pub use postgres::{PostgresBackend, PostgresQueryBuilder};
+pub use query::Q;
 #[cfg(feature = "sqlite")]
 pub use relation::{BelongsTo, HasMany};
 pub use schema::{FieldSchema, ForeignKeySchema, IndexSchema, ModelSchema, Schema};

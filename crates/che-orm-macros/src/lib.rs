@@ -54,16 +54,17 @@ fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let from_str_arms = variants
         .iter()
         .map(|(variant, value)| quote!(#value => Ok(Self::#variant)));
+    let choice_query_value_impl = quote! {
+        impl ::che_orm::QueryValue<#enum_name> for #enum_name {
+            fn into_query_value(self) -> ::che_orm::DatabaseValue {
+                ::che_orm::DatabaseValue::String(
+                    <#enum_name as ::che_orm::Choice>::as_str(&self).to_string()
+                )
+            }
+        }
+    };
     let sqlite_choice_impl = if cfg!(feature = "sqlite") {
         quote! {
-            impl ::che_orm::QueryValue<#enum_name> for #enum_name {
-                fn into_query_value(self) -> ::che_orm::SqliteValue {
-                    ::che_orm::SqliteValue::String(
-                        <#enum_name as ::che_orm::Choice>::as_str(&self).to_string()
-                    )
-                }
-            }
-
             impl ::che_orm::ProjectionValue for #enum_name {
                 fn from_projection_row(
                     row: &::che_orm::__private::sqlx::sqlite::SqliteRow,
@@ -114,6 +115,7 @@ fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
 
+        #choice_query_value_impl
         #sqlite_choice_impl
     })
 }
@@ -342,11 +344,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let sqlite_impl = if cfg!(feature = "sqlite") {
         quote! {
-            impl #model_name {
-                pub async fn save(&self, db: &::che_orm::SqliteBackend) -> ::che_orm::Result<Self> {
-                    <Self as ::che_orm::Model>::objects(db).save(self).await
-                }
-            }
             impl ::che_orm::SqliteModel for #model_name {
                 fn from_row(row: &::che_orm::__private::sqlx::sqlite::SqliteRow) -> ::che_orm::__private::sqlx::Result<Self> { Ok(Self { #(#row_fields,)* }) }
                 fn id(&self) -> Self::Id { self.#id_ident.clone() }
@@ -359,9 +356,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     };
     let postgres_impl = if cfg!(feature = "postgres") {
         quote! {
-            impl #model_name {
-                pub async fn save_postgres(&self, db: &::che_orm::PostgresBackend) -> ::che_orm::Result<Self> { <Self as ::che_orm::Model>::postgres_objects(db).save(self).await?.ok_or(::che_orm::Error::NotFound) }
-            }
             impl ::che_orm::PostgresModel for #model_name {
                 fn from_postgres_row(row: &::che_orm::__private::sqlx::postgres::PgRow) -> ::che_orm::__private::sqlx::Result<Self> { Ok(Self { #(#postgres_row_fields,)* }) }
                 fn id(&self) -> Self::Id { self.#id_ident.clone() }
@@ -411,63 +405,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 }
             }
         }
-
-        /*impl #model_name {
-            pub async fn save(&self, db: &::che_orm::SqliteBackend) -> ::che_orm::Result<Self> {
-                <Self as ::che_orm::Model>::objects(db).save(self).await
-            }
-
-            pub async fn save_postgres(&self, db: &::che_orm::PostgresBackend) -> ::che_orm::Result<Self> {
-                <Self as ::che_orm::Model>::postgres_objects(db)
-                    .save(self)
-                    .await?
-                    .ok_or(::che_orm::Error::NotFound)
-            }
-        }*/
-
-        /*impl ::che_orm::SqliteModel for #model_name {
-            fn from_row(row: &::che_orm::__private::sqlx::sqlite::SqliteRow) -> ::che_orm::__private::sqlx::Result<Self> {
-                Ok(Self {
-                    #(#row_fields,)*
-                })
-            }
-
-            fn id(&self) -> Self::Id {
-                self.#id_ident.clone()
-            }
-
-            fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> {
-                let mut values = ::std::vec::Vec::new();
-                #(#update_values)*
-                values
-            }
-
-            fn save_values(&self) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> {
-                let mut values = ::std::vec::Vec::new();
-                #(#save_values)*
-                values
-            }
-        }*/
-
-        /*impl ::che_orm::PostgresModel for #model_name {
-            fn from_postgres_row(row: &::che_orm::__private::sqlx::postgres::PgRow) -> ::che_orm::__private::sqlx::Result<Self> {
-                Ok(Self {
-                    #(#postgres_row_fields,)*
-                })
-            }
-
-            fn id(&self) -> Self::Id {
-                self.#id_ident.clone()
-            }
-
-            fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> {
-                <Self as ::che_orm::SqliteModel>::update_values(data)
-            }
-
-            fn save_values(&self) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> {
-                <Self as ::che_orm::SqliteModel>::save_values(self)
-            }
-        }*/
 
         #sqlite_impl
         #postgres_impl

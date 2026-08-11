@@ -1,7 +1,5 @@
 use std::marker::PhantomData;
 
-#[cfg(feature = "sqlite")]
-use crate::ModelManager;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,9 +80,8 @@ impl<M, T> ModelField<M, T> {
     }
 }
 
-#[cfg(feature = "sqlite")]
 pub trait QueryValue<T> {
-    fn into_query_value(self) -> SqliteValue;
+    fn into_query_value(self) -> DatabaseValue;
 }
 
 #[cfg(feature = "sqlite")]
@@ -99,36 +96,25 @@ impl<T> AggregateValue for T where
 {
 }
 
-#[cfg(feature = "sqlite")]
 macro_rules! query_value_impl {
     ($field_type:ty, $($value_type:ty),+ $(,)?) => {
         $(impl QueryValue<$field_type> for $value_type {
-            fn into_query_value(self) -> SqliteValue {
+            fn into_query_value(self) -> DatabaseValue {
                 self.into()
             }
         })+
     };
 }
 
-#[cfg(feature = "sqlite")]
 query_value_impl!(i64, i64, i32, u32);
-#[cfg(feature = "sqlite")]
 query_value_impl!(i32, i32);
-#[cfg(feature = "sqlite")]
 query_value_impl!(u32, u32);
-#[cfg(feature = "sqlite")]
 query_value_impl!(String, String, &str);
-#[cfg(feature = "sqlite")]
 query_value_impl!(bool, bool);
-#[cfg(feature = "sqlite")]
 query_value_impl!(f64, f64, f32);
-#[cfg(feature = "sqlite")]
 query_value_impl!(f32, f32);
-#[cfg(feature = "sqlite")]
 query_value_impl!(chrono::NaiveDateTime, chrono::NaiveDateTime);
-#[cfg(feature = "sqlite")]
 query_value_impl!(serde_json::Value, serde_json::Value);
-#[cfg(feature = "sqlite")]
 query_value_impl!(crate::FilePath, crate::FilePath);
 
 #[derive(Debug, Clone)]
@@ -220,22 +206,6 @@ pub trait Model: Sized + Send + Sync + 'static {
 
     fn primary_key() -> Option<&'static FieldInfo> {
         Self::fields().iter().find(|field| field.primary_key)
-    }
-
-    #[cfg(feature = "sqlite")]
-    fn objects(db: &crate::SqliteBackend) -> ModelManager<'_, Self>
-    where
-        Self: SqliteModel,
-    {
-        ModelManager::new(db)
-    }
-
-    #[cfg(feature = "postgres")]
-    fn postgres_objects(db: &crate::PostgresBackend) -> crate::PostgresModelManager<'_, Self>
-    where
-        Self: PostgresModel,
-    {
-        crate::PostgresModelManager::new(db)
     }
 
     fn get_value(&self, _field: &str) -> Option<crate::__private::serde_json::Value> {

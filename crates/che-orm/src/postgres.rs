@@ -1,21 +1,33 @@
 use std::path::Path;
 
 use sqlx::{
-    PgPool,
+    PgPool, Row,
     migrate::{Migrate, Migrator},
     postgres::PgPoolOptions,
 };
 
-use crate::{DatabaseValue, FieldInfo, FieldType, MigrationStatus, PostgresModel, Result};
+use crate::query::{QNode, QueryOperator};
+use crate::{
+    DatabaseValue, FieldInfo, FieldType, MigrationStatus, ModelField, PostgresModel, Q, Result,
+};
 
 #[derive(Debug, Clone)]
 pub struct PostgresBackend {
     pool: PgPool,
 }
 
-pub struct PostgresModelManager<'db, M> {
+pub(crate) struct PostgresModelManager<'db, M> {
     db: &'db PostgresBackend,
     _model: std::marker::PhantomData<M>,
+}
+
+pub struct PostgresQueryBuilder<'db, M> {
+    db: &'db PostgresBackend,
+    predicate: Option<Q<M>>,
+    orderings: Vec<(&'static str, bool)>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    distinct: bool,
 }
 
 impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
@@ -34,17 +46,6 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
             .collect()
     }
 
-    pub async fn filter_eq(&self, field: &str, value: DatabaseValue) -> Result<Vec<M>> {
-        let field_info = field_info::<M>(field)?;
-        let sql = format!("SELECT * FROM {} WHERE {field} = $1", M::table_name());
-        let rows = bind_value(sqlx::query(&sql), value, field_info)
-            .fetch_all(self.db.pool())
-            .await?;
-        rows.iter()
-            .map(|row| M::from_postgres_row(row).map_err(Into::into))
-            .collect()
-    }
-
     pub async fn get(&self, id: i64) -> Result<Option<M>> {
         let primary_key = primary_key::<M>()?;
         let sql = format!(
@@ -58,16 +59,6 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
             .await?
             .map(|row| M::from_postgres_row(&row).map_err(Into::into))
             .transpose()
-    }
-
-    pub async fn create(&self, model: &M) -> Result<M> {
-        self.create_values(
-            M::save_values(model)
-                .into_iter()
-                .map(|(name, value)| (name.to_string(), value))
-                .collect(),
-        )
-        .await
     }
 
     pub async fn create_values(&self, raw_values: Vec<(String, DatabaseValue)>) -> Result<M> {
@@ -161,6 +152,196 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
             .await?
             .rows_affected()
             != 0)
+    }
+}
+
+impl<'db, M: PostgresModel> PostgresQueryBuilder<'db, M> {
+    pub(crate) fn new(db: &'db PostgresBackend) -> Self {
+        Self {
+            db,
+            predicate: None,
+            orderings: Vec::new(),
+            limit: None,
+            offset: None,
+            distinct: false,
+        }
+    }
+    pub fn filter(mut self, expression: Q<M>) -> Self {
+        self.predicate = Some(match self.predicate.take() {
+            Some(existing) => existing.and(expression),
+            None => expression,
+        });
+        self
+    }
+
+    pub fn order_by<T>(mut self, field: ModelField<M, T>) -> Self {
+        self.orderings.push((field.db_name(), false));
+        self
+    }
+
+    pub fn order_by_desc<T>(mut self, field: ModelField<M, T>) -> Self {
+        self.orderings.push((field.db_name(), true));
+        self
+    }
+
+    pub fn limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+    pub fn offset(mut self, offset: u32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+    pub fn distinct(mut self) -> Self {
+        self.distinct = true;
+        self
+    }
+
+    pub async fn all(self) -> Result<Vec<M>> {
+        let (sql, values) = self.sql("*");
+        let query = values
+            .into_iter()
+            .fold(sqlx::query(&sql), |query, (value, field)| {
+                bind_value(query, value, field)
+            });
+        query
+            .fetch_all(self.db.pool())
+            .await?
+            .iter()
+            .map(|row| M::from_postgres_row(row).map_err(Into::into))
+            .collect()
+    }
+
+    pub async fn first(mut self) -> Result<Option<M>> {
+        self.limit = Some(1);
+        let (sql, values) = self.sql("*");
+        let query = values
+            .into_iter()
+            .fold(sqlx::query(&sql), |query, (value, field)| {
+                bind_value(query, value, field)
+            });
+        query
+            .fetch_optional(self.db.pool())
+            .await?
+            .map(|row| M::from_postgres_row(&row).map_err(Into::into))
+            .transpose()
+    }
+
+    pub async fn count(mut self) -> Result<i64> {
+        // Count the filtered relation, not the current result page.
+        self.distinct = false;
+        self.limit = None;
+        self.offset = None;
+        let (sql, values) = self.sql("COUNT(*)");
+        let query = values
+            .into_iter()
+            .fold(sqlx::query(&sql), |query, (value, field)| {
+                bind_value(query, value, field)
+            });
+        Ok(query.fetch_one(self.db.pool()).await?.try_get(0)?)
+    }
+
+    fn sql(&self, select: &str) -> (String, Vec<(DatabaseValue, &'static FieldInfo)>) {
+        let prefix = if self.distinct {
+            "SELECT DISTINCT"
+        } else {
+            "SELECT"
+        };
+        let mut sql = format!("{prefix} {select} FROM {}", M::table_name());
+        let mut values = Vec::new();
+        if let Some(predicate) = &self.predicate {
+            sql.push_str(" WHERE ");
+            sql.push_str(&render_predicate::<M>(&predicate.node, &mut values));
+        }
+        if !self.orderings.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(
+                &self
+                    .orderings
+                    .iter()
+                    .map(|(field, descending)| {
+                        format!("{field} {}", if *descending { "DESC" } else { "ASC" })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        match (self.limit, self.offset) {
+            (Some(limit), Some(offset)) => sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}")),
+            (Some(limit), None) => sql.push_str(&format!(" LIMIT {limit}")),
+            (None, Some(offset)) => sql.push_str(&format!(" OFFSET {offset}")),
+            (None, None) => {}
+        }
+        (sql, values)
+    }
+}
+
+fn render_predicate<M: PostgresModel>(
+    node: &QNode,
+    values: &mut Vec<(DatabaseValue, &'static FieldInfo)>,
+) -> String {
+    match node {
+        QNode::Compare {
+            field,
+            operator,
+            value,
+        } => {
+            let field =
+                field_info::<M>(field).expect("typed fields are generated from model metadata");
+            let value = match operator {
+                QueryOperator::Contains => match value.clone() {
+                    DatabaseValue::String(value) => DatabaseValue::String(format!("%{value}%")),
+                    value => value,
+                },
+                _ => value.clone(),
+            };
+            values.push((value, field));
+            let operator = match operator {
+                QueryOperator::Eq => "=",
+                QueryOperator::Contains => "LIKE",
+                QueryOperator::Gt => ">",
+                QueryOperator::Gte => ">=",
+                QueryOperator::Lt => "<",
+                QueryOperator::Lte => "<=",
+            };
+            format!("{} {operator} ${}", field.db_name, values.len())
+        }
+        QNode::In {
+            field,
+            values: items,
+        } => {
+            let field =
+                field_info::<M>(field).expect("typed fields are generated from model metadata");
+            if items.is_empty() {
+                return "FALSE".to_string();
+            }
+            let placeholders = items
+                .iter()
+                .map(|value| {
+                    values.push((value.clone(), field));
+                    format!("${}", values.len())
+                })
+                .collect::<Vec<_>>();
+            format!("{} IN ({})", field.db_name, placeholders.join(", "))
+        }
+        QNode::IsNull { field, negated } => format!(
+            "{} IS {}NULL",
+            field_info::<M>(field)
+                .expect("typed fields are generated from model metadata")
+                .db_name,
+            if *negated { "NOT " } else { "" }
+        ),
+        QNode::And(left, right) => format!(
+            "({} AND {})",
+            render_predicate::<M>(left, values),
+            render_predicate::<M>(right, values)
+        ),
+        QNode::Or(left, right) => format!(
+            "({} OR {})",
+            render_predicate::<M>(left, values),
+            render_predicate::<M>(right, values)
+        ),
+        QNode::Not(node) => format!("NOT ({})", render_predicate::<M>(node, values)),
     }
 }
 

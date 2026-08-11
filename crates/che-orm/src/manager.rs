@@ -6,9 +6,10 @@ use sqlx::{
     sqlite::SqliteArguments,
 };
 
+use crate::query::{QNode, QueryOperator};
 use crate::{
-    BelongsTo, Error, HasMany, Model, ModelField, QueryValue, Result, SqliteBackend, SqliteModel,
-    SqliteValue,
+    BelongsTo, Error, HasMany, Model, ModelField, Q, QueryValue, Result, SqliteBackend,
+    SqliteModel, SqliteValue,
     signals::{PostSaveEvent, PostUpdateEvent, snapshot},
 };
 
@@ -858,7 +859,7 @@ impl<M> QueryField<M> for &str {
     }
 }
 
-pub struct ModelManager<'db, M> {
+pub(crate) struct ModelManager<'db, M> {
     db: &'db SqliteBackend,
     _model: PhantomData<M>,
 }
@@ -1045,45 +1046,6 @@ impl<M: Model, R> Prefetched<M, R> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum QueryOperator {
-    Eq,
-    Contains,
-    Gt,
-    Gte,
-    Lt,
-    Lte,
-}
-
-enum QNode {
-    Compare {
-        field: String,
-        operator: QueryOperator,
-        value: SqliteValue,
-    },
-    AnnotationCompare {
-        field: String,
-        operator: QueryOperator,
-        value: SqliteValue,
-    },
-    In {
-        field: String,
-        values: Vec<SqliteValue>,
-    },
-    IsNull {
-        field: String,
-        negated: bool,
-    },
-    And(Box<QNode>, Box<QNode>),
-    Or(Box<QNode>, Box<QNode>),
-    Not(Box<QNode>),
-}
-
-pub struct Q<M> {
-    node: QNode,
-    _model: PhantomData<M>,
-}
-
 struct Ordering {
     field: String,
     descending: bool,
@@ -1093,7 +1055,7 @@ impl<'db, M> ModelManager<'db, M>
 where
     M: SqliteModel,
 {
-    pub fn new(db: &'db SqliteBackend) -> Self {
+    pub(crate) fn new(db: &'db SqliteBackend) -> Self {
         Self {
             db,
             _model: PhantomData,
@@ -1104,18 +1066,6 @@ where
         CreateBuilder {
             db: self.db,
             values: Vec::new(),
-            _model: PhantomData,
-        }
-    }
-
-    pub fn query(&self) -> QueryBuilder<'db, M> {
-        QueryBuilder {
-            db: self.db,
-            predicate: None,
-            orderings: Vec::new(),
-            limit: None,
-            offset: None,
-            distinct: false,
             _model: PhantomData,
         }
     }
@@ -1141,40 +1091,6 @@ where
             .map(M::from_row)
             .collect::<sqlx::Result<Vec<_>>>()
             .map_err(Into::into)
-    }
-
-    pub async fn filter_by_i64(&self, field: &str, value: i64) -> Result<Vec<M>> {
-        let field = checked_field::<M>(field)?;
-        let sql = format!("SELECT * FROM {} WHERE {} = ?1", M::table_name(), field);
-        let rows = sqlx::query(&sql)
-            .bind(value)
-            .fetch_all(self.db.pool())
-            .await?;
-        rows.iter()
-            .map(M::from_row)
-            .collect::<sqlx::Result<Vec<_>>>()
-            .map_err(Into::into)
-    }
-
-    pub async fn first_by_i64(&self, field: &str, value: i64) -> Result<M> {
-        let field = checked_field::<M>(field)?;
-        let sql = format!(
-            "SELECT * FROM {} WHERE {} = ?1 LIMIT 1",
-            M::table_name(),
-            field
-        );
-        let row = sqlx::query(&sql)
-            .bind(value)
-            .fetch_one(self.db.pool())
-            .await?;
-        Ok(M::from_row(&row)?)
-    }
-
-    pub async fn get_related<R>(&self, id: R::Id) -> Result<R>
-    where
-        R: SqliteModel,
-    {
-        ModelManager::<R>::new(self.db).get(id).await
     }
 
     pub async fn update(&self, id: M::Id, data: M::Update) -> Result<M> {
@@ -1213,113 +1129,27 @@ impl<'db, M> QueryBuilder<'db, M>
 where
     M: SqliteModel,
 {
-    pub fn eq<F, V>(self, field: F, value: V) -> Self
-    where
-        F: TypedQueryField<M>,
-        V: QueryValue<F::Value>,
-    {
-        self.filter(Q::compare(field, QueryOperator::Eq, value))
+    pub(crate) fn new(db: &'db SqliteBackend) -> Self {
+        Self {
+            db,
+            predicate: None,
+            orderings: Vec::new(),
+            limit: None,
+            offset: None,
+            distinct: false,
+            _model: PhantomData,
+        }
     }
 
-    pub fn eq_raw<V>(self, field: &str, value: V) -> Self
-    where
-        V: Into<SqliteValue>,
-    {
-        self.filter(Q::compare_raw(field, QueryOperator::Eq, value.into()))
-    }
-
-    pub fn in_raw<I, V>(self, field: &str, values: I) -> Self
-    where
-        I: IntoIterator<Item = V>,
-        V: Into<SqliteValue>,
-    {
-        self.filter(Q::in_raw(
-            field,
-            values.into_iter().map(Into::into).collect(),
-        ))
-    }
-
-    pub fn contains_raw<V>(self, field: &str, value: V) -> Self
-    where
-        V: Into<SqliteValue>,
-    {
-        self.filter(Q::compare_raw(field, QueryOperator::Contains, value.into()))
-    }
-
-    pub fn gt_raw<V>(self, field: &str, value: V) -> Self
-    where
-        V: Into<SqliteValue>,
-    {
-        self.filter(Q::compare_raw(field, QueryOperator::Gt, value.into()))
-    }
-
-    pub fn gte_raw<V>(self, field: &str, value: V) -> Self
-    where
-        V: Into<SqliteValue>,
-    {
-        self.filter(Q::compare_raw(field, QueryOperator::Gte, value.into()))
-    }
-
-    pub fn lt_raw<V>(self, field: &str, value: V) -> Self
-    where
-        V: Into<SqliteValue>,
-    {
-        self.filter(Q::compare_raw(field, QueryOperator::Lt, value.into()))
-    }
-
-    pub fn lte_raw<V>(self, field: &str, value: V) -> Self
-    where
-        V: Into<SqliteValue>,
-    {
-        self.filter(Q::compare_raw(field, QueryOperator::Lte, value.into()))
-    }
-
-    pub fn order_by_raw(mut self, field: &str, descending: bool) -> Self {
-        self.orderings.push(Ordering {
-            field: field.to_string(),
-            descending,
-        });
+    // Relations and prefetches need a metadata-driven predicate because their field is dynamic.
+    pub(crate) fn filter_by_field(mut self, field: &str, value: SqliteValue) -> Self {
+        self.predicate = Some(Q::compare_raw(field, QueryOperator::Eq, value));
         self
     }
 
-    pub fn contains<F, V>(self, field: F, value: V) -> Self
-    where
-        F: TextQueryField<M>,
-        V: QueryValue<F::Value>,
-    {
-        self.filter(Q::compare(field, QueryOperator::Contains, value))
-    }
-
-    pub fn gt<F, V>(self, field: F, value: V) -> Self
-    where
-        F: TypedQueryField<M>,
-        V: QueryValue<F::Value>,
-    {
-        self.filter(Q::compare(field, QueryOperator::Gt, value))
-    }
-
-    pub fn gte<F, V>(self, field: F, value: V) -> Self
-    where
-        F: TypedQueryField<M>,
-        V: QueryValue<F::Value>,
-    {
-        self.filter(Q::compare(field, QueryOperator::Gte, value))
-    }
-
-    pub fn lt<F, V>(self, field: F, value: V) -> Self
-    where
-        F: TypedQueryField<M>,
-        V: QueryValue<F::Value>,
-    {
-        self.filter(Q::compare(field, QueryOperator::Lt, value))
-    }
-
-    pub fn lte<F, V>(self, field: F, value: V) -> Self
-    where
-        F: TypedQueryField<M>,
-        V: QueryValue<F::Value>,
-    {
-        self.filter(Q::compare(field, QueryOperator::Lte, value))
+    pub(crate) fn filter_in_field(mut self, field: &str, values: Vec<SqliteValue>) -> Self {
+        self.predicate = Some(Q::in_raw(field, values));
+        self
     }
 
     pub fn filter<E>(mut self, expression: E) -> Self
@@ -1663,9 +1493,8 @@ where
         }
         let mut related = HashMap::new();
         for chunk in values.chunks(SQLITE_BIND_CHUNK_SIZE) {
-            for model in R::objects(db)
-                .query()
-                .in_raw("id", chunk.iter().cloned())
+            for model in QueryBuilder::<R>::new(db)
+                .filter_in_field("id", chunk.to_vec())
                 .all()
                 .await?
             {
@@ -1709,9 +1538,8 @@ where
         let mut children = Vec::new();
         for chunk in parent_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
             children.extend(
-                R::objects(db)
-                    .query()
-                    .in_raw(relation.child_field(), chunk.iter().cloned())
+                QueryBuilder::<R>::new(db)
+                    .filter_in_field(relation.child_field(), chunk.to_vec())
                     .all()
                     .await?,
             );
@@ -1743,70 +1571,19 @@ fn json_to_sqlite_value(value: crate::__private::serde_json::Value) -> Option<Sq
 }
 
 impl<M> Q<M> {
-    fn annotation_compare(field: &str, operator: QueryOperator, value: SqliteValue) -> Self {
-        Self {
-            node: QNode::AnnotationCompare {
-                field: field.to_string(),
-                operator,
-                value,
-            },
-            _model: PhantomData,
-        }
+    pub(crate) fn in_raw(field: &str, values: Vec<SqliteValue>) -> Self {
+        Q::new(QNode::In {
+            field: field.to_string(),
+            values,
+        })
     }
 
-    fn in_raw(field: &str, values: Vec<SqliteValue>) -> Self {
-        Self {
-            node: QNode::In {
-                field: field.to_string(),
-                values,
-            },
-            _model: PhantomData,
-        }
-    }
-
-    fn compare_raw(field: &str, operator: QueryOperator, value: SqliteValue) -> Self {
-        Self {
-            node: QNode::Compare {
-                field: field.to_string(),
-                operator,
-                value,
-            },
-            _model: PhantomData,
-        }
-    }
-
-    fn compare<F, V>(field: F, operator: QueryOperator, value: V) -> Self
-    where
-        F: TypedQueryField<M>,
-        V: QueryValue<F::Value>,
-    {
-        Self {
-            node: QNode::Compare {
-                field: field.db_name().to_string(),
-                operator,
-                value: value.into_query_value(),
-            },
-            _model: PhantomData,
-        }
-    }
-
-    pub fn and(self, other: Self) -> Self {
-        Self::combine(QNode::And(Box::new(self.node), Box::new(other.node)))
-    }
-
-    pub fn or(self, other: Self) -> Self {
-        Self::combine(QNode::Or(Box::new(self.node), Box::new(other.node)))
-    }
-
-    pub fn not(self) -> Self {
-        Self::combine(QNode::Not(Box::new(self.node)))
-    }
-
-    fn combine(node: QNode) -> Self {
-        Self {
-            node,
-            _model: PhantomData,
-        }
+    pub(crate) fn compare_raw(field: &str, operator: QueryOperator, value: SqliteValue) -> Self {
+        Q::new(QNode::Compare {
+            field: field.to_string(),
+            operator,
+            value,
+        })
     }
 }
 
@@ -1816,80 +1593,6 @@ impl<M, T> ModelField<M, T> {
             field: self.db_name(),
             _models: PhantomData,
         }
-    }
-
-    pub fn eq<V>(self, value: V) -> Q<M>
-    where
-        Self: TypedQueryField<M, Value = T>,
-        V: QueryValue<T>,
-    {
-        Q::compare(self, QueryOperator::Eq, value)
-    }
-
-    pub fn gt<V>(self, value: V) -> Q<M>
-    where
-        V: QueryValue<T>,
-    {
-        Q::compare(self, QueryOperator::Gt, value)
-    }
-
-    pub fn gte<V>(self, value: V) -> Q<M>
-    where
-        V: QueryValue<T>,
-    {
-        Q::compare(self, QueryOperator::Gte, value)
-    }
-
-    pub fn lt<V>(self, value: V) -> Q<M>
-    where
-        V: QueryValue<T>,
-    {
-        Q::compare(self, QueryOperator::Lt, value)
-    }
-
-    pub fn lte<V>(self, value: V) -> Q<M>
-    where
-        V: QueryValue<T>,
-    {
-        Q::compare(self, QueryOperator::Lte, value)
-    }
-
-    pub fn in_values<I, V>(self, values: I) -> Q<M>
-    where
-        I: IntoIterator<Item = V>,
-        Self: TypedQueryField<M, Value = T>,
-        V: QueryValue<T>,
-    {
-        Q::combine(QNode::In {
-            field: self.db_name().to_string(),
-            values: values
-                .into_iter()
-                .map(QueryValue::into_query_value)
-                .collect(),
-        })
-    }
-
-    pub fn is_null(self) -> Q<M> {
-        Q::combine(QNode::IsNull {
-            field: self.db_name().to_string(),
-            negated: false,
-        })
-    }
-
-    pub fn is_not_null(self) -> Q<M> {
-        Q::combine(QNode::IsNull {
-            field: self.db_name().to_string(),
-            negated: true,
-        })
-    }
-}
-
-impl<M> ModelField<M, String> {
-    pub fn contains<V>(self, value: V) -> Q<M>
-    where
-        V: QueryValue<String>,
-    {
-        Q::compare(self, QueryOperator::Contains, value)
     }
 }
 

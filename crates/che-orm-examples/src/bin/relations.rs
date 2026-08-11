@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use che_orm::{Model, SqliteBackend};
+use che_orm::{Database, Model};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "authors")]
@@ -24,29 +24,27 @@ struct Post {
 
 #[tokio::main]
 async fn main() -> che_orm::Result<()> {
-    let db = SqliteBackend::connect("sqlite::memory:").await?;
+    let db = Database::connect("sqlite::memory:").await?;
     db.create_table::<Author>().await?;
     db.create_table::<Post>().await?;
 
-    let author = Author::objects(&db)
-        .create()
-        .set("name", "Alice")
-        .execute()
-        .await?;
+    let author = db.create::<Author>().set("name", "Alice").execute().await?;
 
-    let post = Post::objects(&db)
-        .create()
+    let post = db
+        .create::<Post>()
         .set("author_id", author.id)
         .set("title", "Building a Django-like ORM in Rust")
         .execute()
         .await?;
 
-    let loaded_author = PostRelations::AUTHOR.get(&db, post.author_id).await?;
+    let loaded_author = PostRelations::AUTHOR
+        .get(db.as_sqlite(), post.author_id)
+        .await?;
     println!("post author: {loaded_author:?}");
 
     let author_posts = PostRelations::AUTHOR
         .reverse()
-        .query(&db, author.id)
+        .query(db.as_sqlite(), author.id)
         .all()
         .await?;
     println!("author posts: {author_posts:?}");

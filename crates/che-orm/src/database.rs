@@ -5,20 +5,28 @@ use std::process::Command;
 use std::{fs, path::Path};
 
 #[cfg(feature = "postgres")]
-use crate::PostgresModel;
+use crate::PostgresBackend;
+#[cfg(feature = "postgres")]
+use crate::PostgresQueryBuilder;
+#[cfg(feature = "sqlite")]
+use crate::QueryBuilder;
 #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
 use crate::Schema;
 #[cfg(feature = "sqlite")]
 use crate::SqliteModel;
-use crate::{DatabaseValue, Result};
-#[cfg(feature = "migration-atlas")]
-use crate::{Error, postgres_schema_sql, sqlite_schema_sql};
 #[cfg(feature = "sqlite")]
-use crate::{ModelManager, SqliteBackend};
+use crate::UpdateBuilder;
 #[cfg(feature = "postgres")]
-use crate::{PostgresBackend, PostgresModelManager};
+use crate::postgres::PostgresModelManager;
+use crate::{DatabaseValue, Result};
+#[cfg(feature = "postgres")]
+use crate::{Error, PostgresModel};
+#[cfg(feature = "sqlite")]
+use crate::{SqliteBackend, manager::ModelManager};
 #[cfg(feature = "migration-native")]
 use crate::{diff_schemas, sqlite_migration_sql, validate_migration};
+#[cfg(feature = "migration-atlas")]
+use crate::{postgres_schema_sql, sqlite_schema_sql};
 
 #[derive(Debug, Clone)]
 pub enum Database {
@@ -193,6 +201,26 @@ impl Database {
     }
 
     #[cfg(feature = "sqlite")]
+    pub fn signals(&self) -> &crate::Signals {
+        self.as_sqlite().signals()
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn pool(&self) -> &sqlx::SqlitePool {
+        self.as_sqlite().pool()
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn apply_sql(&self, sql: &str) -> Result<()> {
+        self.as_sqlite().apply_sql(sql).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn apply_migrations_dir(&self, migrations_dir: &Path) -> Result<Vec<String>> {
+        self.as_sqlite().apply_migrations_dir(migrations_dir).await
+    }
+
+    #[cfg(feature = "sqlite")]
     pub fn create<M>(&self) -> DatabaseCreateBuilder<'_, M>
     where
         M: SqliteModel,
@@ -213,6 +241,160 @@ impl Database {
             database: self,
             values: Vec::new(),
             _model: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn create_table<M>(&self) -> Result<()>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => backend.create_table::<M>().await,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn get<M>(&self, id: M::Id) -> Result<M>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).get(id).await,
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn get<M>(&self, id: M::Id) -> Result<M>
+    where
+        M: PostgresModel,
+    {
+        match self {
+            Self::Postgres { backend, .. } => PostgresModelManager::<M>::new(backend)
+                .get(id.into())
+                .await?
+                .ok_or(Error::NotFound),
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn all<M>(&self) -> Result<Vec<M>>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).all().await,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn query<M>(&self) -> QueryBuilder<'_, M>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => QueryBuilder::<M>::new(backend),
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn query<M>(&self) -> PostgresQueryBuilder<'_, M>
+    where
+        M: PostgresModel,
+    {
+        match self {
+            Self::Postgres { backend, .. } => PostgresQueryBuilder::<M>::new(backend),
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn all<M>(&self) -> Result<Vec<M>>
+    where
+        M: PostgresModel,
+    {
+        match self {
+            Self::Postgres { backend, .. } => PostgresModelManager::<M>::new(backend).all().await,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn update<M>(&self, id: M::Id, data: M::Update) -> Result<M>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).update(id, data).await,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn update_fields<M>(&self, id: M::Id) -> UpdateBuilder<'_, M>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).update_fields(id),
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn update<M>(&self, id: M::Id, data: M::Update) -> Result<M>
+    where
+        M: PostgresModel,
+    {
+        match self {
+            Self::Postgres { backend, .. } => PostgresModelManager::<M>::new(backend)
+                .update(id.into(), data)
+                .await?
+                .ok_or(Error::NotFound),
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn save<M>(&self, model: &M) -> Result<M>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).save(model).await,
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn save<M>(&self, model: &M) -> Result<M>
+    where
+        M: PostgresModel,
+    {
+        match self {
+            Self::Postgres { backend, .. } => PostgresModelManager::<M>::new(backend)
+                .save(model)
+                .await?
+                .ok_or(Error::NotFound),
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn delete<M>(&self, id: M::Id) -> Result<()>
+    where
+        M: SqliteModel,
+    {
+        match self {
+            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).delete(id).await,
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn delete<M>(&self, id: M::Id) -> Result<()>
+    where
+        M: PostgresModel,
+    {
+        match self {
+            Self::Postgres { backend, .. } => {
+                PostgresModelManager::<M>::new(backend)
+                    .delete(id.into())
+                    .await?;
+                Ok(())
+            }
         }
     }
 

@@ -12,7 +12,7 @@ Current workspace crates:
 ## Quick Example
 
 ```rust
-use che_orm::{Model, SqliteBackend};
+use che_orm::{Database, Model};
 
 #[derive(Debug, Clone, Model)]
 #[model(table = "users")]
@@ -26,18 +26,18 @@ struct User {
 }
 
 # async fn example() -> che_orm::Result<()> {
-let db = SqliteBackend::connect("sqlite::memory:").await?;
+let db = Database::connect("sqlite::memory:").await?;
 db.create_table::<User>().await?;
 
-let mut user = User::objects(&db)
-    .create()
+let mut user = db
+    .create::<User>()
     .set("email", "alice@example.com")
     .set("name", "Alice")
     .execute()
     .await?;
 
 user.name = "Alicia".to_string();
-let user = user.save(&db).await?;
+let user = db.save(&user).await?;
 # Ok(())
 # }
 ```
@@ -50,11 +50,11 @@ expressions:
 ```rust
 use che_orm::Q;
 
-let user = User::objects(&db)
-    .query()
+let user = db
+    .query::<User>()
     .filter(UserFields::IS_ACTIVE.eq(true))
     .filter(
-        Q::from(UserFields::NAME.contains("Ali"))
+        UserFields::NAME.contains("Ali")
             .or(UserFields::ID.in_values([1_i64, 2, 3])),
     )
     .order_by_desc(UserFields::ID)
@@ -62,8 +62,9 @@ let user = User::objects(&db)
     .await?;
 ```
 
-Queries also support NULL checks, pagination, multiple ordering expressions,
-`count`, and numeric `sum`/`avg`/`min`/`max` aggregates.
+Queries support NULL checks, pagination, multiple ordering expressions, and
+`count`. Aggregates, projections, grouped queries, and relations are not part
+of the backend-neutral builder yet.
 
 ## Examples
 

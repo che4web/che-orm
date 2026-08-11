@@ -10,8 +10,8 @@ use che_orm::PostgresBackend;
 use che_orm::{
     Application, Database, DatabaseSettings, Error, FieldSchema, FieldType, ForeignKeyAction,
     ForeignKeySchema, IndexSchema, Manager, MigrationOptions, MigrationSettings, Model,
-    ModelSchema, Result, RuntimeSettings, Schema, SchemaChange, SqliteBackend, diff_schemas,
-    postgres_schema_sql, sqlite_migration_sql, validate_migration,
+    ModelSchema, Result, RuntimeSettings, Schema, SchemaChange, diff_schemas, postgres_schema_sql,
+    sqlite_migration_sql, validate_migration,
 };
 
 #[derive(Debug, Clone, Model)]
@@ -135,7 +135,6 @@ async fn postgres_model_manager_supports_create_get_and_all_when_configured() {
     let database = Database::connect(database_url.to_str().unwrap())
         .await
         .unwrap();
-    let manager = PostgresUser::postgres_objects(database.as_postgres());
     let created = database
         .create::<PostgresUser>()
         .set("email", "postgres@example.com")
@@ -146,11 +145,15 @@ async fn postgres_model_manager_supports_create_get_and_all_when_configured() {
         .unwrap();
     assert_eq!(created.id, 1);
     assert_eq!(
-        manager.get(created.id).await.unwrap().unwrap().email,
+        database
+            .get::<PostgresUser>(created.id)
+            .await
+            .unwrap()
+            .email,
         created.email
     );
-    let updated = manager
-        .update(
+    let updated = database
+        .update::<PostgresUser>(
             created.id,
             PostgresUserUpdate {
                 email: Some("updated@example.com".to_string()),
@@ -159,30 +162,43 @@ async fn postgres_model_manager_supports_create_get_and_all_when_configured() {
             },
         )
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(updated.email, "updated@example.com");
     assert_eq!(updated.active, None);
-    let mut saved = updated.clone();
-    saved.email = "saved@example.com".to_string();
+    let saved = PostgresUser {
+        email: "saved@example.com".to_string(),
+        ..updated
+    };
     assert_eq!(
-        saved
-            .save_postgres(database.as_postgres())
-            .await
-            .unwrap()
-            .email,
+        database.save(&saved).await.unwrap().email,
         "saved@example.com"
     );
+    let queried = database
+        .query::<PostgresUser>()
+        .filter(
+            PostgresUserFields::EMAIL
+                .contains("saved")
+                .and(PostgresUserFields::ACTIVE.is_null()),
+        )
+        .order_by_desc(PostgresUserFields::ID)
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queried.email, "saved@example.com");
     assert_eq!(
-        manager
-            .filter_eq("email", che_orm::DatabaseValue::from("saved@example.com"))
+        database
+            .query::<PostgresUser>()
+            .filter(PostgresUserFields::EMAIL.in_values(["saved@example.com"]))
+            .offset(1)
+            .count()
             .await
-            .unwrap()
-            .len(),
+            .unwrap(),
         1
     );
-    assert!(manager.delete(created.id).await.unwrap());
-    assert!(manager.all().await.unwrap().is_empty());
+    assert_eq!(database.all::<PostgresUser>().await.unwrap().len(), 1);
+    database.delete::<PostgresUser>(created.id).await.unwrap();
+    assert!(database.all::<PostgresUser>().await.unwrap().is_empty());
 
     sqlx::query("DROP TABLE che_orm_postgres_users")
         .execute(backend.pool())
@@ -232,13 +248,7 @@ async fn database_facade_generates_and_applies_migrations() {
         .unwrap();
     assert!(generated.path.is_some());
     assert_eq!(database.migrate().await.unwrap(), vec!["initial"]);
-    assert!(
-        User::objects(database.as_sqlite())
-            .all()
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(database.all::<User>().await.unwrap().is_empty());
     let created = database
         .create::<User>()
         .set("email", "shortcut@example.com")
@@ -246,6 +256,32 @@ async fn database_facade_generates_and_applies_migrations() {
         .await
         .unwrap();
     assert_eq!(created.email, "shortcut@example.com");
+    assert_eq!(
+        database.get::<User>(created.id).await.unwrap().email,
+        "shortcut@example.com"
+    );
+    let updated = database
+        .update::<User>(
+            created.id,
+            UserUpdate {
+                email: Some("updated@example.com".to_string()),
+                is_active: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.email, "updated@example.com");
+    let saved = database
+        .save(&User {
+            email: "saved@example.com".to_string(),
+            ..updated
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved.email, "saved@example.com");
+    assert_eq!(database.all::<User>().await.unwrap().len(), 1);
+    database.delete::<User>(saved.id).await.unwrap();
+    assert!(database.all::<User>().await.unwrap().is_empty());
 
     std::fs::remove_dir_all(migrations_dir).unwrap();
 }
@@ -531,7 +567,7 @@ fn nullable_fk_with_default_uses_table_rebuild() {
 
 #[tokio::test]
 async fn migration_rebuilds_when_adding_fk_with_default() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql(
         "CREATE TABLE parents (id INTEGER PRIMARY KEY AUTOINCREMENT);\
          INSERT INTO parents DEFAULT VALUES;\
@@ -614,7 +650,7 @@ fn migration_drops_child_before_parent() {
 
 #[tokio::test]
 async fn parent_rebuild_preserves_cascade_children() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql(
         "CREATE TABLE parents (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);\
          CREATE TABLE children (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL REFERENCES parents(id) ON DELETE CASCADE);\
@@ -677,7 +713,7 @@ async fn rebuilding_parent_and_child_preserves_fk_rows() {
         (ForeignKeyAction::Cascade, "CASCADE"),
         (ForeignKeyAction::Restrict, "RESTRICT"),
     ] {
-        let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
         db.apply_sql(&format!(
             "CREATE TABLE parents (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);\
              CREATE TABLE children (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL REFERENCES parents(id) ON DELETE {sql_action}, name TEXT NOT NULL);\
@@ -740,7 +776,7 @@ async fn rebuilding_parent_and_child_preserves_fk_rows() {
 async fn foreign_keys_are_enabled_on_every_pool_connection() {
     let path = temporary_path("pool_foreign_keys");
     fs::File::create(&path).unwrap();
-    let db = SqliteBackend::connect(&sqlite_url(&path)).await.unwrap();
+    let db = Database::connect(&sqlite_url(&path)).await.unwrap();
     db.apply_sql(
         "CREATE TABLE parents (id INTEGER PRIMARY KEY);\
          CREATE TABLE children (parent_id INTEGER NOT NULL REFERENCES parents(id));",
@@ -788,8 +824,8 @@ async fn concurrent_safe_migration_is_applied_once() {
     .unwrap();
 
     let url = sqlite_url(&path);
-    let first = SqliteBackend::connect(&url).await.unwrap();
-    let second = SqliteBackend::connect(&url).await.unwrap();
+    let first = Database::connect(&url).await.unwrap();
+    let second = Database::connect(&url).await.unwrap();
     let (first_result, second_result) = tokio::join!(
         first.apply_migrations_dir(&migrations_dir),
         second.apply_migrations_dir(&migrations_dir),
@@ -893,7 +929,7 @@ async fn migration_replaces_changed_index_with_same_name() {
             unique: true,
         }],
     }]);
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql(&sqlite_migration_sql(&diff_schemas(&Schema::empty(), &old)))
         .await
         .unwrap();
@@ -913,12 +949,10 @@ async fn migration_replaces_changed_index_with_same_name() {
 
 #[tokio::test]
 async fn migration_rebuilds_table_when_column_is_removed() {
-    let db = che_orm::SqliteBackend::connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let db = che_orm::Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<OldUser>().await.unwrap();
-    let old_user = OldUser::objects(&db)
-        .create()
+    let old_user = db
+        .create::<OldUser>()
         .set("email", "removed@example.com")
         .set("name", "Alice")
         .execute()
@@ -945,14 +979,14 @@ async fn migration_rebuilds_table_when_column_is_removed() {
 
     db.apply_migrations_dir(&migrations_dir).await.unwrap();
 
-    let current_user = CurrentUser::objects(&db).get(old_user.id).await.unwrap();
+    let current_user = db.get::<CurrentUser>(old_user.id).await.unwrap();
     assert_eq!(current_user.name, "Alice");
     fs::remove_dir_all(migrations_dir).unwrap();
 }
 
 #[tokio::test]
 async fn migration_preflight_rejects_duplicate_unique_values() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql(
         "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT);\
          INSERT INTO users (email) VALUES ('duplicate@example.com'), ('duplicate@example.com');",
@@ -988,7 +1022,7 @@ async fn migration_preflight_rejects_duplicate_unique_values() {
 
 #[tokio::test]
 async fn migration_preflight_rejects_choice_and_length_violations() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT); INSERT INTO users (email) VALUES ('too-long');")
         .await
         .unwrap();
@@ -1010,7 +1044,7 @@ async fn migration_preflight_rejects_choice_and_length_violations() {
         .unwrap_err();
     assert!(matches!(error, Error::MigrationPreflightFailed { .. }));
 
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT); INSERT INTO users (email) VALUES ('legacy');")
         .await
         .unwrap();
@@ -1030,9 +1064,7 @@ async fn migration_preflight_rejects_choice_and_length_violations() {
 
 #[tokio::test]
 async fn migration_rebuilds_table_when_field_properties_change() {
-    let db = che_orm::SqliteBackend::connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let db = che_orm::Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql(
         "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT);\
          INSERT INTO users (email) VALUES ('old@example.com');",

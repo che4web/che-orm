@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::{Error, Model, Result, SqliteBackend, SqliteModel, SqliteValue};
+use crate::{Error, Model, QueryBuilder, Result, SqliteBackend, SqliteModel, SqliteValue};
 
 #[derive(Debug, Clone, Copy)]
 pub struct BelongsTo<From, To> {
@@ -59,9 +59,8 @@ where
         V: Into<SqliteValue>,
     {
         self.validate()?;
-        To::objects(db)
-            .query()
-            .eq_raw("id", value.into())
+        QueryBuilder::<To>::new(db)
+            .filter_by_field("id", value.into())
             .first()
             .await
     }
@@ -130,8 +129,6 @@ where
     where
         V: Into<SqliteValue>,
     {
-        Child::objects(db)
-            .query()
-            .eq_raw(self.child_field, parent_id.into())
+        QueryBuilder::<Child>::new(db).filter_by_field(self.child_field, parent_id.into())
     }
 }

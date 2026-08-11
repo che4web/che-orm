@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use che_orm::{
-    AnnotationField, Choice, Model, ModelEvent, NaiveDateTime, Q, SqliteBackend, SqliteValue,
+    AnnotationField, Choice, Database, Model, ModelEvent, NaiveDateTime, SqliteValue,
     create_table_sql,
 };
 use serde_json::{Value, json};
@@ -86,28 +86,26 @@ struct ScalarTypes {
 
 #[tokio::test]
 async fn broadcast_signals_receive_create_and_update_snapshots() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create_table::<Task>().await.unwrap();
     let mut events = db.signals().subscribe::<User>();
     let mut audit_events = db.signals().subscribe::<User>();
     let mut task_events = db.signals().subscribe::<Task>();
 
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("email", "signals@example.com")
         .set("name", "Before")
         .execute()
         .await
         .unwrap();
-    Task::objects(&db)
-        .create()
+    db.create::<Task>()
         .set("title", "Task event")
         .execute()
         .await
         .unwrap();
-    User::objects(&db)
-        .update_fields(user.id)
+    db.update_fields::<User>(user.id)
         .set("name", "After")
         .execute()
         .await
@@ -159,13 +157,12 @@ async fn broadcast_signals_receive_create_and_update_snapshots() {
 
 #[tokio::test]
 async fn lagging_signal_subscribers_do_not_block_writes() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     let mut events = db.signals().subscribe::<User>();
 
     for index in 0..1025 {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", format!("lag-{index}@example.com"))
             .set("name", format!("Lag {index}"))
             .execute()
@@ -181,11 +178,11 @@ async fn lagging_signal_subscribers_do_not_block_writes() {
 
 #[tokio::test]
 async fn sqlite_crud_flow() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("email", "alice@example.com")
         .set("name", "Alice")
         .set("is_active", true)
@@ -197,22 +194,22 @@ async fn sqlite_crud_flow() {
     assert_eq!(user.email, "alice@example.com");
     assert!(user.is_active);
 
-    let fetched = User::objects(&db).get(user.id).await.unwrap();
+    let fetched = db.get::<User>(user.id).await.unwrap();
     assert_eq!(fetched.name, "Alice");
 
-    let typed = User::objects(&db)
-        .query()
-        .eq(UserFields::NAME, "Alice")
+    let typed = db
+        .query::<User>()
+        .filter(UserFields::NAME.eq("Alice"))
         .all()
         .await
         .unwrap();
     assert_eq!(typed.len(), 1);
 
-    let all = User::objects(&db).all().await.unwrap();
+    let all = db.all::<User>().await.unwrap();
     assert_eq!(all.len(), 1);
 
-    let updated = User::objects(&db)
-        .update_fields(user.id)
+    let updated = db
+        .update_fields::<User>(user.id)
         .set("name", "Alicia")
         .set("is_active", false)
         .execute()
@@ -221,25 +218,25 @@ async fn sqlite_crud_flow() {
     assert_eq!(updated.name, "Alicia");
     assert!(!updated.is_active);
 
-    let mut changed = User::objects(&db).get(user.id).await.unwrap();
+    let mut changed = db.get::<User>(user.id).await.unwrap();
     changed.name = "Alice Saved".to_string();
     changed.is_active = true;
-    let saved = changed.save(&db).await.unwrap();
+    let saved = db.save(&changed).await.unwrap();
     assert_eq!(saved.name, "Alice Saved");
     assert!(saved.is_active);
 
-    User::objects(&db).delete(user.id).await.unwrap();
-    let all = User::objects(&db).all().await.unwrap();
+    db.delete::<User>(user.id).await.unwrap();
+    let all = db.all::<User>().await.unwrap();
     assert!(all.is_empty());
 }
 
 #[tokio::test]
 async fn choice_field_roundtrips_and_enforces_values() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<ChoiceTask>().await.unwrap();
 
-    let task = ChoiceTask::objects(&db)
-        .create()
+    let task = db
+        .create::<ChoiceTask>()
         .set("status", SqliteValue::String("in_progress".to_string()))
         .execute()
         .await
@@ -248,8 +245,7 @@ async fn choice_field_roundtrips_and_enforces_values() {
     assert_eq!(TaskStatus::values(), &["new", "in_progress", "done"]);
     assert_eq!(ChoiceTaskFields::STATUS.db_name(), "status");
     assert!(
-        ChoiceTask::objects(&db)
-            .create()
+        db.create::<ChoiceTask>()
             .set("status", SqliteValue::String("invalid".to_string()))
             .execute()
             .await
@@ -277,11 +273,11 @@ fn generates_create_table_sql() {
 
 #[tokio::test]
 async fn timestamp_fields_are_managed_by_orm() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<Task>().await.unwrap();
 
-    let task = Task::objects(&db)
-        .create()
+    let task = db
+        .create::<Task>()
         .set("title", "First")
         .execute()
         .await
@@ -290,8 +286,7 @@ async fn timestamp_fields_are_managed_by_orm() {
     assert_eq!(task.created_at, task.updated_at);
 
     assert!(
-        Task::objects(&db)
-            .create()
+        db.create::<Task>()
             .set("title", "Readonly Create")
             .set("created_at", task.created_at)
             .execute()
@@ -299,8 +294,7 @@ async fn timestamp_fields_are_managed_by_orm() {
             .is_err()
     );
     assert!(
-        Task::objects(&db)
-            .update_fields(task.id)
+        db.update_fields::<Task>(task.id)
             .set("updated_at", task.updated_at)
             .execute()
             .await
@@ -308,8 +302,8 @@ async fn timestamp_fields_are_managed_by_orm() {
     );
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let updated = Task::objects(&db)
-        .update_fields(task.id)
+    let updated = db
+        .update_fields::<Task>(task.id)
         .set("title", "Updated")
         .execute()
         .await
@@ -320,14 +314,14 @@ async fn timestamp_fields_are_managed_by_orm() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let mut changed = updated.clone();
     changed.title = "Saved".to_string();
-    let saved = changed.save(&db).await.unwrap();
+    let saved = db.save(&changed).await.unwrap();
     assert_eq!(saved.created_at, task.created_at);
     assert!(saved.updated_at > updated.updated_at);
 }
 
 #[tokio::test]
 async fn json_fields_roundtrip_update_and_save() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<JsonTask>().await.unwrap();
 
     let metadata = json!({
@@ -335,8 +329,8 @@ async fn json_fields_roundtrip_update_and_save() {
         "tags": ["backend", "orm"],
         "nested": { "done": false }
     });
-    let task = JsonTask::objects(&db)
-        .create()
+    let task = db
+        .create::<JsonTask>()
         .set("title", "JSON")
         .set("metadata", metadata.clone())
         .set_null("optional_metadata")
@@ -346,12 +340,12 @@ async fn json_fields_roundtrip_update_and_save() {
     assert_eq!(task.metadata, metadata);
     assert_eq!(task.optional_metadata, None);
 
-    let fetched = JsonTask::objects(&db).get(task.id).await.unwrap();
+    let fetched = db.get::<JsonTask>(task.id).await.unwrap();
     assert_eq!(fetched.metadata["priority"], "high");
 
     let optional_metadata = json!(["a", "b", 3]);
-    let updated = JsonTask::objects(&db)
-        .update_fields(task.id)
+    let updated = db
+        .update_fields::<JsonTask>(task.id)
         .set("metadata", json!({ "done": true }))
         .set("optional_metadata", optional_metadata.clone())
         .execute()
@@ -363,7 +357,7 @@ async fn json_fields_roundtrip_update_and_save() {
     let mut changed = updated.clone();
     changed.metadata = json!({ "saved": true });
     changed.optional_metadata = None;
-    let saved = changed.save(&db).await.unwrap();
+    let saved = db.save(&changed).await.unwrap();
     assert_eq!(saved.metadata, json!({ "saved": true }));
     assert_eq!(saved.optional_metadata, None);
 }
@@ -384,12 +378,12 @@ async fn applies_migration_files_without_exposing_sqlx() {
     )
     .unwrap();
 
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     let applied = db.apply_migrations_dir(&migrations_dir).await.unwrap();
     assert_eq!(applied, vec!["initial"]);
 
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("email", "migration@example.com")
         .set("name", "Migration")
         .set("is_active", true)
@@ -418,9 +412,13 @@ async fn migration_checksums_reject_modified_applied_files() {
     )
     .unwrap();
 
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_migrations_dir(&migrations_dir).await.unwrap();
-    let status = db.migration_status(&migrations_dir).await.unwrap();
+    let status = db
+        .as_sqlite()
+        .migration_status(&migrations_dir)
+        .await
+        .unwrap();
     assert!(status[0].applied);
     assert!(status[0].checksum.is_some());
 
@@ -429,7 +427,11 @@ async fn migration_checksums_reject_modified_applied_files() {
         "CREATE TABLE checksum_test (id INTEGER PRIMARY KEY, value TEXT);",
     )
     .unwrap();
-    let status = db.migration_status(&migrations_dir).await.unwrap();
+    let status = db
+        .as_sqlite()
+        .migration_status(&migrations_dir)
+        .await
+        .unwrap();
     assert!(status[0].checksum_mismatch);
     assert!(db.apply_migrations_dir(&migrations_dir).await.is_err());
 
@@ -438,7 +440,7 @@ async fn migration_checksums_reject_modified_applied_files() {
 
 #[tokio::test]
 async fn migration_sql_parser_handles_strings_and_triggers() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.apply_sql(
         r#"
         CREATE TABLE trigger_source (value TEXT);
@@ -463,11 +465,11 @@ async fn migration_sql_parser_handles_strings_and_triggers() {
 
 #[tokio::test]
 async fn update_fields_rejects_empty_and_readonly_updates() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("email", "readonly@example.com")
         .set("name", "Readonly")
         .set("is_active", true)
@@ -475,16 +477,9 @@ async fn update_fields_rejects_empty_and_readonly_updates() {
         .await
         .unwrap();
 
+    assert!(db.update_fields::<User>(user.id).execute().await.is_err());
     assert!(
-        User::objects(&db)
-            .update_fields(user.id)
-            .execute()
-            .await
-            .is_err()
-    );
-    assert!(
-        User::objects(&db)
-            .update_fields(user.id)
+        db.update_fields::<User>(user.id)
             .set("id", 2_i64)
             .execute()
             .await
@@ -494,11 +489,11 @@ async fn update_fields_rejects_empty_and_readonly_updates() {
 
 #[tokio::test]
 async fn create_builder_uses_defaults_and_rejects_readonly_fields() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
-    let user = User::objects(&db)
-        .create()
+    let user = db
+        .create::<User>()
         .set("email", "default@example.com")
         .set("name", "Default")
         .execute()
@@ -507,8 +502,7 @@ async fn create_builder_uses_defaults_and_rejects_readonly_fields() {
     assert!(!user.is_active);
 
     assert!(
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("id", 42_i64)
             .set("email", "readonly-create@example.com")
             .set("name", "Readonly Create")
@@ -520,7 +514,7 @@ async fn create_builder_uses_defaults_and_rejects_readonly_fields() {
 
 #[tokio::test]
 async fn query_builder_filters_orders_and_limits() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
     for (email, name, is_active) in [
@@ -528,8 +522,7 @@ async fn query_builder_filters_orders_and_limits() {
         ("alicia@example.com", "Alicia", true),
         ("bob@example.com", "Bob", false),
     ] {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", email)
             .set("name", name)
             .set("is_active", is_active)
@@ -538,10 +531,13 @@ async fn query_builder_filters_orders_and_limits() {
             .unwrap();
     }
 
-    let users = User::objects(&db)
-        .query()
-        .contains(UserFields::NAME, "Ali")
-        .eq(UserFields::IS_ACTIVE, true)
+    let users = db
+        .query::<User>()
+        .filter(
+            UserFields::NAME
+                .contains("Ali")
+                .and(UserFields::IS_ACTIVE.eq(true)),
+        )
         .order_by_desc(UserFields::ID)
         .limit(1)
         .all()
@@ -553,16 +549,62 @@ async fn query_builder_filters_orders_and_limits() {
 }
 
 #[tokio::test]
+async fn database_query_uses_typed_predicates() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+    db.create::<User>()
+        .set("email", "alice@example.com")
+        .set("name", "Alice")
+        .set("is_active", true)
+        .execute()
+        .await
+        .unwrap();
+
+    let users = db
+        .query::<User>()
+        .filter(
+            UserFields::EMAIL
+                .contains("@example.com")
+                .and(UserFields::IS_ACTIVE.eq(true)),
+        )
+        .order_by(UserFields::EMAIL)
+        .distinct()
+        .limit(1)
+        .offset(0)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(
+        db.query::<User>()
+            .filter(UserFields::ID.gt(0_i64))
+            .count()
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query::<User>()
+            .filter(UserFields::ID.lte(1_i64))
+            .first()
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "Alice"
+    );
+}
+
+#[tokio::test]
 async fn query_supports_typed_distinct_projections() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     for (email, name) in [
         ("projection-one@example.com", "Same"),
         ("projection-two@example.com", "Same"),
         ("projection-three@example.com", "Other"),
     ] {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", email)
             .set("name", name)
             .set("is_active", true)
@@ -571,8 +613,8 @@ async fn query_supports_typed_distinct_projections() {
             .unwrap();
     }
 
-    let rows = User::objects(&db)
-        .query()
+    let rows = db
+        .query::<User>()
         .values([UserFields::NAME])
         .unwrap()
         .distinct()
@@ -591,10 +633,9 @@ async fn query_supports_typed_distinct_projections() {
 
 #[tokio::test]
 async fn query_supports_typed_tuple_projections() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
-    User::objects(&db)
-        .create()
+    db.create::<User>()
         .set("email", "typed-projection@example.com")
         .set("name", "Typed")
         .set("is_active", true)
@@ -602,8 +643,8 @@ async fn query_supports_typed_tuple_projections() {
         .await
         .unwrap();
 
-    let rows: Vec<(i64, String)> = User::objects(&db)
-        .query()
+    let rows: Vec<(i64, String)> = db
+        .query::<User>()
         .select((UserFields::ID, UserFields::NAME))
         .unwrap()
         .all()
@@ -614,10 +655,9 @@ async fn query_supports_typed_tuple_projections() {
 
 #[tokio::test]
 async fn typed_queries_support_all_scalar_field_types() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<ScalarTypes>().await.unwrap();
-    ScalarTypes::objects(&db)
-        .create()
+    db.create::<ScalarTypes>()
         .set("small", 7_i32)
         .set("unsigned", 9_u32)
         .set("ratio", 1.5_f32)
@@ -626,8 +666,7 @@ async fn typed_queries_support_all_scalar_field_types() {
         .unwrap();
 
     assert!(
-        ScalarTypes::objects(&db)
-            .query()
+        db.query::<ScalarTypes>()
             .filter(ScalarTypesFields::SMALL.eq(7_i32))
             .first()
             .await
@@ -635,15 +674,14 @@ async fn typed_queries_support_all_scalar_field_types() {
             .is_some()
     );
     assert_eq!(
-        ScalarTypes::objects(&db)
-            .query()
+        db.query::<ScalarTypes>()
             .sum(ScalarTypesFields::SMALL)
             .await
             .unwrap(),
         Some(7_i32)
     );
-    let projected: (u32, f32) = ScalarTypes::objects(&db)
-        .query()
+    let projected: (u32, f32) = db
+        .query::<ScalarTypes>()
         .select((ScalarTypesFields::UNSIGNED, ScalarTypesFields::RATIO))
         .unwrap()
         .all()
@@ -656,17 +694,16 @@ async fn typed_queries_support_all_scalar_field_types() {
 
 #[tokio::test]
 async fn typed_projection_decodes_choice_values() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<ChoiceTask>().await.unwrap();
-    ChoiceTask::objects(&db)
-        .create()
+    db.create::<ChoiceTask>()
         .set("status", "in_progress")
         .execute()
         .await
         .unwrap();
 
-    let status: TaskStatus = ChoiceTask::objects(&db)
-        .query()
+    let status: TaskStatus = db
+        .query::<ChoiceTask>()
         .select(ChoiceTaskFields::STATUS)
         .unwrap()
         .all()
@@ -679,15 +716,14 @@ async fn typed_projection_decodes_choice_values() {
 
 #[tokio::test]
 async fn grouped_queries_support_having_and_count_annotation() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     for (email, active) in [
         ("group-one@example.com", true),
         ("group-two@example.com", true),
         ("group-three@example.com", false),
     ] {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", email)
             .set("name", "Grouped")
             .set("is_active", active)
@@ -698,8 +734,8 @@ async fn grouped_queries_support_having_and_count_annotation() {
 
     let total = AnnotationField::<i64>::new("total");
     let repeated = AnnotationField::<i64>::new("repeated");
-    let rows = User::objects(&db)
-        .query()
+    let rows = db
+        .query::<User>()
         .values([UserFields::IS_ACTIVE])
         .unwrap()
         .group_by()
@@ -717,10 +753,9 @@ async fn grouped_queries_support_having_and_count_annotation() {
 
 #[tokio::test]
 async fn grouped_queries_reject_invalid_annotation_specs() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
-    User::objects(&db)
-        .create()
+    db.create::<User>()
         .set("email", "annotation-check@example.com")
         .set("name", "Check")
         .set("is_active", true)
@@ -728,8 +763,8 @@ async fn grouped_queries_reject_invalid_annotation_specs() {
         .await
         .unwrap();
 
-    let collision = User::objects(&db)
-        .query()
+    let collision = db
+        .query::<User>()
         .values([UserFields::IS_ACTIVE])
         .unwrap()
         .group_by()
@@ -739,8 +774,8 @@ async fn grouped_queries_reject_invalid_annotation_specs() {
         Err(che_orm::Error::InvalidAnnotation(_))
     ));
 
-    let duplicate = User::objects(&db)
-        .query()
+    let duplicate = db
+        .query::<User>()
         .values([UserFields::IS_ACTIVE])
         .unwrap()
         .group_by()
@@ -753,8 +788,8 @@ async fn grouped_queries_reject_invalid_annotation_specs() {
     ));
 
     let wrong_type = AnnotationField::<String>::new("total");
-    let error = User::objects(&db)
-        .query()
+    let error = db
+        .query::<User>()
         .values([UserFields::IS_ACTIVE])
         .unwrap()
         .group_by()
@@ -767,8 +802,8 @@ async fn grouped_queries_reject_invalid_annotation_specs() {
 
     let total = AnnotationField::<i64>::new("total");
     let missing = AnnotationField::<i64>::new("missing");
-    let error = User::objects(&db)
-        .query()
+    let error = db
+        .query::<User>()
         .values([UserFields::IS_ACTIVE])
         .unwrap()
         .group_by()
@@ -782,7 +817,7 @@ async fn grouped_queries_reject_invalid_annotation_specs() {
 
 #[tokio::test]
 async fn query_supports_q_in_null_first_and_multiple_orderings() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
     for (email, name, is_active) in [
@@ -790,8 +825,7 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
         ("bob@example.com", "Alex", false),
         ("carol@example.com", "Carol", true),
     ] {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", email)
             .set("name", name)
             .set("is_active", is_active)
@@ -800,10 +834,11 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
             .unwrap();
     }
 
-    let users = User::objects(&db)
-        .query()
+    let users = db
+        .query::<User>()
         .filter(
-            Q::from(UserFields::NAME.eq("Alex"))
+            UserFields::NAME
+                .eq("Alex")
                 .or(UserFields::ID.in_values([3_i64]))
                 .and(UserFields::IS_ACTIVE.eq(true).not()),
         )
@@ -817,8 +852,8 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
         vec![2]
     );
 
-    let first = User::objects(&db)
-        .query()
+    let first = db
+        .query::<User>()
         .filter(UserFields::ID.in_values([1_i64, 2]))
         .order_by_desc(UserFields::ID)
         .first()
@@ -827,8 +862,7 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
         .unwrap();
     assert_eq!(first.id, 2);
     assert!(
-        User::objects(&db)
-            .query()
+        db.query::<User>()
             .filter(UserFields::ID.in_values(Vec::<i64>::new()))
             .first()
             .await
@@ -839,7 +873,7 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
 
 #[tokio::test]
 async fn query_supports_raw_range_filters_and_ordering() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
     for (email, name) in [
@@ -847,8 +881,7 @@ async fn query_supports_raw_range_filters_and_ordering() {
         ("b@example.com", "B"),
         ("c@example.com", "C"),
     ] {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", email)
             .set("name", name)
             .set("is_active", true)
@@ -857,11 +890,10 @@ async fn query_supports_raw_range_filters_and_ordering() {
             .unwrap();
     }
 
-    let users = User::objects(&db)
-        .query()
-        .gte_raw("id", 2_i64)
-        .lt_raw("id", 4_i64)
-        .order_by_raw("id", true)
+    let users = db
+        .query::<User>()
+        .filter(UserFields::ID.gte(2_i64).and(UserFields::ID.lt(4_i64)))
+        .order_by_desc(UserFields::ID)
         .all()
         .await
         .unwrap();
@@ -873,12 +905,11 @@ async fn query_supports_raw_range_filters_and_ordering() {
 
 #[tokio::test]
 async fn update_one_returning_updates_only_the_first_match() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
     for name in ["first", "second"] {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", format!("{name}@example.com"))
             .set("name", name)
             .set("is_active", true)
@@ -887,8 +918,8 @@ async fn update_one_returning_updates_only_the_first_match() {
             .unwrap();
     }
 
-    let updated = User::objects(&db)
-        .query()
+    let updated = db
+        .query::<User>()
         .filter(UserFields::IS_ACTIVE.eq(true))
         .order_by(UserFields::ID)
         .update_one_returning([("name", "claimed")])
@@ -897,14 +928,14 @@ async fn update_one_returning_updates_only_the_first_match() {
         .unwrap();
     assert_eq!(updated.id, 1);
 
-    let claimed = User::objects(&db)
-        .query()
+    let claimed = db
+        .query::<User>()
         .filter(UserFields::NAME.eq("claimed"))
         .count()
         .await
         .unwrap();
-    let remaining = User::objects(&db)
-        .query()
+    let remaining = db
+        .query::<User>()
         .filter(UserFields::IS_ACTIVE.eq(true))
         .count()
         .await
@@ -915,11 +946,10 @@ async fn update_one_returning_updates_only_the_first_match() {
 
 #[tokio::test]
 async fn update_one_returning_handles_no_match_and_descending_order() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     for name in ["first", "second"] {
-        User::objects(&db)
-            .create()
+        db.create::<User>()
             .set("email", format!("{name}-order@example.com"))
             .set("name", name)
             .set("is_active", true)
@@ -929,16 +959,15 @@ async fn update_one_returning_handles_no_match_and_descending_order() {
     }
 
     assert!(
-        User::objects(&db)
-            .query()
+        db.query::<User>()
             .filter(UserFields::NAME.eq("missing"))
             .update_one_returning([("name", "never")])
             .await
             .unwrap()
             .is_none()
     );
-    let updated = User::objects(&db)
-        .query()
+    let updated = db
+        .query::<User>()
         .filter(UserFields::IS_ACTIVE.eq(true))
         .order_by_desc(UserFields::ID)
         .update_one_returning([("name", "descending")])
@@ -959,11 +988,11 @@ async fn concurrent_claims_return_distinct_rows() {
     ));
     std::fs::File::create(&path).unwrap();
     let url = format!("sqlite://{}", path.display());
-    let setup = SqliteBackend::connect(&url).await.unwrap();
+    let setup = Database::connect(&url).await.unwrap();
     setup.create_table::<User>().await.unwrap();
     for index in 0..2 {
-        User::objects(&setup)
-            .create()
+        setup
+            .create::<User>()
             .set("email", format!("claim-{index}@example.com"))
             .set("name", format!("claim-{index}"))
             .set("is_active", true)
@@ -971,15 +1000,15 @@ async fn concurrent_claims_return_distinct_rows() {
             .await
             .unwrap();
     }
-    let first = SqliteBackend::connect(&url).await.unwrap();
-    let second = SqliteBackend::connect(&url).await.unwrap();
+    let first = Database::connect(&url).await.unwrap();
+    let second = Database::connect(&url).await.unwrap();
     let (left, right) = tokio::join!(
-        User::objects(&first)
-            .query()
+        first
+            .query::<User>()
             .filter(UserFields::IS_ACTIVE.eq(true))
             .claim_next_returning([("is_active", false)]),
-        User::objects(&second)
-            .query()
+        second
+            .query::<User>()
             .filter(UserFields::IS_ACTIVE.eq(true))
             .claim_next_returning([("is_active", false)])
     );
@@ -987,8 +1016,8 @@ async fn concurrent_claims_return_distinct_rows() {
     let right = right.unwrap().unwrap();
     assert_ne!(left.id, right.id);
     assert_eq!(
-        User::objects(&setup)
-            .query()
+        setup
+            .query::<User>()
             .filter(UserFields::IS_ACTIVE.eq(true))
             .count()
             .await
@@ -1000,11 +1029,11 @@ async fn concurrent_claims_return_distinct_rows() {
 
 #[tokio::test]
 async fn query_supports_null_predicates_and_numeric_aggregates() {
-    let db = SqliteBackend::connect("sqlite::memory:").await.unwrap();
+    let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<Metric>().await.unwrap();
 
     for (score, value) in [(Some(10_i64), 1.5), (None, 2.5), (Some(30_i64), 3.5)] {
-        let mut create = Metric::objects(&db).create().set("value", value);
+        let mut create = db.create::<Metric>().set("value", value);
         create = match score {
             Some(score) => create.set("score", score),
             None => create.set_null("score"),
@@ -1013,8 +1042,7 @@ async fn query_supports_null_predicates_and_numeric_aggregates() {
     }
 
     assert_eq!(
-        Metric::objects(&db)
-            .query()
+        db.query::<Metric>()
             .filter(MetricFields::SCORE.is_null())
             .count()
             .await
@@ -1022,8 +1050,7 @@ async fn query_supports_null_predicates_and_numeric_aggregates() {
         1
     );
     assert_eq!(
-        Metric::objects(&db)
-            .query()
+        db.query::<Metric>()
             .filter(MetricFields::SCORE.is_not_null())
             .sum(MetricFields::SCORE)
             .await
@@ -1031,32 +1058,19 @@ async fn query_supports_null_predicates_and_numeric_aggregates() {
         Some(40_i64)
     );
     assert_eq!(
-        Metric::objects(&db)
-            .query()
-            .avg(MetricFields::VALUE)
-            .await
-            .unwrap(),
+        db.query::<Metric>().avg(MetricFields::VALUE).await.unwrap(),
         Some(2.5)
     );
     assert_eq!(
-        Metric::objects(&db)
-            .query()
-            .min(MetricFields::VALUE)
-            .await
-            .unwrap(),
+        db.query::<Metric>().min(MetricFields::VALUE).await.unwrap(),
         Some(1.5)
     );
     assert_eq!(
-        Metric::objects(&db)
-            .query()
-            .max(MetricFields::VALUE)
-            .await
-            .unwrap(),
+        db.query::<Metric>().max(MetricFields::VALUE).await.unwrap(),
         Some(3.5)
     );
     assert_eq!(
-        Metric::objects(&db)
-            .query()
+        db.query::<Metric>()
             .filter(MetricFields::ID.gt(100_i64))
             .sum(MetricFields::VALUE)
             .await

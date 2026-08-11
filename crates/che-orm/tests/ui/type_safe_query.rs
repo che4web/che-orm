@@ -1,4 +1,4 @@
-use che_orm::{Model, SqliteBackend};
+use che_orm::{Database, Model};
 
 #[derive(Model)]
 struct User {
@@ -11,8 +11,8 @@ fn main() {
     let _ = UserFields::ID.eq("not an integer");
 }
 
-fn invalid_operations(db: &SqliteBackend) {
+fn invalid_operations(db: &Database) {
     let _ = UserFields::ID.contains("text");
     let _ = UserFields::ID.in_values(["text"]);
-    let _ = User::objects(db).query().sum(UserFields::EMAIL);
+    let _ = db.query::<User>().sum(UserFields::EMAIL);
 }
