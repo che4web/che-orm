@@ -3,9 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use che_orm::{
-    Result, Schema, SqliteBackend, diff_schemas, sqlite_migration_sql, validate_migration,
-};
+use che_orm::{Database, Result};
+#[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
+use che_orm::{MigrationOptions, Schema, generate_migrations};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
@@ -19,6 +19,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
     Makemigrations {
         #[arg(long, default_value = "che_orm_schema.json")]
         schema: PathBuf,
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
         Command::Makemigrations {
             schema,
             migrations_dir,
@@ -84,31 +86,19 @@ struct DatabaseConfig {
     url: String,
 }
 
+#[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
 fn makemigrations(schema_path: &Path, migrations_dir: &Path, name: &str) -> Result<()> {
-    fs::create_dir_all(migrations_dir)?;
-
-    let snapshot_path = migrations_dir.join("schema.json");
-    let old_schema = Schema::load_or_empty(&snapshot_path)?;
     let new_schema = Schema::load(schema_path)?;
-    let migration = diff_schemas(&old_schema, &new_schema);
-    validate_migration(&migration)?;
-
-    if migration.changes.is_empty() {
+    let generated = generate_migrations(
+        &new_schema,
+        MigrationOptions::new(migrations_dir).named(name),
+    )?;
+    if generated.path.is_none() {
         println!("No schema changes detected");
         return Ok(());
     }
 
-    let sql = sqlite_migration_sql(&migration);
-    let file_name = format!(
-        "{:04}_{}.sql",
-        next_migration_number(migrations_dir)?,
-        slugify(name)
-    );
-    let migration_path = migrations_dir.join(file_name);
-    fs::write(&migration_path, format!("{sql}\n"))?;
-    new_schema.save(snapshot_path)?;
-
-    println!("Created {}", migration_path.display());
+    println!("Created {}", generated.path.unwrap().display());
     Ok(())
 }
 
@@ -117,8 +107,10 @@ async fn migrate(database_url: Option<String>, config: &Path, migrations_dir: &P
         Some(database_url) => database_url,
         None => database_url_from_config(config)?,
     };
-    let db = SqliteBackend::connect(&database_url).await?;
-    for name in db.apply_migrations_dir(migrations_dir).await? {
+    let db = Database::connect(&database_url)
+        .await?
+        .with_migrations_dir(migrations_dir);
+    for name in db.migrate().await? {
         println!("Applied {name}");
     }
 
@@ -130,8 +122,10 @@ async fn status(database_url: Option<String>, config: &Path, migrations_dir: &Pa
         Some(database_url) => database_url,
         None => database_url_from_config(config)?,
     };
-    let db = SqliteBackend::connect(&database_url).await?;
-    for migration in db.migration_status(migrations_dir).await? {
+    let db = Database::connect(&database_url)
+        .await?
+        .with_migrations_dir(migrations_dir);
+    for migration in db.migration_status().await? {
         let state = if migration.checksum_mismatch {
             "mismatch"
         } else if migration.applied {
@@ -148,40 +142,4 @@ fn database_url_from_config(path: &Path) -> Result<String> {
     let config = fs::read_to_string(path)?;
     let config: AppConfig = toml::from_str(&config).map_err(std::io::Error::other)?;
     Ok(config.database.url)
-}
-
-fn migration_files(migrations_dir: &Path) -> Result<Vec<PathBuf>> {
-    if !migrations_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut files = Vec::new();
-    for entry in fs::read_dir(migrations_dir)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "sql") {
-            files.push(path);
-        }
-    }
-    Ok(files)
-}
-
-fn next_migration_number(migrations_dir: &Path) -> Result<u32> {
-    let max = migration_files(migrations_dir)?
-        .iter()
-        .filter_map(|path| path.file_name()?.to_str()?.get(0..4)?.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0);
-    Ok(max + 1)
-}
-
-fn slugify(value: &str) -> String {
-    let mut slug = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-        } else if !slug.ends_with('_') {
-            slug.push('_');
-        }
-    }
-    slug.trim_matches('_').to_string()
 }

@@ -6,14 +6,30 @@ pub enum Error {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("configuration error: {0}")]
+    Config(#[from] toml::de::Error),
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 
+    #[error("Atlas executable '{binary}' could not be started: {source}")]
+    AtlasUnavailable {
+        binary: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Atlas migration generation failed: {details}")]
+    AtlasFailed { details: String },
+
     #[error("model has no primary key field")]
     MissingPrimaryKey,
+
+    #[error("model row was not found")]
+    NotFound,
 
     #[error("update has no changed fields")]
     EmptyUpdate,

@@ -4,7 +4,7 @@ Experimental Rust ORM inspired by Django ORM.
 
 Current workspace crates:
 
-- `che-orm`: runtime ORM API, SQLite backend, schema metadata, migration helpers.
+- `che-orm`: runtime ORM API, compile-time SQLite or PostgreSQL backend, schema metadata, migration helpers.
 - `che-orm-macros`: `#[derive(Model)]` implementation.
 - `che-orm-cli`: migration CLI binary named `che-orm`.
 - `che-orm-examples`: runnable examples, not published.
@@ -73,6 +73,25 @@ cargo run -p che-orm-examples --bin relations
 cargo run -p che-orm-examples --bin schema_snapshot
 ```
 
+## Features
+
+`che-orm` selects exactly one backend when compiling an application. The default
+is `sqlite`; use PostgreSQL with:
+
+```toml
+che-orm = { version = "0.1", default-features = false, features = ["postgres"] }
+```
+
+The selected feature enables only its matching SQLx driver. SQLite query
+builders, relations, `QueryValue`, and `AggregateValue` are SQLite-only.
+`DatabaseValue`, model metadata, `FilePath`, and `#[derive(Model)]` work with
+both backends.
+
+Migration authoring is also compile-time selected. `migration-native` is the
+default and supports SQLite schema diffs. `migration-atlas` supports Atlas
+generation for either backend. With neither authoring feature, use manually
+authored SQLx migration files.
+
 ## Migrations
 
 Generate a schema snapshot:
@@ -96,6 +115,10 @@ Schema changes to field properties are detected. SQLite migrations rebuild a
 table when a column must be altered or removed, preserving shared column data.
 The CLI rejects required columns without defaults when existing rows may not be
 populated safely.
+
+PostgreSQL uses SQLx to apply manual migrations. Build the CLI with
+`--no-default-features --features postgres` for `migrate` and `status`; add
+`migration-atlas` when using Atlas to author PostgreSQL migrations.
 
 ## Status
 

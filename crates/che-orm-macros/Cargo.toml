@@ -12,6 +12,10 @@ categories = ["database"]
 [lib]
 proc-macro = true
 
+[features]
+sqlite = []
+postgres = []
+
 [dependencies]
 proc-macro2.workspace = true
 quote.workspace = true

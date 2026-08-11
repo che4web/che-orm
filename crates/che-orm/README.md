@@ -461,6 +461,91 @@ let applied = db.apply_migrations_dir("migrations").await?;
 The directory is executed by SQLx's migration runner. Applied migrations and
 their checksums are stored in `_sqlx_migrations`.
 
+## Runtime Database Facade
+
+Applications can run schema generation and migration application without the
+CLI by implementing `Application` and defining a small manager binary:
+
+```rust
+let db = Database::connect("sqlite://app.sqlite?mode=rwc")
+    .await?
+    .with_migrations_dir("migrations");
+let schema = Schema::from_models(vec![ModelSchema::from_model::<User>()]);
+
+db.makemigrations(&schema, MigrationOptions::new("migrations").named("auto"))?;
+db.migrate().await?;
+```
+
+`Application::schema` is the explicit model registry. Settings can be loaded
+from TOML:
+
+```toml
+[database]
+url = "sqlite://app.sqlite?mode=rwc" # selected by the sqlite Cargo feature
+
+[migrations]
+dir = "migrations"
+```
+
+The generic `Manager<App>` provides `migrate`, `status`, and `connect`.
+`makemigrations` is available only when compiling with `migration-native` or
+`migration-atlas`. The application owns command parsing, so it can add commands
+such as `seed` or `create-admin` and use `manager.connect()` for them.
+
+`Database` is an enum over SQLite and PostgreSQL. Backend-specific work can use
+`database.as_sqlite()` or `database.as_postgres()` while the common migration
+methods remain available directly on `Database`.
+
+Atlas is selected with the `migration-atlas` Cargo feature. Its executable and
+development database are read from `CHE_ORM_ATLAS_BIN` and `CHE_ORM_ATLAS_DEV_URL`:
+
+```rust
+db.makemigrations(&schema, MigrationOptions::new("migrations").named("add_posts"))?;
+```
+
+The defaults are `atlas` and `sqlite://file?mode=memory`.
+
+## PostgreSQL Backend
+
+PostgreSQL uses SQLx for applying manually authored migrations. Native schema
+diff generation is intentionally rejected for PostgreSQL. Configure it with:
+
+```toml
+[database]
+url = "postgres://app:secret@localhost:5432/app"
+
+[migrations]
+dir = "migrations-postgres"
+```
+
+Use the `migration-atlas` feature and set `CHE_ORM_ATLAS_DEV_URL` to a PostgreSQL Atlas
+development URL when generating migrations with Atlas. Keep SQLite and
+PostgreSQL migration directories separate.
+
+Select PostgreSQL when compiling the application:
+
+```toml
+che-orm = { version = "0.1", default-features = false, features = ["postgres"] }
+```
+
+The default feature is `sqlite`; the two backend features are mutually
+exclusive and a binary cannot switch between them at runtime. Each backend
+feature enables only its matching SQLx driver. `DatabaseValue`, `FilePath`, and
+the `Model` derive are backend-neutral; SQLite query builders, relations,
+`QueryValue`, and `AggregateValue` are SQLite-only.
+
+The PostgreSQL backend provides SQLx migration application plus basic model
+operations through `Model::postgres_objects(&backend)`: `create`, `get`, and
+`all`. JSON model fields use `JSONB`. Filtering, relations, and the shared
+`Model::objects` query API remain SQLite-specific while PostgreSQL query
+support is expanded.
+
+The runnable `manager` example can be started with:
+
+```bash
+cargo run -p che-orm-examples --bin manager
+```
+
 Run migration application from exactly one process at a time for a database.
 
 ## Supported Field Attributes
@@ -497,4 +582,5 @@ Runnable examples are in `crates/che-orm-examples`.
 cargo run -p che-orm-examples --bin crud
 cargo run -p che-orm-examples --bin relations
 cargo run -p che-orm-examples --bin schema_snapshot
+cargo run -p che-orm-examples --bin manager -- --help
 ```

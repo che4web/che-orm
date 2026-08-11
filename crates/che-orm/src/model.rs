@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 
+#[cfg(feature = "sqlite")]
 use crate::ModelManager;
 use serde::{Deserialize, Serialize};
 
@@ -81,20 +82,24 @@ impl<M, T> ModelField<M, T> {
     }
 }
 
+#[cfg(feature = "sqlite")]
 pub trait QueryValue<T> {
     fn into_query_value(self) -> SqliteValue;
 }
 
+#[cfg(feature = "sqlite")]
 pub trait AggregateValue:
     Sized + Send + Unpin + for<'q> sqlx::Decode<'q, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>
 {
 }
 
+#[cfg(feature = "sqlite")]
 impl<T> AggregateValue for T where
     T: Sized + Send + Unpin + for<'q> sqlx::Decode<'q, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>
 {
 }
 
+#[cfg(feature = "sqlite")]
 macro_rules! query_value_impl {
     ($field_type:ty, $($value_type:ty),+ $(,)?) => {
         $(impl QueryValue<$field_type> for $value_type {
@@ -105,19 +110,29 @@ macro_rules! query_value_impl {
     };
 }
 
+#[cfg(feature = "sqlite")]
 query_value_impl!(i64, i64, i32, u32);
+#[cfg(feature = "sqlite")]
 query_value_impl!(i32, i32);
+#[cfg(feature = "sqlite")]
 query_value_impl!(u32, u32);
+#[cfg(feature = "sqlite")]
 query_value_impl!(String, String, &str);
+#[cfg(feature = "sqlite")]
 query_value_impl!(bool, bool);
+#[cfg(feature = "sqlite")]
 query_value_impl!(f64, f64, f32);
+#[cfg(feature = "sqlite")]
 query_value_impl!(f32, f32);
+#[cfg(feature = "sqlite")]
 query_value_impl!(chrono::NaiveDateTime, chrono::NaiveDateTime);
+#[cfg(feature = "sqlite")]
 query_value_impl!(serde_json::Value, serde_json::Value);
+#[cfg(feature = "sqlite")]
 query_value_impl!(crate::FilePath, crate::FilePath);
 
 #[derive(Debug, Clone)]
-pub enum SqliteValue {
+pub enum DatabaseValue {
     I64(i64),
     String(String),
     Bool(bool),
@@ -127,74 +142,77 @@ pub enum SqliteValue {
     Null,
 }
 
-impl From<i64> for SqliteValue {
+#[cfg(feature = "sqlite")]
+pub type SqliteValue = DatabaseValue;
+
+impl From<i64> for DatabaseValue {
     fn from(value: i64) -> Self {
         Self::I64(value)
     }
 }
 
-impl From<i32> for SqliteValue {
+impl From<i32> for DatabaseValue {
     fn from(value: i32) -> Self {
         Self::I64(value.into())
     }
 }
 
-impl From<u32> for SqliteValue {
+impl From<u32> for DatabaseValue {
     fn from(value: u32) -> Self {
         Self::I64(value.into())
     }
 }
 
-impl From<String> for SqliteValue {
+impl From<String> for DatabaseValue {
     fn from(value: String) -> Self {
         Self::String(value)
     }
 }
 
-impl From<&str> for SqliteValue {
+impl From<&str> for DatabaseValue {
     fn from(value: &str) -> Self {
         Self::String(value.to_string())
     }
 }
 
-impl From<bool> for SqliteValue {
+impl From<bool> for DatabaseValue {
     fn from(value: bool) -> Self {
         Self::Bool(value)
     }
 }
 
-impl From<f64> for SqliteValue {
+impl From<f64> for DatabaseValue {
     fn from(value: f64) -> Self {
         Self::F64(value)
     }
 }
 
-impl From<f32> for SqliteValue {
+impl From<f32> for DatabaseValue {
     fn from(value: f32) -> Self {
         Self::F64(value.into())
     }
 }
 
-impl From<chrono::NaiveDateTime> for SqliteValue {
+impl From<chrono::NaiveDateTime> for DatabaseValue {
     fn from(value: chrono::NaiveDateTime) -> Self {
         Self::DateTime(value)
     }
 }
 
-impl From<serde_json::Value> for SqliteValue {
+impl From<serde_json::Value> for DatabaseValue {
     fn from(value: serde_json::Value) -> Self {
         Self::Json(value)
     }
 }
 
-impl From<crate::FilePath> for SqliteValue {
+impl From<crate::FilePath> for DatabaseValue {
     fn from(value: crate::FilePath) -> Self {
         Self::String(value.into_inner())
     }
 }
 
 pub trait Model: Sized + Send + Sync + 'static {
-    type Id: Clone + Send + Sync + for<'q> sqlx::Encode<'q, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
+    type Id: Clone + Send + Sync + Into<i64>;
     type Update: Send + Sync;
 
     fn table_name() -> &'static str;
@@ -204,6 +222,7 @@ pub trait Model: Sized + Send + Sync + 'static {
         Self::fields().iter().find(|field| field.primary_key)
     }
 
+    #[cfg(feature = "sqlite")]
     fn objects(db: &crate::SqliteBackend) -> ModelManager<'_, Self>
     where
         Self: SqliteModel,
@@ -211,14 +230,31 @@ pub trait Model: Sized + Send + Sync + 'static {
         ModelManager::new(db)
     }
 
+    #[cfg(feature = "postgres")]
+    fn postgres_objects(db: &crate::PostgresBackend) -> crate::PostgresModelManager<'_, Self>
+    where
+        Self: PostgresModel,
+    {
+        crate::PostgresModelManager::new(db)
+    }
+
     fn get_value(&self, _field: &str) -> Option<crate::__private::serde_json::Value> {
         None
     }
 }
 
+#[cfg(feature = "sqlite")]
 pub trait SqliteModel: Model {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> sqlx::Result<Self>;
     fn id(&self) -> Self::Id;
     fn update_values(data: Self::Update) -> Vec<(&'static str, SqliteValue)>;
     fn save_values(&self) -> Vec<(&'static str, SqliteValue)>;
+}
+
+#[cfg(feature = "postgres")]
+pub trait PostgresModel: Model {
+    fn from_postgres_row(row: &sqlx::postgres::PgRow) -> sqlx::Result<Self>;
+    fn id(&self) -> Self::Id;
+    fn update_values(data: Self::Update) -> Vec<(&'static str, DatabaseValue)>;
+    fn save_values(&self) -> Vec<(&'static str, DatabaseValue)>;
 }

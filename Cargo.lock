@@ -157,6 +157,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "toml 0.8.23",
  "trybuild",
 ]
 
@@ -176,6 +177,7 @@ name = "che-orm-examples"
 version = "0.1.0"
 dependencies = [
  "che-orm",
+ "clap",
  "tokio",
 ]
 

@@ -1127,7 +1127,10 @@ where
             M::table_name(),
             pk.db_name
         );
-        let row = sqlx::query(&sql).bind(id).fetch_one(self.db.pool()).await?;
+        let row = sqlx::query(&sql)
+            .bind(id.into())
+            .fetch_one(self.db.pool())
+            .await?;
         Ok(M::from_row(&row)?)
     }
 
@@ -1198,7 +1201,10 @@ where
     pub async fn delete(&self, id: M::Id) -> Result<()> {
         let pk = M::primary_key().ok_or(Error::MissingPrimaryKey)?;
         let sql = format!("DELETE FROM {} WHERE {} = ?1", M::table_name(), pk.db_name);
-        sqlx::query(&sql).bind(id).execute(self.db.pool()).await?;
+        sqlx::query(&sql)
+            .bind(id.into())
+            .execute(self.db.pool())
+            .await?;
         Ok(())
     }
 }
@@ -2191,7 +2197,7 @@ where
         sqlx::query(&sql),
         values.into_iter().map(|(_, value)| value),
     )
-    .bind(id);
+    .bind(id.into());
     let row = query.fetch_one(db.pool()).await?;
     let model = M::from_row(&row)?;
     dispatch_post_update(db, &model);

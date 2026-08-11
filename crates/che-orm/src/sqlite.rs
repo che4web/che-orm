@@ -1,24 +1,20 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 use sqlx::{SqliteConnection, SqlitePool, migrate::Migrator, sqlite::SqlitePoolOptions};
 
 use crate::{
-    Error, Model, Result, Signals, create_table_sql, migration::SQLITE_FK_REBUILD_DIRECTIVE,
+    Error, MigrationStatus, Model, Result, Signals, create_table_sql,
+    migration::SQLITE_FK_REBUILD_DIRECTIVE,
 };
+
+static MIGRATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct SqliteBackend {
     pool: SqlitePool,
     signals: Signals,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationStatus {
-    pub name: String,
-    pub applied: bool,
-    pub checksum: Option<String>,
-    pub checksum_mismatch: bool,
 }
 
 impl SqliteBackend {
@@ -70,6 +66,12 @@ impl SqliteBackend {
         &self,
         migrations_dir: impl AsRef<Path>,
     ) -> Result<Vec<String>> {
+        // SQLx's SQLite migration table bootstrap is not process-local safe.
+        // Serialize application instances in this process before invoking it.
+        let _lock = MIGRATION_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         let migrator = Migrator::new(migrations_dir.as_ref()).await?;
         let applied_before: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = TRUE")

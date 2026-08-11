@@ -92,6 +92,7 @@ impl<'de> serde::Deserialize<'de> for FilePath {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for FilePath {
     fn encode_by_ref(
         &self,
@@ -101,6 +102,7 @@ impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for FilePath {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl sqlx::Type<sqlx::Sqlite> for FilePath {
     fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
         <String as sqlx::Type<sqlx::Sqlite>>::type_info()
@@ -110,11 +112,43 @@ impl sqlx::Type<sqlx::Sqlite> for FilePath {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for FilePath {
     fn decode(
         value: sqlx::sqlite::SqliteValueRef<'r>,
     ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
         let value = <String as sqlx::Decode<'r, sqlx::Sqlite>>::decode(value)?;
+        Self::new(value).map_err(|error| Box::new(error) as sqlx::error::BoxDynError)
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl<'q> sqlx::Encode<'q, sqlx::Postgres> for FilePath {
+    fn encode_by_ref(
+        &self,
+        arguments: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> std::result::Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <String as sqlx::Encode<'q, sqlx::Postgres>>::encode_by_ref(&self.0, arguments)
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl sqlx::Type<sqlx::Postgres> for FilePath {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for FilePath {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'r>,
+    ) -> std::result::Result<Self, sqlx::error::BoxDynError> {
+        let value = <String as sqlx::Decode<'r, sqlx::Postgres>>::decode(value)?;
         Self::new(value).map_err(|error| Box::new(error) as sqlx::error::BoxDynError)
     }
 }

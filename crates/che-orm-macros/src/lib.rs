@@ -54,6 +54,45 @@ fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let from_str_arms = variants
         .iter()
         .map(|(variant, value)| quote!(#value => Ok(Self::#variant)));
+    let sqlite_choice_impl = if cfg!(feature = "sqlite") {
+        quote! {
+            impl ::che_orm::QueryValue<#enum_name> for #enum_name {
+                fn into_query_value(self) -> ::che_orm::SqliteValue {
+                    ::che_orm::SqliteValue::String(
+                        <#enum_name as ::che_orm::Choice>::as_str(&self).to_string()
+                    )
+                }
+            }
+
+            impl ::che_orm::ProjectionValue for #enum_name {
+                fn from_projection_row(
+                    row: &::che_orm::__private::sqlx::sqlite::SqliteRow,
+                    field: &str,
+                ) -> ::che_orm::Result<Self> {
+                    let value: ::std::string::String =
+                        ::che_orm::__private::sqlx::Row::try_get(row, field)?;
+                    <#enum_name as ::che_orm::Choice>::from_str(&value)
+                        .map_err(::che_orm::Error::ProjectionDecode)
+                }
+            }
+
+            impl ::che_orm::OptionalProjectionValue for #enum_name {
+                fn from_optional_projection_row(
+                    row: &::che_orm::__private::sqlx::sqlite::SqliteRow,
+                    field: &str,
+                ) -> ::che_orm::Result<::std::option::Option<Self>> {
+                    let value: ::std::option::Option<::std::string::String> =
+                        ::che_orm::__private::sqlx::Row::try_get(row, field)?;
+                    value
+                        .map(|value| <#enum_name as ::che_orm::Choice>::from_str(&value)
+                            .map_err(::che_orm::Error::ProjectionDecode))
+                        .transpose()
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     Ok(quote! {
         impl ::che_orm::Choice for #enum_name {
@@ -75,39 +114,7 @@ fn expand_choice(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
 
-        impl ::che_orm::QueryValue<#enum_name> for #enum_name {
-            fn into_query_value(self) -> ::che_orm::SqliteValue {
-                ::che_orm::SqliteValue::String(
-                    <#enum_name as ::che_orm::Choice>::as_str(&self).to_string()
-                )
-            }
-        }
-
-        impl ::che_orm::ProjectionValue for #enum_name {
-            fn from_projection_row(
-                row: &::che_orm::__private::sqlx::sqlite::SqliteRow,
-                field: &str,
-            ) -> ::che_orm::Result<Self> {
-                let value: ::std::string::String =
-                    ::che_orm::__private::sqlx::Row::try_get(row, field)?;
-                <#enum_name as ::che_orm::Choice>::from_str(&value)
-                    .map_err(::che_orm::Error::ProjectionDecode)
-            }
-        }
-
-        impl ::che_orm::OptionalProjectionValue for #enum_name {
-            fn from_optional_projection_row(
-                row: &::che_orm::__private::sqlx::sqlite::SqliteRow,
-                field: &str,
-            ) -> ::che_orm::Result<::std::option::Option<Self>> {
-                let value: ::std::option::Option<::std::string::String> =
-                    ::che_orm::__private::sqlx::Row::try_get(row, field)?;
-                value
-                    .map(|value| <#enum_name as ::che_orm::Choice>::from_str(&value)
-                        .map_err(::che_orm::Error::ProjectionDecode))
-                    .transpose()
-            }
-        }
+        #sqlite_choice_impl
     })
 }
 
@@ -139,6 +146,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let mut infos = Vec::new();
     let mut row_fields = Vec::new();
+    let mut postgres_row_fields = Vec::new();
     let mut update_fields = Vec::new();
     let mut update_values = Vec::new();
     let mut id_ty = None;
@@ -302,11 +310,12 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         });
 
         row_fields.push(row_field_quote(&ident, &ty, &db_name));
+        postgres_row_fields.push(postgres_row_field_quote(&ident, &ty, &db_name));
 
         if !primary_key && !auto_now_add && !auto_now {
             update_fields.push(quote! { pub #ident: ::std::option::Option<#ty> });
-            update_values.push(sqlite_value_update_quote(&ident, &ty, &db_name));
-            save_values.push(sqlite_value_ref_quote(&ident, &ty, &db_name));
+            update_values.push(database_value_update_quote(&ident, &ty, &db_name));
+            save_values.push(database_value_ref_quote(&ident, &ty, &db_name));
         }
 
         value_arms.push(model_value_arm(&ident, &db_name, &ty));
@@ -330,6 +339,39 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             "the primary key must be an immutable id: i64 field",
         ));
     }
+
+    let sqlite_impl = if cfg!(feature = "sqlite") {
+        quote! {
+            impl #model_name {
+                pub async fn save(&self, db: &::che_orm::SqliteBackend) -> ::che_orm::Result<Self> {
+                    <Self as ::che_orm::Model>::objects(db).save(self).await
+                }
+            }
+            impl ::che_orm::SqliteModel for #model_name {
+                fn from_row(row: &::che_orm::__private::sqlx::sqlite::SqliteRow) -> ::che_orm::__private::sqlx::Result<Self> { Ok(Self { #(#row_fields,)* }) }
+                fn id(&self) -> Self::Id { self.#id_ident.clone() }
+                fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> { let mut values = ::std::vec::Vec::new(); #(#update_values)* values }
+                fn save_values(&self) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> { let mut values = ::std::vec::Vec::new(); #(#save_values)* values }
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let postgres_impl = if cfg!(feature = "postgres") {
+        quote! {
+            impl #model_name {
+                pub async fn save_postgres(&self, db: &::che_orm::PostgresBackend) -> ::che_orm::Result<Self> { <Self as ::che_orm::Model>::postgres_objects(db).save(self).await?.ok_or(::che_orm::Error::NotFound) }
+            }
+            impl ::che_orm::PostgresModel for #model_name {
+                fn from_postgres_row(row: &::che_orm::__private::sqlx::postgres::PgRow) -> ::che_orm::__private::sqlx::Result<Self> { Ok(Self { #(#postgres_row_fields,)* }) }
+                fn id(&self) -> Self::Id { self.#id_ident.clone() }
+                fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> { let mut values = ::std::vec::Vec::new(); #(#update_values)* values }
+                fn save_values(&self) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> { let mut values = ::std::vec::Vec::new(); #(#save_values)* values }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     Ok(quote! {
         #[derive(Debug, Clone, Default)]
@@ -370,13 +412,20 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
 
-        impl #model_name {
+        /*impl #model_name {
             pub async fn save(&self, db: &::che_orm::SqliteBackend) -> ::che_orm::Result<Self> {
                 <Self as ::che_orm::Model>::objects(db).save(self).await
             }
-        }
 
-        impl ::che_orm::SqliteModel for #model_name {
+            pub async fn save_postgres(&self, db: &::che_orm::PostgresBackend) -> ::che_orm::Result<Self> {
+                <Self as ::che_orm::Model>::postgres_objects(db)
+                    .save(self)
+                    .await?
+                    .ok_or(::che_orm::Error::NotFound)
+            }
+        }*/
+
+        /*impl ::che_orm::SqliteModel for #model_name {
             fn from_row(row: &::che_orm::__private::sqlx::sqlite::SqliteRow) -> ::che_orm::__private::sqlx::Result<Self> {
                 Ok(Self {
                     #(#row_fields,)*
@@ -398,7 +447,30 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 #(#save_values)*
                 values
             }
-        }
+        }*/
+
+        /*impl ::che_orm::PostgresModel for #model_name {
+            fn from_postgres_row(row: &::che_orm::__private::sqlx::postgres::PgRow) -> ::che_orm::__private::sqlx::Result<Self> {
+                Ok(Self {
+                    #(#postgres_row_fields,)*
+                })
+            }
+
+            fn id(&self) -> Self::Id {
+                self.#id_ident.clone()
+            }
+
+            fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> {
+                <Self as ::che_orm::SqliteModel>::update_values(data)
+            }
+
+            fn save_values(&self) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> {
+                <Self as ::che_orm::SqliteModel>::save_values(self)
+            }
+        }*/
+
+        #sqlite_impl
+        #postgres_impl
 
     })
 }
@@ -588,6 +660,55 @@ fn is_file_path(ty: &Type) -> bool {
         .is_some_and(|segment| segment.ident == "FilePath")
 }
 
+fn postgres_row_field_quote(
+    ident: &syn::Ident,
+    ty: &Type,
+    db_name: &str,
+) -> proc_macro2::TokenStream {
+    if choice_type(ty).is_some() {
+        return row_field_quote(ident, ty, db_name);
+    }
+    if is_json_value(ty) {
+        return quote! {
+            #ident: ::che_orm::__private::sqlx::Row::try_get::<::che_orm::__private::sqlx::types::Json<::che_orm::__private::serde_json::Value>, _>(row, #db_name)?.0
+        };
+    }
+    if option_inner(ty).is_some_and(is_json_value) {
+        return quote! {
+            #ident: ::che_orm::__private::sqlx::Row::try_get::<::std::option::Option<::che_orm::__private::sqlx::types::Json<::che_orm::__private::serde_json::Value>>, _>(row, #db_name)?.map(|value| value.0)
+        };
+    }
+    if is_file_path(ty) {
+        if option_inner(ty).is_some() {
+            return quote! {
+                #ident: ::che_orm::__private::sqlx::Row::try_get::<::std::option::Option<::std::string::String>, _>(row, #db_name)?
+                    .map(::che_orm::FilePath::new)
+                    .transpose()
+                    .map_err(|error| ::che_orm::__private::sqlx::Error::Decode(::std::boxed::Box::new(error)))?
+            };
+        }
+        return quote! {
+            #ident: ::che_orm::FilePath::new(::che_orm::__private::sqlx::Row::try_get::<::std::string::String, _>(row, #db_name)?)
+                .map_err(|error| ::che_orm::__private::sqlx::Error::Decode(::std::boxed::Box::new(error)))?
+        };
+    }
+    let base = option_inner(ty).unwrap_or(ty);
+    if is_type(base, "u32") {
+        if option_inner(ty).is_some() {
+            return quote! {
+                #ident: ::che_orm::__private::sqlx::Row::try_get::<::std::option::Option<i64>, _>(row, #db_name)?
+                    .map(|value| u32::try_from(value).map_err(|error| ::che_orm::__private::sqlx::Error::Decode(::std::boxed::Box::new(error))))
+                    .transpose()?
+            };
+        }
+        return quote! {
+            #ident: u32::try_from(::che_orm::__private::sqlx::Row::try_get::<i64, _>(row, #db_name)?)
+                .map_err(|error| ::che_orm::__private::sqlx::Error::Decode(::std::boxed::Box::new(error)))?
+        };
+    }
+    quote! { #ident: ::che_orm::__private::sqlx::Row::try_get(row, #db_name)? }
+}
+
 fn row_field_quote(ident: &syn::Ident, ty: &Type, db_name: &str) -> proc_macro2::TokenStream {
     if let Some(choice) = choice_type(ty) {
         if option_inner(ty).is_some() {
@@ -650,7 +771,7 @@ fn row_field_quote(ident: &syn::Ident, ty: &Type, db_name: &str) -> proc_macro2:
     }
 }
 
-fn sqlite_value_ref_quote(
+fn database_value_ref_quote(
     ident: &syn::Ident,
     ty: &Type,
     db_name: &str,
@@ -660,15 +781,15 @@ fn sqlite_value_ref_quote(
             quote! {
                 values.push((#db_name, match self.#ident.clone() {
                     ::std::option::Option::Some(value) =>
-                        ::che_orm::SqliteValue::String(
+                        ::che_orm::DatabaseValue::String(
                             <#choice as ::che_orm::Choice>::as_str(&value).to_string()
                         ),
-                    ::std::option::Option::None => ::che_orm::SqliteValue::Null,
+                    ::std::option::Option::None => ::che_orm::DatabaseValue::Null,
                 }));
             }
         } else {
             quote! {
-                values.push((#db_name, ::che_orm::SqliteValue::String(
+                values.push((#db_name, ::che_orm::DatabaseValue::String(
                     <#choice as ::che_orm::Choice>::as_str(&self.#ident).to_string()
                 )));
             }
@@ -676,18 +797,18 @@ fn sqlite_value_ref_quote(
     } else if is_option(ty) {
         quote! {
             values.push((#db_name, match self.#ident.clone() {
-                ::std::option::Option::Some(value) => ::che_orm::SqliteValue::from(value),
-                ::std::option::Option::None => ::che_orm::SqliteValue::Null,
+                ::std::option::Option::Some(value) => ::che_orm::DatabaseValue::from(value),
+                ::std::option::Option::None => ::che_orm::DatabaseValue::Null,
             }));
         }
     } else {
         quote! {
-            values.push((#db_name, ::che_orm::SqliteValue::from(self.#ident.clone())));
+            values.push((#db_name, ::che_orm::DatabaseValue::from(self.#ident.clone())));
         }
     }
 }
 
-fn sqlite_value_update_quote(
+fn database_value_update_quote(
     ident: &syn::Ident,
     ty: &Type,
     db_name: &str,
@@ -698,17 +819,17 @@ fn sqlite_value_update_quote(
                 if let ::std::option::Option::Some(value) = data.#ident {
                     values.push((#db_name, match value {
                         ::std::option::Option::Some(value) =>
-                            ::che_orm::SqliteValue::String(
+                            ::che_orm::DatabaseValue::String(
                                 <#choice as ::che_orm::Choice>::as_str(&value).to_string()
                             ),
-                        ::std::option::Option::None => ::che_orm::SqliteValue::Null,
+                        ::std::option::Option::None => ::che_orm::DatabaseValue::Null,
                     }));
                 }
             }
         } else {
             quote! {
                 if let ::std::option::Option::Some(value) = data.#ident {
-                    values.push((#db_name, ::che_orm::SqliteValue::String(
+                    values.push((#db_name, ::che_orm::DatabaseValue::String(
                         <#choice as ::che_orm::Choice>::as_str(&value).to_string()
                     )));
                 }
@@ -718,15 +839,15 @@ fn sqlite_value_update_quote(
         quote! {
             if let ::std::option::Option::Some(value) = data.#ident {
                 values.push((#db_name, match value {
-                    ::std::option::Option::Some(value) => ::che_orm::SqliteValue::from(value),
-                    ::std::option::Option::None => ::che_orm::SqliteValue::Null,
+                    ::std::option::Option::Some(value) => ::che_orm::DatabaseValue::from(value),
+                    ::std::option::Option::None => ::che_orm::DatabaseValue::Null,
                 }));
             }
         }
     } else {
         quote! {
             if let ::std::option::Option::Some(value) = data.#ident {
-                values.push((#db_name, ::che_orm::SqliteValue::from(value)));
+                values.push((#db_name, ::che_orm::DatabaseValue::from(value)));
             }
         }
     }

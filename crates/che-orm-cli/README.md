@@ -6,8 +6,10 @@ The binary name is `che-orm`.
 
 ## Commands
 
-- `makemigrations`: compare the previous schema snapshot with the current schema snapshot and generate a SQLite `.sql` migration file.
-- `migrate`: apply unapplied migration files to a SQLite database.
+- `makemigrations`: compare schema snapshots and generate migration SQL. It is
+  available only with `migration-native` or `migration-atlas`.
+- `migrate`: apply unapplied migration files through SQLx.
+- `status`: show migration files and their SQLx application state.
 
 ## Generate Current Schema
 
@@ -54,11 +56,34 @@ Generated files:
 
 ```text
 migrations/
-  0001_initial.sql
+  20260810120000_initial.sql
   schema.json
 ```
 
 `migrations/schema.json` is the last committed schema snapshot used for the next diff.
+
+Use Atlas for migration generation:
+
+```bash
+CHE_ORM_ATLAS_BIN=atlas \
+CHE_ORM_ATLAS_DEV_URL='sqlite://file?mode=memory' \
+cargo run -p che-orm-cli --no-default-features --features sqlite,migration-atlas -- makemigrations --name add_posts
+```
+
+`CHE_ORM_ATLAS_BIN` defaults to `atlas`, and `CHE_ORM_ATLAS_DEV_URL` defaults
+to `sqlite://file?mode=memory`. These variables are only needed for
+the `migration-atlas` feature; applying migrations uses SQLx directly.
+
+PostgreSQL migration application uses SQLx and manual migration files. Native
+generation is SQLite-only. Build the CLI with the `postgres` feature and use a
+separate migration directory:
+
+```bash
+cargo run -p che-orm-cli --no-default-features --features postgres -- migrate --config app.toml
+```
+
+Add `migration-atlas` to author PostgreSQL migrations with Atlas. A CLI built
+without either migration authoring feature exposes only `migrate` and `status`.
 
 ## Apply Migrations
 
@@ -146,7 +171,8 @@ cargo run -p che-orm-cli -- migrate --config app.toml
 
 ## Notes
 
-- The CLI is SQLite-focused in the current MVP.
+- The default CLI build targets SQLite. PostgreSQL builds support SQLx migration
+  application and Atlas-based migration authoring.
 - SQL execution is hidden behind the `che-orm` runtime API; application code does not need to call `sqlx` directly.
 - Keep generated migration files under version control.
 - Run `migrate` from one process at a time per database.

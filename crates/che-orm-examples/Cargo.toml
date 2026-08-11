@@ -18,6 +18,11 @@ path = "src/bin/relations.rs"
 name = "schema_snapshot"
 path = "src/bin/schema_snapshot.rs"
 
+[[bin]]
+name = "manager"
+path = "src/bin/manager.rs"
+
 [dependencies]
-che-orm.workspace = true
+che-orm = { workspace = true, features = ["sqlite"] }
+clap.workspace = true
 tokio.workspace = true

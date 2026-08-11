@@ -10,12 +10,19 @@ documentation = "https://docs.rs/che-orm-cli"
 keywords = ["orm", "sqlite", "migrations", "cli"]
 categories = ["command-line-utilities", "database"]
 
+[features]
+default = ["sqlite", "migration-native"]
+sqlite = ["che-orm/sqlite"]
+postgres = ["che-orm/postgres"]
+migration-native = ["che-orm/migration-native"]
+migration-atlas = ["che-orm/migration-atlas"]
+
 [[bin]]
 name = "che-orm"
 path = "src/main.rs"
 
 [dependencies]
-che-orm.workspace = true
+che-orm = { workspace = true, default-features = false }
 clap.workspace = true
 serde.workspace = true
 tokio.workspace = true
