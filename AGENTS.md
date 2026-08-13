@@ -8,6 +8,7 @@
 ## Commands
 - Full verification: `cargo test --workspace`.
 - Backend compile coverage: `cargo test -p che-orm --test backend_compile` and `cargo test -p che-orm --no-default-features --features postgres --test backend_compile`.
+- PostgreSQL query integration coverage: `cargo test -p che-orm --no-default-features --features postgres --test postgres_query`; it connects only when `CHE_ORM_TEST_POSTGRES_URL` is set.
 - Check feature isolation: `cargo tree -p che-orm --no-default-features --features postgres -i sqlx-sqlite` and the inverse SQLite/PostgreSQL command should print nothing.
 - Focus one crate: `cargo test -p che-orm` or `cargo test -p che-orm-macros`.
 - Focus one test by name: `cargo test -p che-orm sqlite_crud_flow`.
@@ -26,10 +27,11 @@
 ## Testing Notes
 - Tests use `sqlite::memory:` and temp files; no external database service is required.
 - Timestamp tests sleep for about one second to observe `CURRENT_TIMESTAMP` changes, so `cargo test -p che-orm` is not instant.
-- CRUD API expectations are best verified from tests in `crates/che-orm/tests/`; some README examples may lag current builder signatures.
+- CRUD and facade query expectations are best verified from tests in `crates/che-orm/tests/`; `Database::query::<Model>()` is the public typed query entry point.
 
 ## Implementation Gotchas
 - `SqliteBackend::connect` enables `PRAGMA foreign_keys = ON`; keep relation tests in mind when changing connection setup.
-- `QueryValue`, `AggregateValue`, relations, and the Django-style query builders are SQLite-only. `DatabaseValue`, `Model`, `FilePath`, and derive output are shared; `FilePath` has backend-specific SQLx codecs.
+- `Database::query::<Model>()` and its typed `Q` predicates work with both backends. Relations, projections, annotations, grouped queries, and numeric aggregates remain SQLite-only. `DatabaseValue`, `Model`, `FilePath`, and derive output are shared; `FilePath` has backend-specific SQLx codecs.
+- `Model::objects` and `Model::postgres_objects` were removed. Use `Database` for basic CRUD and typed queries; use `as_sqlite()` only for SQLite-specific APIs such as relations and signals.
 - Migration application uses a quote/comment-aware SQL statement parser and ignores comment-only statements; avoid adding migration SQL syntax that depends on unsupported dialect constructs without extending that parser.
 - The derive macro requires named structs and exactly relies on a `#[field(primary_key)]`; `i64` primary keys are auto-increment by default.

@@ -40,12 +40,13 @@ async fn main() -> che_orm::Result<()> {
     let updated = db.save(&fetched).await?;
     println!("updated: {updated:?}");
 
-    let users = db
-        .query::<User>()
+    let users: Vec<User> = db
+        .query()
         .filter(UserFields::EMAIL.contains("@example.com"))
         .order_by(UserFields::EMAIL)
         .all()
         .await?;
+
     println!("all users: {users:?}");
 
     db.delete::<User>(user.id).await?;
