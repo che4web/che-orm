@@ -29,6 +29,11 @@ use crate::{diff_schemas, sqlite_migration_sql, validate_migration};
 use crate::{postgres_schema_sql, sqlite_schema_sql};
 
 #[derive(Debug, Clone)]
+/// Connection facade for the backend selected at compile time.
+///
+/// It provides common CRUD and typed query methods for SQLite and PostgreSQL.
+/// SQLite-specific functionality is exposed through `as_sqlite`; PostgreSQL
+/// builds expose the corresponding `as_postgres` method.
 pub enum Database {
     #[cfg(feature = "sqlite")]
     Sqlite {
@@ -43,6 +48,7 @@ pub enum Database {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// SQLx application state for one migration file.
 pub struct MigrationStatus {
     pub name: String,
     pub applied: bool,
@@ -52,6 +58,7 @@ pub struct MigrationStatus {
 
 #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
 #[derive(Debug, Clone)]
+/// Options used when generating migrations from a schema snapshot.
 pub struct MigrationOptions {
     migrations_dir: PathBuf,
     name: String,
@@ -59,6 +66,7 @@ pub struct MigrationOptions {
 
 #[cfg(feature = "migration-atlas")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// SQL dialect passed to Atlas migration generation.
 pub enum MigrationDialect {
     Sqlite,
     Postgres,
@@ -66,6 +74,7 @@ pub enum MigrationDialect {
 
 #[cfg(feature = "migration-atlas")]
 #[derive(Debug, Clone)]
+/// Atlas executable, development database, and dialect settings.
 pub struct AtlasOptions {
     pub binary: String,
     pub dev_url: String,
@@ -74,17 +83,20 @@ pub struct AtlasOptions {
 
 #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of generating a migration; `path` is absent when no changes exist.
 pub struct GeneratedMigration {
     pub path: Option<PathBuf>,
     pub changes: usize,
 }
 
+/// Typed builder returned by [`Database::create`].
 pub struct DatabaseCreateBuilder<'db, M> {
     database: &'db Database,
     values: Vec<(String, DatabaseValue)>,
     _model: std::marker::PhantomData<M>,
 }
 
+/// Typed builder returned by [`Database::update`].
 pub struct DatabaseUpdateBuilder<'db, M: crate::Model> {
     database: &'db Database,
     id: M::Id,
@@ -93,6 +105,7 @@ pub struct DatabaseUpdateBuilder<'db, M: crate::Model> {
 
 #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
 impl MigrationOptions {
+    /// Creates options with migration name `auto`.
     pub fn new(migrations_dir: impl Into<PathBuf>) -> Self {
         Self {
             migrations_dir: migrations_dir.into(),
@@ -100,6 +113,7 @@ impl MigrationOptions {
         }
     }
 
+    /// Sets the descriptive suffix used in the generated migration filename.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
@@ -108,6 +122,7 @@ impl MigrationOptions {
 
 #[cfg(feature = "migration-atlas")]
 impl AtlasOptions {
+    /// Creates explicit Atlas options using the SQLite dialect by default.
     pub fn new(binary: impl Into<String>, dev_url: impl Into<String>) -> Self {
         Self {
             binary: binary.into(),
@@ -116,6 +131,7 @@ impl AtlasOptions {
         }
     }
 
+    /// Reads Atlas options from `CHE_ORM_ATLAS_BIN` and `CHE_ORM_ATLAS_DEV_URL`.
     pub fn from_env() -> Self {
         Self {
             binary: std::env::var("CHE_ORM_ATLAS_BIN").unwrap_or_else(|_| "atlas".to_string()),
@@ -125,6 +141,7 @@ impl AtlasOptions {
         }
     }
 
+    /// Selects the schema dialect supplied to Atlas.
     pub fn with_dialect(mut self, dialect: MigrationDialect) -> Self {
         self.dialect = dialect;
         self
@@ -133,6 +150,7 @@ impl AtlasOptions {
 
 impl Database {
     #[cfg(feature = "sqlite")]
+    /// Connects to a SQLite database and uses `migrations` as the default directory.
     pub async fn connect(url: &str) -> Result<Self> {
         Ok(Self::Sqlite {
             backend: SqliteBackend::connect(url).await?,
@@ -141,6 +159,7 @@ impl Database {
     }
 
     #[cfg(feature = "postgres")]
+    /// Connects to a PostgreSQL database and uses `migrations` as the default directory.
     pub async fn connect(url: &str) -> Result<Self> {
         Ok(Self::Postgres {
             backend: PostgresBackend::connect(url).await?,
@@ -148,6 +167,7 @@ impl Database {
         })
     }
 
+    /// Replaces the directory used by [`Self::migrate`] and `migration_status`.
     pub fn with_migrations_dir(mut self, path: impl Into<PathBuf>) -> Self {
         match &mut self {
             #[cfg(feature = "sqlite")]
@@ -163,6 +183,7 @@ impl Database {
     }
 
     #[cfg(feature = "sqlite")]
+    /// Returns the SQLite backend for SQLite-only operations such as relations and signals.
     pub fn as_sqlite(&self) -> &SqliteBackend {
         match self {
             Self::Sqlite { backend, .. } => backend,
@@ -170,12 +191,14 @@ impl Database {
     }
 
     #[cfg(feature = "postgres")]
+    /// Returns the PostgreSQL backend selected for this build.
     pub fn as_postgres(&self) -> &PostgresBackend {
         match self {
             Self::Postgres { backend, .. } => backend,
         }
     }
 
+    /// Applies pending SQLx migrations from the configured directory.
     pub async fn migrate(&self) -> Result<Vec<String>> {
         match self {
             #[cfg(feature = "sqlite")]
@@ -633,6 +656,7 @@ pub fn generate_migrations(
     schema: &Schema,
     options: MigrationOptions,
 ) -> Result<GeneratedMigration> {
+    schema.validate()?;
     fs::create_dir_all(&options.migrations_dir)?;
     let snapshot_path = options.migrations_dir.join("schema.json");
     #[cfg(feature = "migration-native")]

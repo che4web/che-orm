@@ -180,6 +180,41 @@ fn postgres_schema_uses_postgres_types_and_identity_columns() {
     assert!(sql.contains("BOOLEAN NOT NULL DEFAULT true"));
 }
 
+#[test]
+fn schema_rejects_unsafe_identifiers_when_loaded() {
+    let path = std::env::temp_dir().join(format!(
+        "che_orm_unsafe_schema_{}.json",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &path,
+        r#"{"models":[{"table":"users; DROP TABLE users","fields":[],"indexes":[]}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        Schema::load(&path),
+        Err(che_orm::Error::InvalidIdentifier(_))
+    ));
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn schema_rejects_index_for_unknown_column() {
+    let schema = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field()],
+        indexes: vec![IndexSchema {
+            name: "users_missing_idx".to_string(),
+            columns: vec!["missing".to_string()],
+            unique: false,
+        }],
+    }]);
+    assert!(schema.validate().is_err());
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_manual_migrations_are_supported_when_configured() {
@@ -434,7 +469,10 @@ fn diff_added_field_generates_add_column() {
     ));
 
     let sql = sqlite_migration_sql(&migration);
-    assert_eq!(sql, "ALTER TABLE users ADD COLUMN email TEXT NOT NULL;");
+    assert_eq!(
+        sql,
+        "ALTER TABLE \"users\" ADD COLUMN \"email\" TEXT NOT NULL;"
+    );
 }
 
 #[test]
@@ -493,8 +531,8 @@ fn diff_changed_field_generates_alter_column() {
 
     let sql = sqlite_migration_sql(&migration);
     assert!(sql.contains("CREATE TABLE \"__che_orm_new_users\""));
-    assert!(sql.contains("email TEXT NOT NULL UNIQUE"));
-    assert!(sql.contains("CHECK (length(email) <= 255)"));
+    assert!(sql.contains("\"email\" TEXT NOT NULL UNIQUE"));
+    assert!(sql.contains("CHECK (length(\"email\") <= 255)"));
 }
 
 #[test]
@@ -526,7 +564,7 @@ fn destructive_changes_are_marked_in_sql() {
     let new = Schema::empty();
     let sql = sqlite_migration_sql(&diff_schemas(&old, &new));
     assert!(sql.contains("-- che-orm: destructive"));
-    assert!(sql.contains("DROP TABLE IF EXISTS users;"));
+    assert!(sql.contains("DROP TABLE IF EXISTS \"users\";"));
 }
 
 #[test]
@@ -591,8 +629,8 @@ fn migration_creates_fk_parent_before_child() {
     );
     let sql = sqlite_migration_sql(&migration);
     assert!(
-        sql.find("CREATE TABLE IF NOT EXISTS parents").unwrap()
-            < sql.find("CREATE TABLE IF NOT EXISTS children").unwrap()
+        sql.find("CREATE TABLE IF NOT EXISTS \"parents\"").unwrap()
+            < sql.find("CREATE TABLE IF NOT EXISTS \"children\"").unwrap()
     );
 }
 
@@ -732,8 +770,8 @@ fn migration_drops_child_before_parent() {
     ]);
     let sql = sqlite_migration_sql(&diff_schemas(&old, &Schema::empty()));
     assert!(
-        sql.find("DROP TABLE IF EXISTS children").unwrap()
-            < sql.find("DROP TABLE IF EXISTS parents").unwrap()
+        sql.find("DROP TABLE IF EXISTS \"children\"").unwrap()
+            < sql.find("DROP TABLE IF EXISTS \"parents\"").unwrap()
     );
 }
 
@@ -955,10 +993,10 @@ fn migration_sql_for_create_table() {
     let migration = diff_schemas(&Schema::empty(), &Schema::from_model::<User>());
     let sql = sqlite_migration_sql(&migration);
 
-    assert!(sql.contains("CREATE TABLE IF NOT EXISTS users"));
-    assert!(sql.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"));
-    assert!(sql.contains("email TEXT NOT NULL"));
-    assert!(sql.contains("is_active BOOLEAN NOT NULL DEFAULT true"));
+    assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"users\""));
+    assert!(sql.contains("\"id\" INTEGER PRIMARY KEY AUTOINCREMENT"));
+    assert!(sql.contains("\"email\" TEXT NOT NULL"));
+    assert!(sql.contains("\"is_active\" BOOLEAN NOT NULL DEFAULT true"));
 }
 
 #[test]

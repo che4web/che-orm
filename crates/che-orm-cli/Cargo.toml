@@ -2,8 +2,10 @@
 name = "che-orm-cli"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file = "../../LICENSE-MIT"
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Migration CLI for che-orm"
 readme = "README.md"
 documentation = "https://docs.rs/che-orm-cli"

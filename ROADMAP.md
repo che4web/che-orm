@@ -1,10 +1,22 @@
 # che-orm Roadmap
 
-Current baseline:
+## 0.1 Support Contract
 
-- SQLite CRUD and model derive macros.
-- Schema snapshots, field-property diffs, SQLite table rebuilds, and migration safety checks.
-- Django-style `Q` predicates, `IN`, NULL checks, pagination, multi-column ordering, and numeric aggregates.
+- SQLite and PostgreSQL CRUD, model derive macros, typed `Q` predicates,
+  pagination, ordering, `count`, and `distinct`.
+- SQLite schema snapshots, field-property diffs, table rebuilds, relations,
+  signals, projections, grouping, and numeric aggregates.
+- SQLx migration application for both backends; native migration generation for
+  SQLite and Atlas authoring for both.
+
+Known 0.1 limitations:
+
+- No automatic table or column rename detection, rollback migrations, or type
+  conversions.
+- SQLite table rebuild preserves shared columns and modeled indexes only;
+  triggers, views, and unmanaged indexes must be recreated manually.
+- Migration generation and application must have one writer per database and
+  migration directory.
 
 ## 1. Correctness
 
@@ -18,7 +30,8 @@ Current baseline:
 - Reject modified historical migration files. (implemented)
 - Replace naive `split(';')` SQL execution. (implemented)
 - Add a CLI `status` command. (implemented)
-- Add preflight checks for uniqueness, foreign keys, choices, max length, and type conversions. (implemented)
+- Add preflight checks for uniqueness, foreign keys, choices, and max length. (implemented)
+- Reject type conversions that require an explicit manual data migration. (implemented)
 - Mark destructive operations explicitly. (implemented)
 
 ## 3. Schema Evolution

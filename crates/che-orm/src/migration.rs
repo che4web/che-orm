@@ -604,7 +604,7 @@ fn create_table_model_sql(model: &ModelSchema) -> String {
         .join("\n");
     format!(
         "CREATE TABLE IF NOT EXISTS {} (\n    {}\n);{}",
-        model.table,
+        quote_identifier(&model.table),
         columns,
         if indexes.is_empty() {
             String::new()
@@ -617,10 +617,13 @@ fn create_table_model_sql(model: &ModelSchema) -> String {
 fn sqlite_change_sql(change: &SchemaChange) -> String {
     match change {
         SchemaChange::CreateTable(model) => create_table_model_sql(model),
-        SchemaChange::DropTable { table } => format!("DROP TABLE IF EXISTS {table};"),
+        SchemaChange::DropTable { table } => {
+            format!("DROP TABLE IF EXISTS {};", quote_identifier(table))
+        }
         SchemaChange::AddColumn { table, field } => {
             format!(
-                "ALTER TABLE {table} ADD COLUMN {};",
+                "ALTER TABLE {} ADD COLUMN {};",
+                quote_identifier(table),
                 column_schema_sql(field)
             )
         }
@@ -732,7 +735,8 @@ fn column_parts(
     choices: Option<&[String]>,
     max_length: Option<u32>,
 ) -> String {
-    let mut parts = vec![name.to_string()];
+    let quoted_name = quote_identifier(name);
+    let mut parts = vec![quoted_name.clone()];
 
     if primary_key && auto {
         parts.push("INTEGER PRIMARY KEY AUTOINCREMENT".to_string());
@@ -755,7 +759,10 @@ fn column_parts(
         parts.push("DEFAULT CURRENT_TIMESTAMP".to_string());
     }
     if let Some(foreign_key) = foreign_key {
-        parts.push(format!("REFERENCES {}(id)", foreign_key.table));
+        parts.push(format!(
+            "REFERENCES {}(id)",
+            quote_identifier(&foreign_key.table)
+        ));
         if foreign_key.on_delete != ForeignKeyAction::NoAction {
             parts.push(format!("ON DELETE {}", action_sql(foreign_key.on_delete)));
         }
@@ -766,10 +773,10 @@ fn column_parts(
             .map(|choice| format!("'{}'", choice.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        parts.push(format!("CHECK ({name} IN ({values}))"));
+        parts.push(format!("CHECK ({quoted_name} IN ({values}))"));
     }
     if let Some(max_length) = max_length {
-        parts.push(format!("CHECK (length({name}) <= {max_length})"));
+        parts.push(format!("CHECK (length({quoted_name}) <= {max_length})"));
     }
 
     parts.join(" ")

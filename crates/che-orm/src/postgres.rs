@@ -39,7 +39,7 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
     }
 
     pub async fn all(&self) -> Result<Vec<M>> {
-        let sql = format!("SELECT * FROM {}", M::table_name());
+        let sql = format!("SELECT * FROM {}", quote_identifier(M::table_name()));
         let rows = sqlx::query(&sql).fetch_all(self.db.pool()).await?;
         rows.iter()
             .map(|row| M::from_postgres_row(row).map_err(Into::into))
@@ -50,8 +50,8 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
         let primary_key = primary_key::<M>()?;
         let sql = format!(
             "SELECT * FROM {} WHERE {} = $1 LIMIT 1",
-            M::table_name(),
-            primary_key.db_name
+            quote_identifier(M::table_name()),
+            quote_identifier(primary_key.db_name)
         );
         sqlx::query(&sql)
             .bind(id)
@@ -72,14 +72,17 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
             values.push((field, value));
         }
         if values.is_empty() {
-            let sql = format!("INSERT INTO {} DEFAULT VALUES RETURNING *", M::table_name());
+            let sql = format!(
+                "INSERT INTO {} DEFAULT VALUES RETURNING *",
+                quote_identifier(M::table_name())
+            );
             return Ok(M::from_postgres_row(
                 &sqlx::query(&sql).fetch_one(self.db.pool()).await?,
             )?);
         }
         let columns = values
             .iter()
-            .map(|(field, _)| field.db_name)
+            .map(|(field, _)| quote_identifier(field.db_name))
             .collect::<Vec<_>>()
             .join(", ");
         let placeholders = (1..=values.len())
@@ -88,7 +91,7 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
             .join(", ");
         let sql = format!(
             "INSERT INTO {} ({columns}) VALUES ({placeholders}) RETURNING *",
-            M::table_name()
+            quote_identifier(M::table_name())
         );
         let mut query = sqlx::query(&sql);
         for (field, value) in values {
@@ -127,13 +130,13 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
         let assignments = values
             .iter()
             .enumerate()
-            .map(|(index, (name, _))| format!("{name} = ${}", index + 1))
+            .map(|(index, (name, _))| format!("{} = ${}", quote_identifier(name), index + 1))
             .collect::<Vec<_>>()
             .join(", ");
         let timestamp_fields = M::fields()
             .iter()
             .filter(|field| field.auto_now)
-            .map(|field| format!("{} = CURRENT_TIMESTAMP", field.db_name))
+            .map(|field| format!("{} = CURRENT_TIMESTAMP", quote_identifier(field.db_name)))
             .collect::<Vec<_>>();
         let assignments = std::iter::once(assignments)
             .filter(|assignments| !assignments.is_empty())
@@ -143,8 +146,8 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
         let primary_key = primary_key::<M>()?;
         let sql = format!(
             "UPDATE {} SET {assignments} WHERE {} = ${} RETURNING *",
-            M::table_name(),
-            primary_key.db_name,
+            quote_identifier(M::table_name()),
+            quote_identifier(primary_key.db_name),
             values.len() + 1
         );
         let mut query = sqlx::query(&sql);
@@ -160,8 +163,8 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
         let primary_key = primary_key::<M>()?;
         let sql = format!(
             "DELETE FROM {} WHERE {} = $1",
-            M::table_name(),
-            primary_key.db_name
+            quote_identifier(M::table_name()),
+            quote_identifier(primary_key.db_name)
         );
         Ok(sqlx::query(&sql)
             .bind(id)
@@ -264,7 +267,10 @@ impl<'db, M: PostgresModel> PostgresQueryBuilder<'db, M> {
         } else {
             "SELECT"
         };
-        let mut sql = format!("{prefix} {select} FROM {}", M::table_name());
+        let mut sql = format!(
+            "{prefix} {select} FROM {}",
+            quote_identifier(M::table_name())
+        );
         let mut values = Vec::new();
         if let Some(predicate) = &self.predicate {
             sql.push_str(" WHERE ");
@@ -277,7 +283,11 @@ impl<'db, M: PostgresModel> PostgresQueryBuilder<'db, M> {
                     .orderings
                     .iter()
                     .map(|(field, descending)| {
-                        format!("{field} {}", if *descending { "DESC" } else { "ASC" })
+                        format!(
+                            "{} {}",
+                            quote_identifier(field),
+                            if *descending { "DESC" } else { "ASC" }
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -321,7 +331,11 @@ fn render_predicate<M: PostgresModel>(
                 QueryOperator::Lt => "<",
                 QueryOperator::Lte => "<=",
             };
-            format!("{} {operator} ${}", field.db_name, values.len())
+            format!(
+                "{} {operator} ${}",
+                quote_identifier(field.db_name),
+                values.len()
+            )
         }
         QNode::In {
             field,
@@ -339,13 +353,19 @@ fn render_predicate<M: PostgresModel>(
                     format!("${}", values.len())
                 })
                 .collect::<Vec<_>>();
-            format!("{} IN ({})", field.db_name, placeholders.join(", "))
+            format!(
+                "{} IN ({})",
+                quote_identifier(field.db_name),
+                placeholders.join(", ")
+            )
         }
         QNode::IsNull { field, negated } => format!(
             "{} IS {}NULL",
-            field_info::<M>(field)
-                .expect("typed fields are generated from model metadata")
-                .db_name,
+            quote_identifier(
+                field_info::<M>(field)
+                    .expect("typed fields are generated from model metadata")
+                    .db_name
+            ),
             if *negated { "NOT " } else { "" }
         ),
         QNode::And(left, right) => format!(
@@ -456,4 +476,13 @@ impl PostgresBackend {
 
 fn checksum_hex(checksum: &[u8]) -> String {
     checksum.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    // PostgreSQL historically received unquoted identifiers from che-orm and
+    // folded them to lowercase. Preserve that behavior while quoting safely.
+    format!(
+        "\"{}\"",
+        identifier.to_ascii_lowercase().replace('"', "\"\"")
+    )
 }

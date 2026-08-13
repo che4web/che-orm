@@ -1,46 +1,31 @@
-# che-orm examples
+# Примеры che-orm
 
-Run examples from the workspace root.
+Запускайте команды из корня workspace. Этот crate не публикуется.
 
-CRUD:
+| Бинарник | Что демонстрирует | Команда |
+| --- | --- | --- |
+| `crud` | SQLite модель, CRUD и типизированный запрос | `cargo run -p che-orm-examples --bin crud` |
+| `relations` | SQLite foreign key и явная загрузка relation | `cargo run -p che-orm-examples --bin relations` |
+| `schema_snapshot` | Реестр моделей в `che_orm_schema.json` | `cargo run -p che-orm-examples --bin schema_snapshot` |
+| `manager` | `Application`, `Manager` и собственная CLI-команда | `cargo run -p che-orm-examples --bin manager -- --help` |
+
+`schema_snapshot` записывает `che_orm_schema.json` в текущую директорию.
+`manager` использует `example.sqlite` и `migrations` в текущей директории:
 
 ```bash
-cargo run -p che-orm-examples --bin crud
+cargo run -p che-orm-examples --bin manager -- ping
+cargo run -p che-orm-examples --bin manager -- makemigrations initial
+cargo run -p che-orm-examples --bin manager -- migrate
+cargo run -p che-orm-examples --bin manager -- status
 ```
 
-Relations:
-
-```bash
-cargo run -p che-orm-examples --bin relations
-```
-
-Generate a schema snapshot used by the CLI migration generator:
+Создать и применить SQLite migration из snapshot можно так:
 
 ```bash
 cargo run -p che-orm-examples --bin schema_snapshot
-```
-
-Run the runtime database manager example:
-
-```bash
-cargo run -p che-orm-examples --bin manager
-```
-
-The manager owns the application model registry and adds a custom `ping`
-command. Backend and migration authoring are selected at compile time: the
-default is SQLite with native migration generation; use `migration-atlas` for
-Atlas generation. PostgreSQL uses manual SQLx migrations unless Atlas is
-enabled.
-
-Then create and apply migrations:
-
-```bash
 cargo run -p che-orm-cli -- makemigrations --schema che_orm_schema.json --name initial
-cargo run -p che-orm-cli -- migrate --database-url sqlite://example.sqlite
+cargo run -p che-orm-cli -- migrate --database-url 'sqlite://example.sqlite?mode=rwc'
 ```
 
-Run the PostgreSQL migration CLI with:
-
-```bash
-cargo run -p che-orm-cli --no-default-features --features postgres -- migrate --config app.toml
-```
+См. [руководства workspace](https://github.com/che4web/che-orm/blob/main/docs/getting-started.md) для полного
+описания API, feature-флагов и миграций.

@@ -297,18 +297,18 @@ async fn choice_field_roundtrips_and_enforces_values() {
 fn generates_create_table_sql() {
     let sql = create_table_sql::<User>();
 
-    assert!(sql.contains("CREATE TABLE IF NOT EXISTS users"));
-    assert!(sql.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"));
-    assert!(sql.contains("email TEXT NOT NULL UNIQUE"));
-    assert!(sql.contains("is_active BOOLEAN NOT NULL DEFAULT false"));
+    assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"users\""));
+    assert!(sql.contains("\"id\" INTEGER PRIMARY KEY AUTOINCREMENT"));
+    assert!(sql.contains("\"email\" TEXT NOT NULL UNIQUE"));
+    assert!(sql.contains("\"is_active\" BOOLEAN NOT NULL DEFAULT false"));
 
     let task_sql = create_table_sql::<Task>();
-    assert!(task_sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
-    assert!(task_sql.contains("updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
+    assert!(task_sql.contains("\"created_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
+    assert!(task_sql.contains("\"updated_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
 
     let json_task_sql = create_table_sql::<JsonTask>();
-    assert!(json_task_sql.contains("metadata TEXT NOT NULL"));
-    assert!(json_task_sql.contains("optional_metadata TEXT"));
+    assert!(json_task_sql.contains("\"metadata\" TEXT NOT NULL"));
+    assert!(json_task_sql.contains("\"optional_metadata\" TEXT"));
 }
 
 #[tokio::test]

@@ -1,17 +1,25 @@
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use cap_std::{ambient_authority, fs::Dir};
+
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A validated, relative path stored in a file model field.
+///
+/// Absolute paths, traversal segments, backslashes, and empty paths are
+/// rejected, allowing storage implementations to safely join it to their root.
 pub struct FilePath(String);
 
 impl FilePath {
+    /// Validates and constructs a relative storage path.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
         if value.is_empty()
@@ -41,9 +49,11 @@ impl FilePath {
         Ok(Self(value))
     }
 
+    /// Borrows the validated relative path.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    /// Returns the validated path as an owned string.
     pub fn into_inner(self) -> String {
         self.0
     }
@@ -153,6 +163,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for FilePath {
     }
 }
 
+/// Storage operations keyed by validated [`FilePath`] values.
 pub trait FileStorage {
     fn store(&self, bytes: &[u8], extension: Option<&str>) -> Result<FilePath>;
     fn read(&self, path: &FilePath) -> Result<Vec<u8>>;
@@ -161,19 +172,27 @@ pub trait FileStorage {
 }
 
 #[derive(Debug, Clone)]
+/// Filesystem-backed [`FileStorage`] rooted at one local directory.
 pub struct LocalFileStorage {
     root: PathBuf,
 }
 
 impl LocalFileStorage {
+    /// Creates storage rooted at `root`; the directory is created on first store.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
+    /// Returns the root directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
-    fn full_path(&self, path: &FilePath) -> PathBuf {
-        self.root.join(path.as_str())
+    fn directory(&self) -> Result<Dir> {
+        Dir::open_ambient_dir(&self.root, ambient_authority()).map_err(Into::into)
+    }
+
+    fn create_directory(&self) -> Result<Dir> {
+        fs::create_dir_all(&self.root)?;
+        self.directory()
     }
 }
 
@@ -189,7 +208,7 @@ impl FileStorage for LocalFileStorage {
                 return Err(Error::InvalidFileExtension(extension.to_string()));
             }
         }
-        fs::create_dir_all(&self.root)?;
+        let root = self.create_directory()?;
         for _ in 0..10 {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -206,17 +225,22 @@ impl FileStorage for LocalFileStorage {
                 None => format!("{:x}-{}", nanos, COUNTER.fetch_add(1, Ordering::Relaxed)),
             };
             let path = FilePath::new(format!("{prefix}/{filename}"))?;
-            let full = self.full_path(&path);
-            if full.exists() {
-                continue;
+            let parent = Path::new(path.as_str())
+                .parent()
+                .expect("file path has a parent");
+            root.create_dir_all(parent)?;
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            match root.open_with(path.as_str(), &options) {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(bytes)?;
+                    file.sync_all()?;
+                    return Ok(path);
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
             }
-            if let Some(parent) = full.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let temporary = full.with_extension("uploading");
-            fs::write(&temporary, bytes)?;
-            fs::rename(&temporary, &full)?;
-            return Ok(path);
         }
         Err(Error::Storage(
             "unable to allocate a unique file path".to_string(),
@@ -224,12 +248,21 @@ impl FileStorage for LocalFileStorage {
     }
 
     fn read(&self, path: &FilePath) -> Result<Vec<u8>> {
-        Ok(fs::read(self.full_path(path))?)
+        Ok(self.directory()?.read(path.as_str())?)
     }
     fn delete(&self, path: &FilePath) -> Result<()> {
-        Ok(fs::remove_file(self.full_path(path))?)
+        Ok(self.directory()?.remove_file(path.as_str())?)
     }
     fn exists(&self, path: &FilePath) -> Result<bool> {
-        Ok(self.full_path(path).try_exists()?)
+        let root = match self.directory() {
+            Ok(root) => root,
+            Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match root.metadata(path.as_str()) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 }

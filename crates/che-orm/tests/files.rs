@@ -42,6 +42,57 @@ fn local_storage_roundtrip() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn storage_reads_do_not_create_root() {
+    let root = std::env::temp_dir().join(format!(
+        "che-orm-files-read-only-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let storage = LocalFileStorage::new(&root);
+    let path = FilePath::new("missing.txt").unwrap();
+    assert!(!storage.exists(&path).unwrap());
+    assert!(!root.exists());
+    assert!(storage.read(&path).is_err());
+    assert!(!root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn local_storage_rejects_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let base = std::env::temp_dir().join(format!(
+        "che-orm-files-symlink-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let root = base.join("root");
+    let outside = base.join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    symlink(&outside, root.join("escape")).unwrap();
+
+    let storage = LocalFileStorage::new(&root);
+    let escaped = FilePath::new("escape/secret.txt").unwrap();
+    assert!(storage.read(&escaped).is_err());
+    assert!(storage.delete(&escaped).is_err());
+    assert!(storage.exists(&escaped).is_err());
+    assert!(storage.store(b"escape", Some("txt")).is_ok());
+    assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+    assert!(
+        fs::read_dir(&outside)
+            .unwrap()
+            .all(|entry| { entry.unwrap().file_name().to_string_lossy().as_ref() == "secret.txt" })
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
 #[tokio::test]
 async fn file_path_model_roundtrips() {
     let db = Database::connect("sqlite::memory:").await.unwrap();

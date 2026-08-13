@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 const SIGNAL_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone)]
+/// Event emitted after a successful create or save operation.
 pub struct PostSaveEvent {
     pub table: &'static str,
     pub created: bool,
@@ -19,18 +20,21 @@ pub struct PostSaveEvent {
 }
 
 #[derive(Debug, Clone)]
+/// Event emitted after a successful update operation.
 pub struct PostUpdateEvent {
     pub table: &'static str,
     pub object: Value,
 }
 
 #[derive(Debug, Clone)]
+/// A model lifecycle event delivered through [`Signals`].
 pub enum ModelEvent {
     PostSave(PostSaveEvent),
     PostUpdate(PostUpdateEvent),
 }
 
 impl ModelEvent {
+    /// Returns the table associated with this event.
     pub fn table(&self) -> &'static str {
         match self {
             Self::PostSave(event) => event.table,
@@ -40,6 +44,10 @@ impl ModelEvent {
 }
 
 #[derive(Clone)]
+/// Per-model best-effort event subscriptions for the SQLite backend.
+///
+/// Each receiver has a bounded 1024-event queue. Callers must handle Tokio's
+/// `RecvError::Lagged`; CRUD operations never wait for subscribers.
 pub struct Signals {
     senders: Arc<RwLock<HashMap<TypeId, broadcast::Sender<ModelEvent>>>>,
 }
@@ -57,6 +65,7 @@ impl Signals {
         }
     }
 
+    /// Subscribes to events emitted for the specified Rust model type.
     pub fn subscribe<M: Model>(&self) -> broadcast::Receiver<ModelEvent> {
         self.sender::<M>().subscribe()
     }

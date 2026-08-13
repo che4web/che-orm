@@ -2,9 +2,12 @@
 name = "che-orm-macros"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file = "../../LICENSE-MIT"
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Derive macros for che-orm"
+readme = "README.md"
 documentation = "https://docs.rs/che-orm-macros"
 keywords = ["orm", "derive", "macro", "sqlite"]
 categories = ["database"]

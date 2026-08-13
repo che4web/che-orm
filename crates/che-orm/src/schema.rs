@@ -5,11 +5,16 @@ use serde::{Deserialize, Serialize};
 use crate::{FieldType, ForeignKeyAction, Model, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Serializable snapshot of registered model schemas.
+///
+/// Snapshots are an input to migration generation and are tied to the current
+/// ORM schema format.
 pub struct Schema {
     pub models: Vec<ModelSchema>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Serializable schema for one database table.
 pub struct ModelSchema {
     pub table: String,
     pub fields: Vec<FieldSchema>,
@@ -18,6 +23,7 @@ pub struct ModelSchema {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Serializable modelled database index.
 pub struct IndexSchema {
     pub name: String,
     pub columns: Vec<String>,
@@ -26,6 +32,7 @@ pub struct IndexSchema {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Serializable schema for one database column.
 pub struct FieldSchema {
     pub name: String,
     pub ty: FieldType,
@@ -45,6 +52,7 @@ pub struct FieldSchema {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Serializable foreign key target and action.
 pub struct ForeignKeySchema {
     pub table: String,
     #[serde(default)]
@@ -52,10 +60,12 @@ pub struct ForeignKeySchema {
 }
 
 impl Schema {
+    /// Creates a schema without models.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Creates a deterministically ordered schema from model schemas.
     pub fn from_models(models: Vec<ModelSchema>) -> Self {
         let mut schema = Self { models };
         schema
@@ -64,15 +74,20 @@ impl Schema {
         schema
     }
 
+    /// Creates a schema containing one derived model.
     pub fn from_model<M: Model>() -> Self {
         Self::from_models(vec![ModelSchema::from_model::<M>()])
     }
 
+    /// Loads a JSON schema snapshot from disk.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let content = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&content)?)
+        let schema: Self = serde_json::from_str(&content)?;
+        schema.validate()?;
+        Ok(schema)
     }
 
+    /// Loads a snapshot or returns an empty schema when the path is absent.
     pub fn load_or_empty(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if path.exists() {
@@ -82,7 +97,9 @@ impl Schema {
         }
     }
 
+    /// Writes a pretty-printed JSON snapshot, creating parent directories.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.validate()?;
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -91,9 +108,41 @@ impl Schema {
         fs::write(path, format!("{content}\n"))?;
         Ok(())
     }
+
+    /// Validates identifiers in a schema loaded from an external snapshot.
+    pub fn validate(&self) -> Result<()> {
+        for model in &self.models {
+            validate_identifier(&model.table)?;
+            let field_names = model
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            for field in &model.fields {
+                validate_identifier(&field.name)?;
+                if let Some(foreign_key) = &field.foreign_key {
+                    validate_identifier(&foreign_key.table)?;
+                }
+            }
+            for index in &model.indexes {
+                validate_identifier(&index.name)?;
+                for column in &index.columns {
+                    validate_identifier(column)?;
+                    if !field_names.contains(column.as_str()) {
+                        return Err(crate::Error::InvalidIdentifier(format!(
+                            "index {} references unknown column {}",
+                            index.name, column
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ModelSchema {
+    /// Derives a serializable schema from model metadata.
     pub fn from_model<M: Model>() -> Self {
         Self {
             table: M::table_name().to_string(),
@@ -129,5 +178,21 @@ impl ModelSchema {
                 })
                 .collect(),
         }
+    }
+}
+
+fn validate_identifier(identifier: &str) -> Result<()> {
+    let valid = !identifier.is_empty()
+        && identifier.chars().enumerate().all(|(index, character)| {
+            if index == 0 {
+                character.is_ascii_alphabetic() || character == '_'
+            } else {
+                character.is_ascii_alphanumeric() || character == '_'
+            }
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(crate::Error::InvalidIdentifier(identifier.to_owned()))
     }
 }

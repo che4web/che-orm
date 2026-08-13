@@ -124,6 +124,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let model_name = input.ident;
     let table_name =
         model_table_name(&input.attrs)?.unwrap_or_else(|| snake_case(&model_name.to_string()));
+    validate_identifier(&table_name, "table")?;
     let fields = match input.data {
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => fields.named,
@@ -163,6 +164,7 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let attrs = field_attrs(&field.attrs)?;
         let rust_name = ident.to_string();
         let db_name = attrs.rename.unwrap_or_else(|| rust_name.clone());
+        validate_identifier(&db_name, "column")?;
         let field_constant = format_ident!("{}", rust_name.to_ascii_uppercase());
         let query_ty = query_field_type(&ty);
         let choice_type = choice_type(&ty);
@@ -451,6 +453,24 @@ fn model_table_name(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
         })?;
     }
     Ok(table_name)
+}
+
+fn validate_identifier(value: &str, kind: &str) -> syn::Result<()> {
+    let valid = value
+        .chars()
+        .enumerate()
+        .all(|(index, character)| match index {
+            0 => character.is_ascii_alphabetic() || character == '_',
+            _ => character.is_ascii_alphanumeric() || character == '_',
+        });
+    if valid && !value.is_empty() {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("{kind} identifier must use ASCII letters, digits, and underscores"),
+        ))
+    }
 }
 
 fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
@@ -892,7 +912,7 @@ fn snake_case(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use syn::parse_quote;
+    use syn::{DeriveInput, parse_quote};
 
     use super::expand_model;
 
@@ -943,5 +963,22 @@ mod tests {
                 .to_string()
                 .contains("duplicate relation descriptor name")
         );
+    }
+
+    #[test]
+    fn rejects_unsafe_table_and_column_identifiers() {
+        let table: DeriveInput = parse_quote! {
+            #[model(table = "users; DROP TABLE users")]
+            struct User { #[field(primary_key)] id: i64 }
+        };
+        assert!(expand_model(table).is_err());
+
+        let column: DeriveInput = parse_quote! {
+            struct User {
+                #[field(primary_key)] id: i64,
+                #[field(rename = "name\"; DROP TABLE users")] name: String,
+            }
+        };
+        assert!(expand_model(column).is_err());
     }
 }

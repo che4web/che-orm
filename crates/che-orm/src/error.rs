@@ -1,4 +1,5 @@
 #[derive(Debug, thiserror::Error)]
+/// Errors returned by database, schema, migration, and file operations.
 pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -36,6 +37,9 @@ pub enum Error {
 
     #[error("unknown model field: {0}")]
     UnknownField(String),
+
+    #[error("invalid SQL identifier: {0}")]
+    InvalidIdentifier(String),
 
     #[error("field cannot be updated: {0}")]
     ReadonlyField(String),
@@ -89,4 +93,5 @@ pub enum Error {
     ForeignKeyEnforcementRestoreFailed(#[source] sqlx::Error),
 }
 
+/// Convenient result alias used by the public API.
 pub type Result<T> = std::result::Result<T, Error>;

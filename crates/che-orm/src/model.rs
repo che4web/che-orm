@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Storage category recorded in model metadata and schema snapshots.
 pub enum FieldType {
     Integer,
     Text,
@@ -17,6 +18,7 @@ pub enum FieldType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+/// Referential action for a foreign key.
 pub enum ForeignKeyAction {
     #[default]
     NoAction,
@@ -27,12 +29,14 @@ pub enum ForeignKeyAction {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Target table and referential action of a model foreign key.
 pub struct ForeignKeyInfo {
     pub table: &'static str,
     pub on_delete: ForeignKeyAction,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Static metadata emitted by `#[derive(Model)]` for one field.
 pub struct FieldInfo {
     pub rust_name: &'static str,
     pub db_name: &'static str,
@@ -50,6 +54,7 @@ pub struct FieldInfo {
     pub choices: Option<&'static [&'static str]>,
 }
 
+/// String-backed enum contract emitted by `#[derive(Choice)]`.
 pub trait Choice: Sized + Clone + Send + Sync + 'static {
     fn as_str(&self) -> &'static str;
     fn from_str(value: &str) -> Result<Self, String>;
@@ -57,6 +62,9 @@ pub trait Choice: Sized + Clone + Send + Sync + 'static {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Typed descriptor for a model column.
+///
+/// Use constants generated in `ModelNameFields`; manual construction is unsafe.
 pub struct ModelField<M, T> {
     db_name: &'static str,
     _model: PhantomData<fn() -> (M, T)>,
@@ -75,15 +83,18 @@ impl<M, T> ModelField<M, T> {
         }
     }
 
+    /// Returns the database column name represented by this descriptor.
     pub const fn db_name(&self) -> &'static str {
         self.db_name
     }
 }
 
+/// Converts a value accepted by a typed query predicate to a database value.
 pub trait QueryValue<T> {
     fn into_query_value(self) -> DatabaseValue;
 }
 
+/// Converts a value accepted by a create or update builder to a database value.
 pub trait WriteValue<T> {
     fn into_write_value(self) -> DatabaseValue;
 }
@@ -195,6 +206,7 @@ impl<T: Choice> WriteValue<Option<T>> for Option<T> {
 }
 
 #[derive(Debug, Clone)]
+/// Backend-neutral value used internally by typed reads and writes.
 pub enum DatabaseValue {
     I64(i64),
     String(String),

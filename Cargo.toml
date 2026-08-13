@@ -10,13 +10,16 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/che4web/che-orm"
+homepage = "https://github.com/che4web/che-orm"
 rust-version = "1.85"
 
 [workspace.dependencies]
 che-orm = { path = "crates/che-orm", version = "0.1.0", default-features = false }
 che-orm-macros = { path = "crates/che-orm-macros", version = "0.1.0" }
 chrono = { version = "0.4", features = ["serde"] }
+cap-std = "3"
 clap = { version = "4", features = ["derive"] }
 proc-macro2 = "1"
 quote = "1"

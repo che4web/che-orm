@@ -129,7 +129,7 @@ fn foreign_key_is_part_of_schema_and_create_table_sql() {
 
     assert_eq!(foreign_key.table, "relation_users");
     let sql = create_table_sql::<Post>();
-    assert!(sql.contains("user_id INTEGER NOT NULL REFERENCES relation_users(id)"));
+    assert!(sql.contains("\"user_id\" INTEGER NOT NULL REFERENCES \"relation_users\"(id)"));
 }
 
 #[tokio::test]

@@ -71,6 +71,17 @@ async fn database_query_supports_postgres_predicates_and_count_when_configured()
             .unwrap(),
         2
     );
+    assert_eq!(
+        database
+            .query::<User>()
+            .distinct()
+            .order_by(UserFields::ID)
+            .all()
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 
     sqlx::query("DROP TABLE che_orm_postgres_query_users")
         .execute(backend.pool())
