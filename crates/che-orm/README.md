@@ -457,6 +457,26 @@ let applied = db.apply_migrations_dir("migrations").await?;
 The directory is executed by SQLx's migration runner. Applied migrations and
 their checksums are stored in `_sqlx_migrations`.
 
+When independent applications share a database and each has its own migration
+directory, apply each directory with a stable namespace. Local migration
+versions may then each begin at `0001`:
+
+```rust
+# use che_orm::Database;
+# async fn example() -> che_orm::Result<()> {
+# let db = Database::connect("sqlite::memory:").await?;
+db.apply_migrations_dir_with_namespace("auth", "src/apps/auth/migrations".as_ref())
+    .await?;
+db.apply_migrations_dir_with_namespace("tasks", "src/apps/tasks/migrations".as_ref())
+    .await?;
+# Ok(())
+# }
+```
+
+Namespaces must remain stable after deployment. The SQLite backend records the
+namespace hash and rejects collisions; use `migration_status_with_namespace`
+with the same namespace and directory to inspect one application's history.
+
 ## Runtime Database Facade
 
 Applications can run schema generation and migration application without the

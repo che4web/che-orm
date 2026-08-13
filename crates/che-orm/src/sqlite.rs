@@ -86,6 +86,85 @@ impl SqliteBackend {
             .collect())
     }
 
+    pub async fn apply_migrations_dir_with_namespace(
+        &self,
+        namespace: &str,
+        migrations_dir: impl AsRef<Path>,
+    ) -> Result<Vec<String>> {
+        // SQLx identifies migrations only by their numeric version. Namespace versions so
+        // independent applications can each begin their migrations at 0001.
+        let _lock = MIGRATION_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let namespace_hash = namespace_hash(namespace);
+        self.register_namespace(namespace, namespace_hash).await?;
+        let mut migrator = Migrator::new(migrations_dir.as_ref()).await?;
+        migrator.set_ignore_missing(true);
+        let original_versions = migrator
+            .iter()
+            .map(|migration| {
+                Ok((
+                    namespaced_migration_version(namespace, migration.version)?,
+                    migration.description.to_string(),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for migration in migrator.migrations.to_mut() {
+            migration.version = namespaced_migration_version(namespace, migration.version)?;
+        }
+        self.validate_namespace_versions(&migrator, namespace_hash)
+            .await?;
+        let applied_before: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
+        migrator.run(&self.pool).await?;
+        Ok(original_versions
+            .into_iter()
+            .filter(|(version, _)| !applied_before.contains(version))
+            .map(|(_, description)| description)
+            .collect())
+    }
+
+    pub async fn migration_status_with_namespace(
+        &self,
+        namespace: &str,
+        migrations_dir: impl AsRef<Path>,
+    ) -> Result<Vec<MigrationStatus>> {
+        let _lock = MIGRATION_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let namespace_hash = namespace_hash(namespace);
+        self.register_namespace(namespace, namespace_hash).await?;
+        let migrator = Migrator::new(migrations_dir.as_ref()).await?;
+        let applied: Vec<(i64, bool, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        migrator
+            .iter()
+            .map(|migration| {
+                let version =
+                    namespaced_migration_version_from_hash(namespace_hash, migration.version)?;
+                let stored = applied.iter().find(|row| row.0 == version);
+                Ok(MigrationStatus {
+                    name: migration.description.to_string(),
+                    applied: stored.is_some_and(|row| row.1),
+                    checksum: stored
+                        .map(|row| checksum_hex(&row.2))
+                        .or_else(|| Some(checksum_hex(migration.checksum.as_ref()))),
+                    checksum_mismatch: stored
+                        .is_some_and(|row| row.2.as_slice() != migration.checksum.as_ref()),
+                })
+            })
+            .collect()
+    }
+
     pub async fn migration_status(
         &self,
         migrations_dir: impl AsRef<Path>,
@@ -168,6 +247,80 @@ impl SqliteBackend {
             (Ok(result), Ok(_)) => Ok(result),
         }
     }
+
+    async fn register_namespace(&self, namespace: &str, hash: u32) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _che_orm_migration_namespaces (
+                hash INTEGER PRIMARY KEY,
+                namespace TEXT NOT NULL UNIQUE
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT namespace FROM _che_orm_migration_namespaces WHERE hash = ?1",
+        )
+        .bind(i64::from(hash))
+        .fetch_optional(&self.pool)
+        .await?;
+        match existing {
+            Some(existing) if existing != namespace => Err(Error::UnsafeMigration(format!(
+                "migration namespace hash collision between {existing:?} and {namespace:?}"
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                sqlx::query(
+                    "INSERT INTO _che_orm_migration_namespaces (hash, namespace) VALUES (?1, ?2)",
+                )
+                .bind(i64::from(hash))
+                .bind(namespace)
+                .execute(&self.pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn validate_namespace_versions(&self, migrator: &Migrator, hash: u32) -> Result<()> {
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
+        let expected = migrator
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>();
+        if let Some(version) = applied
+            .into_iter()
+            .find(|version| ((*version >> 32) as u32) == hash && !expected.contains(version))
+        {
+            return Err(Error::UnsafeMigration(format!(
+                "applied migration version {version} is missing from its namespace directory"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn namespaced_migration_version(namespace: &str, version: i64) -> Result<i64> {
+    namespaced_migration_version_from_hash(namespace_hash(namespace), version)
+}
+
+fn namespaced_migration_version_from_hash(hash: u32, version: i64) -> Result<i64> {
+    if !(0..=u32::MAX as i64).contains(&version) {
+        return Err(Error::UnsafeMigration(format!(
+            "migration version is outside the namespaced range: {version}"
+        )));
+    }
+
+    Ok((i64::from(hash) << 32) | version)
+}
+
+fn namespace_hash(namespace: &str) -> u32 {
+    namespace.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    }) & 0x7fff_ffff
 }
 
 #[derive(Debug, Deserialize)]

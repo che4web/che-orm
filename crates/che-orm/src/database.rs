@@ -223,6 +223,28 @@ impl Database {
     }
 
     #[cfg(feature = "sqlite")]
+    pub async fn apply_migrations_dir_with_namespace(
+        &self,
+        namespace: &str,
+        migrations_dir: &Path,
+    ) -> Result<Vec<String>> {
+        self.as_sqlite()
+            .apply_migrations_dir_with_namespace(namespace, migrations_dir)
+            .await
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn migration_status_with_namespace(
+        &self,
+        namespace: &str,
+        migrations_dir: &Path,
+    ) -> Result<Vec<MigrationStatus>> {
+        self.as_sqlite()
+            .migration_status_with_namespace(namespace, migrations_dir)
+            .await
+    }
+
+    #[cfg(feature = "sqlite")]
     pub fn create<M>(&self) -> DatabaseCreateBuilder<'_, M>
     where
         M: SqliteModel,

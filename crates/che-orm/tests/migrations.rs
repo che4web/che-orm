@@ -38,6 +38,16 @@ struct TestApplication {
     migrations_dir: std::path::PathBuf,
 }
 
+fn temporary_migrations_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "che_orm_{name}_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
 impl Application for TestApplication {
     fn schema(&self) -> Schema {
         Schema::from_model::<User>()
@@ -53,6 +63,90 @@ impl Application for TestApplication {
             },
         })
     }
+}
+
+#[tokio::test]
+async fn namespaced_migrations_isolate_app_versions_and_status() {
+    let auth_dir = temporary_migrations_dir("auth_migrations");
+    let tasks_dir = temporary_migrations_dir("tasks_migrations");
+    fs::create_dir_all(&auth_dir).unwrap();
+    fs::create_dir_all(&tasks_dir).unwrap();
+    fs::write(
+        auth_dir.join("0001_initial.sql"),
+        "CREATE TABLE auth_records (id INTEGER PRIMARY KEY);",
+    )
+    .unwrap();
+    fs::write(
+        tasks_dir.join("0001_initial.sql"),
+        "CREATE TABLE task_records (id INTEGER PRIMARY KEY);",
+    )
+    .unwrap();
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    assert_eq!(
+        db.apply_migrations_dir_with_namespace("auth", &auth_dir)
+            .await
+            .unwrap(),
+        ["initial"]
+    );
+    assert_eq!(
+        db.apply_migrations_dir_with_namespace("tasks", &tasks_dir)
+            .await
+            .unwrap(),
+        ["initial"]
+    );
+    assert!(
+        db.apply_migrations_dir_with_namespace("auth", &auth_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db.apply_migrations_dir_with_namespace("tasks", &tasks_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth_records')"
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap());
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_records')"
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap());
+    assert!(
+        db.migration_status_with_namespace("auth", &auth_dir)
+            .await
+            .unwrap()
+            .iter()
+            .all(|migration| migration.applied && !migration.checksum_mismatch)
+    );
+    assert!(
+        db.migration_status_with_namespace("tasks", &tasks_dir)
+            .await
+            .unwrap()
+            .iter()
+            .all(|migration| migration.applied && !migration.checksum_mismatch)
+    );
+
+    fs::write(
+        auth_dir.join("0001_initial.sql"),
+        "CREATE TABLE auth_records (id INTEGER PRIMARY KEY, changed TEXT);",
+    )
+    .unwrap();
+    assert!(
+        db.apply_migrations_dir_with_namespace("auth", &auth_dir)
+            .await
+            .is_err()
+    );
+
+    fs::remove_dir_all(auth_dir).unwrap();
+    fs::remove_dir_all(tasks_dir).unwrap();
 }
 
 #[test]

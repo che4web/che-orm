@@ -2,6 +2,11 @@ use std::marker::PhantomData;
 
 use crate::{DatabaseValue, ModelField, QueryValue};
 
+pub trait ContainsQueryValue {}
+
+impl ContainsQueryValue for String {}
+impl ContainsQueryValue for crate::FilePath {}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum QueryOperator {
     Eq,
@@ -122,8 +127,11 @@ impl<M, T> ModelField<M, T> {
     }
 }
 
-impl<M> ModelField<M, String> {
-    pub fn contains<V: QueryValue<String>>(self, value: V) -> Q<M> {
+impl<M, T> ModelField<M, T>
+where
+    T: ContainsQueryValue,
+{
+    pub fn contains<V: QueryValue<T>>(self, value: V) -> Q<M> {
         Q::compare(
             self.db_name(),
             QueryOperator::Contains,

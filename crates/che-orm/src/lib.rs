@@ -65,7 +65,7 @@ pub use model::{
 };
 #[cfg(feature = "postgres")]
 pub use postgres::{PostgresBackend, PostgresQueryBuilder};
-pub use query::Q;
+pub use query::{ContainsQueryValue, Q};
 #[cfg(feature = "sqlite")]
 pub use relation::{BelongsTo, HasMany};
 pub use schema::{FieldSchema, ForeignKeySchema, IndexSchema, ModelSchema, Schema};
