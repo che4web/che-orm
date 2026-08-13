@@ -20,7 +20,8 @@ che-orm = { version = "0.1", default-features = false, features = ["postgres"] }
 | Фильтры, `Q`, ordering, limit/offset, `count` | Да | Да |
 | Ручные миграции SQLx | Да | Да |
 | `create_table` и native schema diff | Да | Нет |
-| Relations, signals | Да | Нет |
+| Foreign-key metadata and DDL | Да | Да |
+| Relation loading API, signals | Да | Нет |
 | Projections, grouping, annotations, numeric aggregates | Да | Нет |
 
 ## Создание миграций

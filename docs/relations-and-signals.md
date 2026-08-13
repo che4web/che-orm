@@ -1,11 +1,12 @@
 # Связи и сигналы
 
-Связи и сигналы доступны только с feature `sqlite`.
+Relation loading API и сигналы доступны только с feature `sqlite`. Foreign-key
+metadata и соответствующий DDL поддерживаются обоими backend-ами.
 
 ## Внешние ключи
 
 Поле `#[field(foreign_key = Author)] author_id: i64` хранит id связанной модели
-и создаёт SQLite `REFERENCES authors(id)`. Сначала создайте таблицу цели, затем
+и создаёт `REFERENCES authors(id)` в SQLite или PostgreSQL. Сначала создайте таблицу цели, затем
 таблицу со внешним ключом. SQLite backend включает `PRAGMA foreign_keys = ON`.
 
 ```rust
@@ -28,6 +29,9 @@ let posts = PostRelations::AUTHOR
 `db.as_sqlite().signals().subscribe::<User>()` возвращает Tokio broadcast
 receiver с `PostSave` и `PostUpdate`. Событие содержит имя таблицы и JSON-снимок
 модели. `PostSave.created` отличает insert от update.
+
+Успешное создание отправляет `PostSave { created: true }`. Успешное обновление
+отправляет `PostSave { created: false }`, затем `PostUpdate`.
 
 Доставка best-effort и at-most-once. Очередь каждого подписчика ограничена 1024
 событиями; при отставании `recv()` возвращает `RecvError::Lagged`. CRUD не ждёт

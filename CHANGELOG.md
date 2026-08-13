@@ -21,5 +21,6 @@
 - SQLite table rebuild не сохраняет unmanaged triggers, views и custom indexes.
 - Migrations и schema snapshots являются trusted, version-controlled inputs;
   создавайте и применяйте миграции одним процессом.
-- PostgreSQL не поддерживает relations, signals, projections, grouping,
+- PostgreSQL не поддерживает relation loading API, signals, projections, grouping,
   annotations, numeric aggregates и native schema diff.
+- Foreign-key metadata и DDL поддерживаются обоими backend-ами.

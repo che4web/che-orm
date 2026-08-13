@@ -62,9 +62,17 @@ cargo run -p che-orm-cli --no-default-features --features sqlite,migration-atlas
   makemigrations --schema che_orm_schema.json --name add_posts
 ```
 
+Для PostgreSQL backend и Atlas используйте PostgreSQL development URL и
+соберите CLI с PostgreSQL feature:
+
+```bash
+CHE_ORM_ATLAS_BIN=atlas CHE_ORM_ATLAS_DEV_URL='postgres://user:password@localhost/db' \
+  cargo run -p che-orm-cli --no-default-features --features postgres,migration-atlas -- \
+  makemigrations --schema che_orm_schema.json --name add_posts
+```
+
 `CHE_ORM_ATLAS_BIN` по умолчанию равен `atlas`,
-`CHE_ORM_ATLAS_DEV_URL` - `sqlite://file?mode=memory`. Для PostgreSQL задайте
-PostgreSQL development URL Atlas. Само применение миграций всегда выполняет
+`CHE_ORM_ATLAS_DEV_URL` - `sqlite://file?mode=memory`. Само применение миграций всегда выполняет
 SQLx и не требует Atlas.
 
 ## Правила безопасности
@@ -78,4 +86,4 @@ SQLx и не требует Atlas.
   без default.
 
 Подробный процесс и ограничения:
-[docs/migrations.md](https://github.com/che4web/che-orm/blob/main/docs/migrations.md).
+[docs/migrations.md](https://github.com/che4web/che-orm/blob/v0.1.0/docs/migrations.md).

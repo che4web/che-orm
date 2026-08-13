@@ -62,7 +62,8 @@ async fn main() -> che_orm::Result<()> {
 | Ручные SQLx-миграции и применение миграций | Да | Да |
 | Нативное создание миграций из schema snapshot | Да | Нет |
 | Atlas для создания миграций (experimental) | Да | Да |
-| Relations, signals, projections, группировки, numeric aggregates | Да | Нет |
+| Relation loading, signals, projections, группировки, numeric aggregates | Да | Нет |
+| Foreign-key metadata and DDL | Да | Да |
 | `distinct` для запросов моделей | Да | Да |
 
 Backend выбирается во время компиляции. Флаги `sqlite` и `postgres`

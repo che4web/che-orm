@@ -52,22 +52,27 @@ che-orm = { version = "0.1", default-features = false, features = ["postgres"] }
 ```
 
 Оба backend-а поддерживают модели, CRUD, типизированные predicates, ordering,
-pagination, `count`, `distinct` и применение ручных SQLx migrations. Relations, signals,
-projections, grouped queries, annotations и numeric aggregates доступны только
-для SQLite. Нативное создание migration diff также доступно только для SQLite;
-Atlas может генерировать миграции для обоих backend-ов.
+pagination, `count`, `distinct`, foreign-key metadata и применение ручных SQLx
+migrations. API загрузки relations, signals, projections, grouped queries,
+annotations и numeric aggregates доступны только для SQLite. Нативное создание
+migration diff также доступно только для SQLite; Atlas может генерировать миграции
+для обоих backend-ов.
+
+Страница API на docs.rs собирается с SQLite-конфигурацией по умолчанию
+(`sqlite` и `migration-native`). Для PostgreSQL используйте конфигурацию
+`default-features = false, features = ["postgres"]`.
 
 ## Руководства
 
 Полная документация workspace находится в корне репозитория:
 
-- [Быстрый старт](https://github.com/che4web/che-orm/blob/main/docs/getting-started.md)
-- [Модели и поля](https://github.com/che4web/che-orm/blob/main/docs/models-and-fields.md)
-- [Запросы](https://github.com/che4web/che-orm/blob/main/docs/queries.md)
-- [Связи и сигналы](https://github.com/che4web/che-orm/blob/main/docs/relations-and-signals.md)
-- [Миграции](https://github.com/che4web/che-orm/blob/main/docs/migrations.md)
-- [Backend-ы и feature-флаги](https://github.com/che4web/che-orm/blob/main/docs/backends.md)
-- [Runtime manager](https://github.com/che4web/che-orm/blob/main/docs/manager.md)
+- [Быстрый старт](https://github.com/che4web/che-orm/blob/v0.1.0/docs/getting-started.md)
+- [Модели и поля](https://github.com/che4web/che-orm/blob/v0.1.0/docs/models-and-fields.md)
+- [Запросы](https://github.com/che4web/che-orm/blob/v0.1.0/docs/queries.md)
+- [Связи и сигналы](https://github.com/che4web/che-orm/blob/v0.1.0/docs/relations-and-signals.md)
+- [Миграции](https://github.com/che4web/che-orm/blob/v0.1.0/docs/migrations.md)
+- [Backend-ы и feature-флаги](https://github.com/che4web/che-orm/blob/v0.1.0/docs/backends.md)
+- [Runtime manager](https://github.com/che4web/che-orm/blob/v0.1.0/docs/manager.md)
 
 На docs.rs подробные описания типов и методов доступны в API documentation.
 

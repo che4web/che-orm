@@ -78,3 +78,11 @@ cargo run -p che-orm-cli --no-default-features --features sqlite,migration-atlas
 
 Для PostgreSQL укажите PostgreSQL Atlas development URL. Применение миграций
 всегда выполняет SQLx и не требует Atlas.
+
+Пример генерации PostgreSQL migration через Atlas:
+
+```bash
+CHE_ORM_ATLAS_BIN=atlas CHE_ORM_ATLAS_DEV_URL='postgres://user:password@localhost/db' \
+  cargo run -p che-orm-cli --no-default-features --features postgres,migration-atlas -- \
+  makemigrations --schema che_orm_schema.json --name add_posts
+```
