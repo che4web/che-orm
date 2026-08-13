@@ -19,11 +19,22 @@ pub struct SqliteBackend {
 
 impl SqliteBackend {
     pub async fn connect(url: &str) -> Result<Self> {
+        Self::connect_with_max_connections(url, 10).await
+    }
+
+    pub async fn connect_with_max_connections(url: &str, max_connections: u32) -> Result<Self> {
         let pool = SqlitePoolOptions::new()
+            .max_connections(max_connections.max(1))
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::query("PRAGMA foreign_keys = ON")
-                        .execute(connection)
+                        .execute(&mut *connection)
+                        .await?;
+                    sqlx::query("PRAGMA busy_timeout = 30000")
+                        .execute(&mut *connection)
+                        .await?;
+                    sqlx::query("PRAGMA journal_mode = WAL")
+                        .execute(&mut *connection)
                         .await?;
                     Ok(())
                 })

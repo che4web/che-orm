@@ -49,6 +49,9 @@ pub fn create_table_sql<M: Model>() -> String {
 
 pub fn sqlite_schema_sql(schema: &Schema) -> String {
     schema
+        .validate()
+        .expect("sqlite_schema_sql requires a valid schema");
+    schema
         .models
         .iter()
         .map(create_table_model_sql)
@@ -57,6 +60,9 @@ pub fn sqlite_schema_sql(schema: &Schema) -> String {
 }
 
 pub fn postgres_schema_sql(schema: &Schema) -> String {
+    schema
+        .validate()
+        .expect("postgres_schema_sql requires a valid schema");
     schema
         .models
         .iter()
@@ -173,11 +179,13 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Migration {
 }
 
 pub fn validate_migration(migration: &Migration) -> Result<()> {
+    migration.schema.validate()?;
+    migration.old_schema.validate()?;
     validate_foreign_keys(&migration.schema)?;
     for change in &migration.changes {
         match change {
             SchemaChange::AddColumn { table, field }
-                if requires_existing_value(field) && field.default.is_none() =>
+                if requires_existing_value(field) && lacks_usable_default(field) =>
             {
                 return Err(Error::UnsafeMigration(format!(
                     "adding required column '{}.{}' needs a default",
@@ -185,7 +193,7 @@ pub fn validate_migration(migration: &Migration) -> Result<()> {
                 )));
             }
             SchemaChange::AlterColumn { table, old, new }
-                if old.nullable && requires_existing_value(new) && new.default.is_none() =>
+                if old.nullable && requires_existing_value(new) && lacks_usable_default(new) =>
             {
                 return Err(Error::UnsafeMigration(format!(
                     "making column '{}.{}' required needs a default",
@@ -199,6 +207,29 @@ pub fn validate_migration(migration: &Migration) -> Result<()> {
                 )));
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-native")]
+pub(crate) fn validate_sqlx_migration(migration: &Migration) -> Result<()> {
+    validate_migration(migration)?;
+    let rebuilt_tables = rebuild_tables(&ordered_changes(migration));
+    for table in rebuilt_tables {
+        let inbound = migration.old_schema.models.iter().any(|model| {
+            model.table != table
+                && model.fields.iter().any(|field| {
+                    field
+                        .foreign_key
+                        .as_ref()
+                        .is_some_and(|foreign_key| foreign_key.table == table)
+                })
+        });
+        if inbound {
+            return Err(Error::UnsafeMigration(format!(
+                "rebuilding table '{table}' with inbound foreign keys requires a manual migration"
+            )));
         }
     }
     Ok(())
@@ -265,6 +296,13 @@ fn validate_foreign_keys(schema: &Schema) -> Result<()> {
 
 fn requires_existing_value(field: &FieldSchema) -> bool {
     !field.nullable && !field.primary_key && !field.auto && !field.auto_now && !field.auto_now_add
+}
+
+fn lacks_usable_default(field: &FieldSchema) -> bool {
+    field
+        .default
+        .as_deref()
+        .is_none_or(|default| default == "NULL")
 }
 
 pub fn sqlite_migration_sql(migration: &Migration) -> String {

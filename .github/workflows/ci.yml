@@ -44,6 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
+      - run: cargo clippy -p che-orm --no-default-features --features postgres --lib
+      - run: cargo doc -p che-orm --no-default-features --features postgres --no-deps --locked
       - run: cargo test -p che-orm --no-default-features --features postgres --test backend_compile --locked
       - run: cargo test -p che-orm --no-default-features --features postgres --test postgres_query --locked
         env:

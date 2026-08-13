@@ -25,6 +25,15 @@ struct User {
 }
 
 #[derive(Debug, Clone, Model)]
+#[model(table = "default_users")]
+struct DefaultUser {
+    #[field(primary_key)]
+    id: i64,
+    #[field(default = "guest")]
+    name: String,
+}
+
+#[derive(Debug, Clone, Model)]
 #[model(table = "che_orm_postgres_users")]
 struct PostgresUser {
     #[field(primary_key, rename = "user_id")]
@@ -213,6 +222,74 @@ fn schema_rejects_index_for_unknown_column() {
         }],
     }]);
     assert!(schema.validate().is_err());
+}
+
+#[test]
+fn schema_rejects_unsafe_default_expression() {
+    let mut field = email_field();
+    field.default = Some("0); DROP TABLE users; --".to_string());
+    let schema = Schema::from_models(vec![ModelSchema {
+        table: "users".to_string(),
+        fields: vec![id_field(), field],
+        indexes: Vec::new(),
+    }]);
+    assert!(matches!(
+        schema.validate(),
+        Err(che_orm::Error::UnsafeMigration(_))
+    ));
+}
+
+#[test]
+fn derived_string_default_is_sql_escaped_literal() {
+    let schema = Schema::from_model::<DefaultUser>();
+    assert_eq!(
+        schema.models[0].fields[1].default.as_deref(),
+        Some("'guest'")
+    );
+    assert!(schema.validate().is_ok());
+}
+
+#[test]
+fn sqlx_rebuild_with_inbound_foreign_key_requires_manual_migration() {
+    let mut parent_name = email_field();
+    parent_name.name = "name".to_string();
+    let parent = ModelSchema {
+        table: "parents".to_string(),
+        fields: vec![id_field(), parent_name.clone()],
+        indexes: Vec::new(),
+    };
+    let mut parent_id = email_field();
+    parent_id.name = "parent_id".to_string();
+    parent_id.ty = FieldType::Integer;
+    parent_id.foreign_key = Some(ForeignKeySchema {
+        table: "parents".to_string(),
+        on_delete: ForeignKeyAction::Cascade,
+    });
+    let child = ModelSchema {
+        table: "children".to_string(),
+        fields: vec![id_field(), parent_id],
+        indexes: Vec::new(),
+    };
+    let old = Schema::from_models(vec![parent, child.clone()]);
+    parent_name.nullable = true;
+    let new = Schema::from_models(vec![
+        ModelSchema {
+            table: "parents".to_string(),
+            fields: vec![id_field(), parent_name],
+            indexes: Vec::new(),
+        },
+        child,
+    ]);
+    let migrations_dir = temporary_migrations_dir("inbound_fk_rebuild");
+    fs::create_dir_all(&migrations_dir).unwrap();
+    old.save(migrations_dir.join("schema.json")).unwrap();
+    let error = che_orm::generate_migrations(
+        &new,
+        MigrationOptions::new(&migrations_dir).named("change_parent"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("inbound foreign keys"));
+    fs::remove_dir_all(migrations_dir).unwrap();
 }
 
 #[cfg(feature = "postgres")]

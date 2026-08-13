@@ -73,8 +73,8 @@ pub use files::{FilePath, FileStorage, LocalFileStorage};
 pub use manager::{
     AnnotationField, AnnotationPredicate, GroupProjectionSpec, NumericQueryField,
     OptionalProjectionField, OptionalProjectionValue, PrefetchQuery, Prefetched, ProjectionQuery,
-    ProjectionSpec, ProjectionValue, QueryBuilder, QueryField, SelectRelatedQuery, TextQueryField,
-    TypedProjectionQuery, TypedQueryField,
+    ProjectionSpec, ProjectionValue, QueryBuilder, QueryField, SelectRelatedPairQuery,
+    SelectRelatedQuery, TextQueryField, TypedProjectionQuery, TypedQueryField,
 };
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, postgres_schema_sql,

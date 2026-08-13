@@ -18,13 +18,15 @@ use crate::QueryBuilder;
 use crate::Schema;
 #[cfg(feature = "sqlite")]
 use crate::SqliteModel;
+#[cfg(feature = "migration-native")]
+use crate::migration::validate_sqlx_migration;
 #[cfg(feature = "postgres")]
 use crate::postgres::PostgresModelManager;
 use crate::{DatabaseValue, Error, FieldInfo, FieldType, ModelField, Result, WriteValue};
 #[cfg(feature = "sqlite")]
 use crate::{SqliteBackend, manager::ModelManager};
 #[cfg(feature = "migration-native")]
-use crate::{diff_schemas, sqlite_migration_sql, validate_migration};
+use crate::{diff_schemas, sqlite_migration_sql};
 #[cfg(feature = "migration-atlas")]
 use crate::{postgres_schema_sql, sqlite_schema_sql};
 
@@ -152,8 +154,13 @@ impl Database {
     #[cfg(feature = "sqlite")]
     /// Connects to a SQLite database and uses `migrations` as the default directory.
     pub async fn connect(url: &str) -> Result<Self> {
+        Self::connect_with_max_connections(url, 10).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn connect_with_max_connections(url: &str, max_connections: u32) -> Result<Self> {
         Ok(Self::Sqlite {
-            backend: SqliteBackend::connect(url).await?,
+            backend: SqliteBackend::connect_with_max_connections(url, max_connections).await?,
             migrations_dir: PathBuf::from("migrations"),
         })
     }
@@ -692,7 +699,7 @@ fn generate_native(
 ) -> Result<GeneratedMigration> {
     let old_schema = Schema::load_or_empty(migrations_dir.join("schema.json"))?;
     let migration = diff_schemas(&old_schema, schema);
-    validate_migration(&migration)?;
+    validate_sqlx_migration(&migration)?;
     let changes = migration.changes.len();
     if changes == 0 {
         return Ok(GeneratedMigration {

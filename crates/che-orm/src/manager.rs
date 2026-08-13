@@ -1015,6 +1015,12 @@ pub struct SelectRelatedQuery<'db, M: Model, R: Model> {
     relation: BelongsTo<M, R>,
 }
 
+pub struct SelectRelatedPairQuery<'db, M: Model, R1: Model, R2: Model> {
+    query: QueryBuilder<'db, M>,
+    first: BelongsTo<M, R1>,
+    second: BelongsTo<M, R2>,
+}
+
 pub struct PrefetchQuery<'db, M: Model, R: Model> {
     query: QueryBuilder<'db, M>,
     relation: HasMany<M, R>,
@@ -1152,6 +1158,22 @@ where
         SelectRelatedQuery {
             query: self,
             relation,
+        }
+    }
+
+    pub fn select_related_pair<R1, R2>(
+        self,
+        first: BelongsTo<M, R1>,
+        second: BelongsTo<M, R2>,
+    ) -> SelectRelatedPairQuery<'db, M, R1, R2>
+    where
+        R1: Model,
+        R2: Model,
+    {
+        SelectRelatedPairQuery {
+            query: self,
+            first,
+            second,
         }
     }
 
@@ -1491,6 +1513,66 @@ where
                     .get_value(relation.source_field())
                     .and_then(|value| related.get(&value.to_string()).cloned());
                 (parent, related)
+            })
+            .collect())
+    }
+}
+
+impl<'db, M, R1, R2> SelectRelatedPairQuery<'db, M, R1, R2>
+where
+    M: SqliteModel,
+    R1: SqliteModel + Clone,
+    R2: SqliteModel + Clone,
+{
+    pub async fn all(self) -> Result<Vec<(M, Option<R1>, Option<R2>)>> {
+        let db = self.query.db;
+        self.first.validate()?;
+        self.second.validate()?;
+        let parents = self.query.all().await?;
+        let first_ids = parents
+            .iter()
+            .filter_map(|parent| parent.get_value(self.first.source_field()))
+            .filter_map(json_to_sqlite_value)
+            .collect::<Vec<_>>();
+        let second_ids = parents
+            .iter()
+            .filter_map(|parent| parent.get_value(self.second.source_field()))
+            .filter_map(json_to_sqlite_value)
+            .collect::<Vec<_>>();
+        let mut first_values = HashMap::new();
+        for chunk in first_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            for model in QueryBuilder::<R1>::new(db)
+                .filter_in_field("id", chunk.to_vec())
+                .all()
+                .await?
+            {
+                if let Some(value) = model.get_value("id") {
+                    first_values.insert(value.to_string(), model);
+                }
+            }
+        }
+        let mut second_values = HashMap::new();
+        for chunk in second_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            for model in QueryBuilder::<R2>::new(db)
+                .filter_in_field("id", chunk.to_vec())
+                .all()
+                .await?
+            {
+                if let Some(value) = model.get_value("id") {
+                    second_values.insert(value.to_string(), model);
+                }
+            }
+        }
+        Ok(parents
+            .into_iter()
+            .map(|parent| {
+                let first = parent
+                    .get_value(self.first.source_field())
+                    .and_then(|value| first_values.get(&value.to_string()).cloned());
+                let second = parent
+                    .get_value(self.second.source_field())
+                    .and_then(|value| second_values.get(&value.to_string()).cloned());
+                (parent, first, second)
             })
             .collect())
     }

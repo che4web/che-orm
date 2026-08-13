@@ -53,6 +53,11 @@ SQLite rebuild сохраняет только общие столбцы и ин
 Triggers, views, вручную созданные индексы и другие unmanaged objects нужно
 восстановить вручную в migration или не использовать native rebuild.
 
+Native-generated SQLx migrations не поддерживают rebuild таблицы, на которую
+ссылается другая таблица. `makemigrations` отклонит такой diff: подготовьте
+ручную migration, которая сохраняет зависимые строки, или измените схему без
+rebuild родительской таблицы.
+
 ## PostgreSQL и Atlas
 
 Для PostgreSQL вручную создавайте SQLx migration files и применяйте их отдельным

@@ -507,7 +507,7 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
             } else if meta.path.is_ident("default") {
                 let value = meta.value()?;
                 let expr: Expr = value.parse()?;
-                result.default = Some(quote!(#expr).to_string());
+                result.default = Some(default_sql(&expr)?);
                 Ok(())
             } else if meta.path.is_ident("rename") {
                 let value = meta.value()?;
@@ -543,6 +543,39 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
         })?;
     }
     Ok(result)
+}
+
+fn default_sql(expr: &Expr) -> syn::Result<String> {
+    match expr {
+        Expr::Lit(expr) => match &expr.lit {
+            Lit::Str(value) => Ok(format!("'{}'", value.value().replace('\'', "''"))),
+            Lit::Int(value) => Ok(value.to_string()),
+            Lit::Float(value) => Ok(value.to_string()),
+            Lit::Bool(value) => Ok(value.value.to_string()),
+            _ => Err(syn::Error::new_spanned(
+                expr,
+                "default must be a string, number, or boolean literal",
+            )),
+        },
+        Expr::Unary(expr) if matches!(expr.op, syn::UnOp::Neg(_)) => match expr.expr.as_ref() {
+            Expr::Lit(expr) => match &expr.lit {
+                Lit::Int(value) => Ok(format!("-{value}")),
+                Lit::Float(value) => Ok(format!("-{value}")),
+                _ => Err(syn::Error::new_spanned(
+                    expr,
+                    "default must be a string, number, or boolean literal",
+                )),
+            },
+            _ => Err(syn::Error::new_spanned(
+                expr,
+                "default must be a string, number, or boolean literal",
+            )),
+        },
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "default must be a string, number, or boolean literal",
+        )),
+    }
 }
 
 fn action_tokens(action: Option<&str>, default: &str) -> proc_macro2::TokenStream {

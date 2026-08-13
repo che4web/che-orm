@@ -111,15 +111,31 @@ impl Schema {
 
     /// Validates identifiers in a schema loaded from an external snapshot.
     pub fn validate(&self) -> Result<()> {
+        let mut tables = std::collections::HashSet::new();
         for model in &self.models {
             validate_identifier(&model.table)?;
+            if !tables.insert(model.table.as_str()) {
+                return Err(crate::Error::InvalidIdentifier(format!(
+                    "duplicate table {}",
+                    model.table
+                )));
+            }
             let field_names = model
                 .fields
                 .iter()
                 .map(|field| field.name.as_str())
                 .collect::<std::collections::HashSet<_>>();
+            if field_names.len() != model.fields.len() {
+                return Err(crate::Error::InvalidIdentifier(format!(
+                    "table {} has duplicate column names",
+                    model.table
+                )));
+            }
             for field in &model.fields {
                 validate_identifier(&field.name)?;
+                if let Some(default) = &field.default {
+                    validate_default(default)?;
+                }
                 if let Some(foreign_key) = &field.foreign_key {
                     validate_identifier(&foreign_key.table)?;
                 }
@@ -195,4 +211,33 @@ fn validate_identifier(identifier: &str) -> Result<()> {
     } else {
         Err(crate::Error::InvalidIdentifier(identifier.to_owned()))
     }
+}
+
+fn validate_default(default: &str) -> Result<()> {
+    let valid = matches!(default, "NULL" | "true" | "false")
+        || default.parse::<f64>().is_ok_and(|value| value.is_finite())
+        || is_quoted_sql_string(default);
+    if valid {
+        Ok(())
+    } else {
+        Err(crate::Error::UnsafeMigration(format!(
+            "default '{default}' must be a SQL literal"
+        )))
+    }
+}
+
+fn is_quoted_sql_string(value: &str) -> bool {
+    let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    else {
+        return false;
+    };
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character == '\'' && characters.next() != Some('\'') {
+            return false;
+        }
+    }
+    true
 }
