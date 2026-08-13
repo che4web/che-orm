@@ -29,7 +29,6 @@ struct User {
 
 - `impl Model for User`
 - `impl SqliteModel for User`
-- `UserUpdate` for low-level update calls
 - `UserFields` typed query fields
 - schema metadata used by migrations
 
@@ -52,9 +51,9 @@ db.create_table::<User>().await?;
 
 let user = db
     .create::<User>()
-    .set("email", "alice@example.com")
-    .set("name", "Alice")
-    .set("is_active", true)
+    .set(UserFields::EMAIL, "alice@example.com")
+    .set(UserFields::NAME, "Alice")
+    .set(UserFields::IS_ACTIVE, true)
     .execute()
     .await?;
 
@@ -65,10 +64,9 @@ fetched.is_active = false;
 let updated = db.save(&fetched).await?;
 
 let updated_without_loading = db
-    .update::<User>(
-        user.id,
-        UserUpdate { name: Some("Alice Updated".to_string()), ..Default::default() },
-    )
+    .update::<User>(user.id)
+    .set(UserFields::NAME, "Alice Updated")
+    .execute()
     .await?;
 
 let users = db.all::<User>().await?;
@@ -171,14 +169,14 @@ generate/apply migrations in dependency order.
 # db.create_table::<Post>().await?;
 let author = db
     .create::<Author>()
-    .set("name", "Alice")
+    .set(AuthorFields::NAME, "Alice")
     .execute()
     .await?;
 
 let post = db
     .create::<Post>()
-    .set("author_id", author.id)
-    .set("title", "Hello")
+    .set(PostFields::AUTHOR_ID, author.id)
+    .set(PostFields::TITLE, "Hello")
     .execute()
     .await?;
 
@@ -369,7 +367,7 @@ struct Task {
 ```
 
 `auto_now_add` is set on insert. `auto_now` is set on insert and updated on each
-`update`, `update_fields(...).execute()`, and `save()`. Both fields are read-only
+`update(...).set(ModelFields::FIELD, value).execute()` and `save()`. Both fields are read-only
 for create/update builders and are stored in SQLite as `TEXT DEFAULT CURRENT_TIMESTAMP`.
 
 ## JSON Fields

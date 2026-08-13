@@ -67,14 +67,14 @@ async fn loads_related_and_reverse_related_objects() {
 
     let user = db
         .create::<User>()
-        .set("name", "Alice")
+        .set(UserFields::NAME, "Alice")
         .execute()
         .await
         .unwrap();
     let post = db
         .create::<Post>()
-        .set("user_id", user.id)
-        .set("title", "First post")
+        .set(PostFields::USER_ID, user.id)
+        .set(PostFields::TITLE, "First post")
         .execute()
         .await
         .unwrap();
@@ -139,13 +139,13 @@ async fn foreign_key_actions_are_rendered_and_enforced() {
     db.create_table::<CascadePost>().await.unwrap();
     let user = db
         .create::<User>()
-        .set("name", "Alice")
+        .set(UserFields::NAME, "Alice")
         .execute()
         .await
         .unwrap();
     db.create::<CascadePost>()
-        .set("user_id", user.id)
-        .set("title", "First")
+        .set(CascadePostFields::USER_ID, user.id)
+        .set(CascadePostFields::TITLE, "First")
         .execute()
         .await
         .unwrap();
@@ -166,13 +166,13 @@ async fn set_null_action_is_rendered_and_enforced() {
     db.create_table::<NullablePost>().await.unwrap();
     let user = db
         .create::<User>()
-        .set("name", "Alice")
+        .set(UserFields::NAME, "Alice")
         .execute()
         .await
         .unwrap();
     let post = db
         .create::<NullablePost>()
-        .set("user_id", user.id)
+        .set(NullablePostFields::USER_ID, user.id)
         .execute()
         .await
         .unwrap();
@@ -198,18 +198,18 @@ async fn restrict_and_set_default_actions_are_enforced() {
     db.create_table::<DefaultedPost>().await.unwrap();
     let fallback = db
         .create::<User>()
-        .set("name", "Fallback")
+        .set(UserFields::NAME, "Fallback")
         .execute()
         .await
         .unwrap();
     let user = db
         .create::<User>()
-        .set("name", "Alice")
+        .set(UserFields::NAME, "Alice")
         .execute()
         .await
         .unwrap();
     db.create::<RestrictedPost>()
-        .set("user_id", user.id)
+        .set(RestrictedPostFields::USER_ID, user.id)
         .execute()
         .await
         .unwrap();
@@ -223,7 +223,7 @@ async fn restrict_and_set_default_actions_are_enforced() {
         .unwrap();
     let post = db
         .create::<DefaultedPost>()
-        .set("user_id", user.id)
+        .set(DefaultedPostFields::USER_ID, user.id)
         .execute()
         .await
         .unwrap();
@@ -243,13 +243,13 @@ async fn prefetch_related_chunks_large_parent_sets() {
     for index in 0..901_i64 {
         let user = db
             .create::<User>()
-            .set("name", format!("User {index}"))
+            .set(UserFields::NAME, format!("User {index}"))
             .execute()
             .await
             .unwrap();
         db.create::<Post>()
-            .set("user_id", user.id)
-            .set("title", format!("Post {index}"))
+            .set(PostFields::USER_ID, user.id)
+            .set(PostFields::TITLE, format!("Post {index}"))
             .execute()
             .await
             .unwrap();

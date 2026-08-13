@@ -24,9 +24,9 @@ async fn main() -> che_orm::Result<()> {
 
     let user = db
         .create::<User>()
-        .set("email", "alice@example.com")
-        .set("name", "Alice")
-        .set("is_active", true)
+        .set(UserFields::EMAIL, "alice@example.com")
+        .set(UserFields::NAME, "Alice")
+        .set(UserFields::IS_ACTIVE, true)
         .execute()
         .await?;
 

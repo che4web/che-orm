@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use che_orm::{
-    AnnotationField, Choice, Database, Model, ModelEvent, NaiveDateTime, SqliteValue,
+    AnnotationField, Choice, Database, Error, Model, ModelEvent, NaiveDateTime, SqliteValue,
     create_table_sql,
 };
 use serde_json::{Value, json};
@@ -85,6 +85,48 @@ struct ScalarTypes {
 }
 
 #[tokio::test]
+async fn dynamic_writes_validate_metadata() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<User>().await.unwrap();
+    let user = db
+        .create::<User>()
+        .set_value("email", "dynamic@example.com".into())
+        .unwrap()
+        .set_value("name", "Dynamic".into())
+        .unwrap()
+        .set_value("is_active", true.into())
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
+    let updated = db
+        .update::<User>(user.id)
+        .set_value("name", "Updated".into())
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(updated.name, "Updated");
+
+    assert!(matches!(
+        db.create::<User>().set_value("missing", "value".into()),
+        Err(Error::UnknownField(_))
+    ));
+    assert!(matches!(
+        db.create::<User>().set_value("id", 1_i64.into()),
+        Err(Error::ReadonlyField(_))
+    ));
+    assert!(matches!(
+        db.create::<User>().set_value("is_active", "yes".into()),
+        Err(Error::InvalidFieldValue { .. })
+    ));
+    assert!(matches!(
+        db.create::<User>().set_value("name", SqliteValue::Null),
+        Err(Error::InvalidFieldValue { .. })
+    ));
+}
+
+#[tokio::test]
 async fn broadcast_signals_receive_create_and_update_snapshots() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
@@ -95,18 +137,18 @@ async fn broadcast_signals_receive_create_and_update_snapshots() {
 
     let user = db
         .create::<User>()
-        .set("email", "signals@example.com")
-        .set("name", "Before")
+        .set(UserFields::EMAIL, "signals@example.com")
+        .set(UserFields::NAME, "Before")
         .execute()
         .await
         .unwrap();
     db.create::<Task>()
-        .set("title", "Task event")
+        .set(TaskFields::TITLE, "Task event")
         .execute()
         .await
         .unwrap();
-    db.update_fields::<User>(user.id)
-        .set("name", "After")
+    db.update::<User>(user.id)
+        .set(UserFields::NAME, "After")
         .execute()
         .await
         .unwrap();
@@ -163,8 +205,8 @@ async fn lagging_signal_subscribers_do_not_block_writes() {
 
     for index in 0..1025 {
         db.create::<User>()
-            .set("email", format!("lag-{index}@example.com"))
-            .set("name", format!("Lag {index}"))
+            .set(UserFields::EMAIL, format!("lag-{index}@example.com"))
+            .set(UserFields::NAME, format!("Lag {index}"))
             .execute()
             .await
             .unwrap();
@@ -183,9 +225,9 @@ async fn sqlite_crud_flow() {
 
     let user = db
         .create::<User>()
-        .set("email", "alice@example.com")
-        .set("name", "Alice")
-        .set("is_active", true)
+        .set(UserFields::EMAIL, "alice@example.com")
+        .set(UserFields::NAME, "Alice")
+        .set(UserFields::IS_ACTIVE, true)
         .execute()
         .await
         .unwrap();
@@ -209,9 +251,9 @@ async fn sqlite_crud_flow() {
     assert_eq!(all.len(), 1);
 
     let updated = db
-        .update_fields::<User>(user.id)
-        .set("name", "Alicia")
-        .set("is_active", false)
+        .update::<User>(user.id)
+        .set(UserFields::NAME, "Alicia")
+        .set(UserFields::IS_ACTIVE, false)
         .execute()
         .await
         .unwrap();
@@ -237,7 +279,7 @@ async fn choice_field_roundtrips_and_enforces_values() {
 
     let task = db
         .create::<ChoiceTask>()
-        .set("status", SqliteValue::String("in_progress".to_string()))
+        .set(ChoiceTaskFields::STATUS, TaskStatus::InProgress)
         .execute()
         .await
         .unwrap();
@@ -245,9 +287,7 @@ async fn choice_field_roundtrips_and_enforces_values() {
     assert_eq!(TaskStatus::values(), &["new", "in_progress", "done"]);
     assert_eq!(ChoiceTaskFields::STATUS.db_name(), "status");
     assert!(
-        db.create::<ChoiceTask>()
-            .set("status", SqliteValue::String("invalid".to_string()))
-            .execute()
+        db.apply_sql("INSERT INTO choice_tasks (status) VALUES ('invalid')")
             .await
             .is_err()
     );
@@ -278,7 +318,7 @@ async fn timestamp_fields_are_managed_by_orm() {
 
     let task = db
         .create::<Task>()
-        .set("title", "First")
+        .set(TaskFields::TITLE, "First")
         .execute()
         .await
         .unwrap();
@@ -287,15 +327,15 @@ async fn timestamp_fields_are_managed_by_orm() {
 
     assert!(
         db.create::<Task>()
-            .set("title", "Readonly Create")
-            .set("created_at", task.created_at)
+            .set(TaskFields::TITLE, "Readonly Create")
+            .set(TaskFields::CREATED_AT, task.created_at)
             .execute()
             .await
             .is_err()
     );
     assert!(
-        db.update_fields::<Task>(task.id)
-            .set("updated_at", task.updated_at)
+        db.update::<Task>(task.id)
+            .set(TaskFields::UPDATED_AT, task.updated_at)
             .execute()
             .await
             .is_err()
@@ -303,8 +343,8 @@ async fn timestamp_fields_are_managed_by_orm() {
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let updated = db
-        .update_fields::<Task>(task.id)
-        .set("title", "Updated")
+        .update::<Task>(task.id)
+        .set(TaskFields::TITLE, "Updated")
         .execute()
         .await
         .unwrap();
@@ -331,9 +371,9 @@ async fn json_fields_roundtrip_update_and_save() {
     });
     let task = db
         .create::<JsonTask>()
-        .set("title", "JSON")
-        .set("metadata", metadata.clone())
-        .set_null("optional_metadata")
+        .set(JsonTaskFields::TITLE, "JSON")
+        .set(JsonTaskFields::METADATA, metadata.clone())
+        .set(JsonTaskFields::OPTIONAL_METADATA, None::<Value>)
         .execute()
         .await
         .unwrap();
@@ -345,9 +385,9 @@ async fn json_fields_roundtrip_update_and_save() {
 
     let optional_metadata = json!(["a", "b", 3]);
     let updated = db
-        .update_fields::<JsonTask>(task.id)
-        .set("metadata", json!({ "done": true }))
-        .set("optional_metadata", optional_metadata.clone())
+        .update::<JsonTask>(task.id)
+        .set(JsonTaskFields::METADATA, json!({ "done": true }))
+        .set(JsonTaskFields::OPTIONAL_METADATA, optional_metadata.clone())
         .execute()
         .await
         .unwrap();
@@ -384,9 +424,9 @@ async fn applies_migration_files_without_exposing_sqlx() {
 
     let user = db
         .create::<User>()
-        .set("email", "migration@example.com")
-        .set("name", "Migration")
-        .set("is_active", true)
+        .set(UserFields::EMAIL, "migration@example.com")
+        .set(UserFields::NAME, "Migration")
+        .set(UserFields::IS_ACTIVE, true)
         .execute()
         .await
         .unwrap();
@@ -464,23 +504,23 @@ async fn migration_sql_parser_handles_strings_and_triggers() {
 }
 
 #[tokio::test]
-async fn update_fields_rejects_empty_and_readonly_updates() {
+async fn update_builder_rejects_empty_and_readonly_updates() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
 
     let user = db
         .create::<User>()
-        .set("email", "readonly@example.com")
-        .set("name", "Readonly")
-        .set("is_active", true)
+        .set(UserFields::EMAIL, "readonly@example.com")
+        .set(UserFields::NAME, "Readonly")
+        .set(UserFields::IS_ACTIVE, true)
         .execute()
         .await
         .unwrap();
 
-    assert!(db.update_fields::<User>(user.id).execute().await.is_err());
+    assert!(db.update::<User>(user.id).execute().await.is_err());
     assert!(
-        db.update_fields::<User>(user.id)
-            .set("id", 2_i64)
+        db.update::<User>(user.id)
+            .set(UserFields::ID, 2_i64)
             .execute()
             .await
             .is_err()
@@ -494,8 +534,8 @@ async fn create_builder_uses_defaults_and_rejects_readonly_fields() {
 
     let user = db
         .create::<User>()
-        .set("email", "default@example.com")
-        .set("name", "Default")
+        .set(UserFields::EMAIL, "default@example.com")
+        .set(UserFields::NAME, "Default")
         .execute()
         .await
         .unwrap();
@@ -503,9 +543,9 @@ async fn create_builder_uses_defaults_and_rejects_readonly_fields() {
 
     assert!(
         db.create::<User>()
-            .set("id", 42_i64)
-            .set("email", "readonly-create@example.com")
-            .set("name", "Readonly Create")
+            .set(UserFields::ID, 42_i64)
+            .set(UserFields::EMAIL, "readonly-create@example.com")
+            .set(UserFields::NAME, "Readonly Create")
             .execute()
             .await
             .is_err()
@@ -523,9 +563,9 @@ async fn query_builder_filters_orders_and_limits() {
         ("bob@example.com", "Bob", false),
     ] {
         db.create::<User>()
-            .set("email", email)
-            .set("name", name)
-            .set("is_active", is_active)
+            .set(UserFields::EMAIL, email)
+            .set(UserFields::NAME, name)
+            .set(UserFields::IS_ACTIVE, is_active)
             .execute()
             .await
             .unwrap();
@@ -553,9 +593,9 @@ async fn database_query_uses_typed_predicates() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create::<User>()
-        .set("email", "alice@example.com")
-        .set("name", "Alice")
-        .set("is_active", true)
+        .set(UserFields::EMAIL, "alice@example.com")
+        .set(UserFields::NAME, "Alice")
+        .set(UserFields::IS_ACTIVE, true)
         .execute()
         .await
         .unwrap();
@@ -605,9 +645,9 @@ async fn query_supports_typed_distinct_projections() {
         ("projection-three@example.com", "Other"),
     ] {
         db.create::<User>()
-            .set("email", email)
-            .set("name", name)
-            .set("is_active", true)
+            .set(UserFields::EMAIL, email)
+            .set(UserFields::NAME, name)
+            .set(UserFields::IS_ACTIVE, true)
             .execute()
             .await
             .unwrap();
@@ -636,9 +676,9 @@ async fn query_supports_typed_tuple_projections() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create::<User>()
-        .set("email", "typed-projection@example.com")
-        .set("name", "Typed")
-        .set("is_active", true)
+        .set(UserFields::EMAIL, "typed-projection@example.com")
+        .set(UserFields::NAME, "Typed")
+        .set(UserFields::IS_ACTIVE, true)
         .execute()
         .await
         .unwrap();
@@ -658,9 +698,9 @@ async fn typed_queries_support_all_scalar_field_types() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<ScalarTypes>().await.unwrap();
     db.create::<ScalarTypes>()
-        .set("small", 7_i32)
-        .set("unsigned", 9_u32)
-        .set("ratio", 1.5_f32)
+        .set(ScalarTypesFields::SMALL, 7_i32)
+        .set(ScalarTypesFields::UNSIGNED, 9_u32)
+        .set(ScalarTypesFields::RATIO, 1.5_f32)
         .execute()
         .await
         .unwrap();
@@ -697,7 +737,7 @@ async fn typed_projection_decodes_choice_values() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<ChoiceTask>().await.unwrap();
     db.create::<ChoiceTask>()
-        .set("status", "in_progress")
+        .set(ChoiceTaskFields::STATUS, TaskStatus::InProgress)
         .execute()
         .await
         .unwrap();
@@ -724,9 +764,9 @@ async fn grouped_queries_support_having_and_count_annotation() {
         ("group-three@example.com", false),
     ] {
         db.create::<User>()
-            .set("email", email)
-            .set("name", "Grouped")
-            .set("is_active", active)
+            .set(UserFields::EMAIL, email)
+            .set(UserFields::NAME, "Grouped")
+            .set(UserFields::IS_ACTIVE, active)
             .execute()
             .await
             .unwrap();
@@ -756,9 +796,9 @@ async fn grouped_queries_reject_invalid_annotation_specs() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<User>().await.unwrap();
     db.create::<User>()
-        .set("email", "annotation-check@example.com")
-        .set("name", "Check")
-        .set("is_active", true)
+        .set(UserFields::EMAIL, "annotation-check@example.com")
+        .set(UserFields::NAME, "Check")
+        .set(UserFields::IS_ACTIVE, true)
         .execute()
         .await
         .unwrap();
@@ -826,9 +866,9 @@ async fn query_supports_q_in_null_first_and_multiple_orderings() {
         ("carol@example.com", "Carol", true),
     ] {
         db.create::<User>()
-            .set("email", email)
-            .set("name", name)
-            .set("is_active", is_active)
+            .set(UserFields::EMAIL, email)
+            .set(UserFields::NAME, name)
+            .set(UserFields::IS_ACTIVE, is_active)
             .execute()
             .await
             .unwrap();
@@ -882,9 +922,9 @@ async fn query_supports_raw_range_filters_and_ordering() {
         ("c@example.com", "C"),
     ] {
         db.create::<User>()
-            .set("email", email)
-            .set("name", name)
-            .set("is_active", true)
+            .set(UserFields::EMAIL, email)
+            .set(UserFields::NAME, name)
+            .set(UserFields::IS_ACTIVE, true)
             .execute()
             .await
             .unwrap();
@@ -910,9 +950,9 @@ async fn update_one_returning_updates_only_the_first_match() {
 
     for name in ["first", "second"] {
         db.create::<User>()
-            .set("email", format!("{name}@example.com"))
-            .set("name", name)
-            .set("is_active", true)
+            .set(UserFields::EMAIL, format!("{name}@example.com"))
+            .set(UserFields::NAME, name)
+            .set(UserFields::IS_ACTIVE, true)
             .execute()
             .await
             .unwrap();
@@ -950,9 +990,9 @@ async fn update_one_returning_handles_no_match_and_descending_order() {
     db.create_table::<User>().await.unwrap();
     for name in ["first", "second"] {
         db.create::<User>()
-            .set("email", format!("{name}-order@example.com"))
-            .set("name", name)
-            .set("is_active", true)
+            .set(UserFields::EMAIL, format!("{name}-order@example.com"))
+            .set(UserFields::NAME, name)
+            .set(UserFields::IS_ACTIVE, true)
             .execute()
             .await
             .unwrap();
@@ -993,9 +1033,9 @@ async fn concurrent_claims_return_distinct_rows() {
     for index in 0..2 {
         setup
             .create::<User>()
-            .set("email", format!("claim-{index}@example.com"))
-            .set("name", format!("claim-{index}"))
-            .set("is_active", true)
+            .set(UserFields::EMAIL, format!("claim-{index}@example.com"))
+            .set(UserFields::NAME, format!("claim-{index}"))
+            .set(UserFields::IS_ACTIVE, true)
             .execute()
             .await
             .unwrap();
@@ -1033,10 +1073,10 @@ async fn query_supports_null_predicates_and_numeric_aggregates() {
     db.create_table::<Metric>().await.unwrap();
 
     for (score, value) in [(Some(10_i64), 1.5), (None, 2.5), (Some(30_i64), 3.5)] {
-        let mut create = db.create::<Metric>().set("value", value);
+        let mut create = db.create::<Metric>().set(MetricFields::VALUE, value);
         create = match score {
-            Some(score) => create.set("score", score),
-            None => create.set_null("score"),
+            Some(score) => create.set(MetricFields::SCORE, score),
+            None => create.set(MetricFields::SCORE, None::<i64>),
         };
         create.execute().await.unwrap();
     }

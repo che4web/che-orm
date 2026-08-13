@@ -231,9 +231,12 @@ async fn postgres_model_manager_supports_create_get_and_all_when_configured() {
         .unwrap();
     let created = database
         .create::<PostgresUser>()
-        .set("email", "postgres@example.com")
-        .set("metadata", serde_json::json!({"backend": "postgres"}))
-        .set("active", true)
+        .set(PostgresUserFields::EMAIL, "postgres@example.com")
+        .set(
+            PostgresUserFields::METADATA,
+            serde_json::json!({"backend": "postgres"}),
+        )
+        .set(PostgresUserFields::ACTIVE, true)
         .execute()
         .await
         .unwrap();
@@ -247,14 +250,10 @@ async fn postgres_model_manager_supports_create_get_and_all_when_configured() {
         created.email
     );
     let updated = database
-        .update::<PostgresUser>(
-            created.id,
-            PostgresUserUpdate {
-                email: Some("updated@example.com".to_string()),
-                metadata: None,
-                active: Some(None),
-            },
-        )
+        .update::<PostgresUser>(created.id)
+        .set(PostgresUserFields::EMAIL, "updated@example.com")
+        .set(PostgresUserFields::ACTIVE, None::<bool>)
+        .execute()
         .await
         .unwrap();
     assert_eq!(updated.email, "updated@example.com");
@@ -345,7 +344,7 @@ async fn database_facade_generates_and_applies_migrations() {
     assert!(database.all::<User>().await.unwrap().is_empty());
     let created = database
         .create::<User>()
-        .set("email", "shortcut@example.com")
+        .set(UserFields::EMAIL, "shortcut@example.com")
         .execute()
         .await
         .unwrap();
@@ -355,13 +354,9 @@ async fn database_facade_generates_and_applies_migrations() {
         "shortcut@example.com"
     );
     let updated = database
-        .update::<User>(
-            created.id,
-            UserUpdate {
-                email: Some("updated@example.com".to_string()),
-                is_active: None,
-            },
-        )
+        .update::<User>(created.id)
+        .set(UserFields::EMAIL, "updated@example.com")
+        .execute()
         .await
         .unwrap();
     assert_eq!(updated.email, "updated@example.com");
@@ -1047,8 +1042,8 @@ async fn migration_rebuilds_table_when_column_is_removed() {
     db.create_table::<OldUser>().await.unwrap();
     let old_user = db
         .create::<OldUser>()
-        .set("email", "removed@example.com")
-        .set("name", "Alice")
+        .set(OldUserFields::EMAIL, "removed@example.com")
+        .set(OldUserFields::NAME, "Alice")
         .execute()
         .await
         .unwrap();

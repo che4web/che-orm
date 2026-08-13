@@ -37,7 +37,7 @@ pub use application::{Application, DatabaseSettings, Manager, MigrationSettings,
 pub use database::generate_migrations;
 #[cfg(feature = "migration-atlas")]
 pub use database::{AtlasOptions, MigrationDialect};
-pub use database::{Database, DatabaseCreateBuilder, MigrationStatus};
+pub use database::{Database, DatabaseCreateBuilder, DatabaseUpdateBuilder, MigrationStatus};
 #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
 pub use database::{GeneratedMigration, MigrationOptions};
 pub use error::{Error, Result};
@@ -47,7 +47,7 @@ pub use manager::{
     AnnotationField, AnnotationPredicate, GroupProjectionSpec, NumericQueryField,
     OptionalProjectionField, OptionalProjectionValue, PrefetchQuery, Prefetched, ProjectionQuery,
     ProjectionSpec, ProjectionValue, QueryBuilder, QueryField, SelectRelatedQuery, TextQueryField,
-    TypedProjectionQuery, TypedQueryField, UpdateBuilder,
+    TypedProjectionQuery, TypedQueryField,
 };
 pub use migration::{
     Migration, SchemaChange, create_table_sql, diff_schemas, postgres_schema_sql,
@@ -61,7 +61,7 @@ pub use model::SqliteModel;
 pub use model::{AggregateValue, SqliteValue};
 pub use model::{
     Choice, DatabaseValue, FieldInfo, FieldType, ForeignKeyAction, ForeignKeyInfo, Model,
-    ModelField, QueryValue,
+    ModelField, QueryValue, WriteValue,
 };
 #[cfg(feature = "postgres")]
 pub use postgres::{PostgresBackend, PostgresQueryBuilder};

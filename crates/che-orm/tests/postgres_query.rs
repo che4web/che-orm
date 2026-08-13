@@ -35,15 +35,15 @@ async fn database_query_supports_postgres_predicates_and_count_when_configured()
         .unwrap();
     database
         .create::<User>()
-        .set("email", "alice@example.com")
-        .set_null("active")
+        .set(UserFields::EMAIL, "alice@example.com")
+        .set(UserFields::ACTIVE, None::<bool>)
         .execute()
         .await
         .unwrap();
     database
         .create::<User>()
-        .set("email", "bob@example.com")
-        .set("active", true)
+        .set(UserFields::EMAIL, "bob@example.com")
+        .set(UserFields::ACTIVE, true)
         .execute()
         .await
         .unwrap();

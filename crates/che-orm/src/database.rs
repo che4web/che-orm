@@ -1,6 +1,6 @@
 #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
 use std::fs;
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "migration-atlas"))]
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(feature = "migration-atlas")]
@@ -9,6 +9,8 @@ use std::process::Command;
 #[cfg(feature = "postgres")]
 use crate::PostgresBackend;
 #[cfg(feature = "postgres")]
+use crate::PostgresModel;
+#[cfg(feature = "postgres")]
 use crate::PostgresQueryBuilder;
 #[cfg(feature = "sqlite")]
 use crate::QueryBuilder;
@@ -16,13 +18,9 @@ use crate::QueryBuilder;
 use crate::Schema;
 #[cfg(feature = "sqlite")]
 use crate::SqliteModel;
-#[cfg(feature = "sqlite")]
-use crate::UpdateBuilder;
 #[cfg(feature = "postgres")]
 use crate::postgres::PostgresModelManager;
-use crate::{DatabaseValue, Result};
-#[cfg(feature = "postgres")]
-use crate::{Error, PostgresModel};
+use crate::{DatabaseValue, Error, FieldInfo, FieldType, ModelField, Result, WriteValue};
 #[cfg(feature = "sqlite")]
 use crate::{SqliteBackend, manager::ModelManager};
 #[cfg(feature = "migration-native")]
@@ -85,6 +83,12 @@ pub struct DatabaseCreateBuilder<'db, M> {
     database: &'db Database,
     values: Vec<(String, DatabaseValue)>,
     _model: std::marker::PhantomData<M>,
+}
+
+pub struct DatabaseUpdateBuilder<'db, M: crate::Model> {
+    database: &'db Database,
+    id: M::Id,
+    values: Vec<(String, DatabaseValue)>,
 }
 
 #[cfg(any(feature = "migration-native", feature = "migration-atlas"))]
@@ -342,35 +346,26 @@ impl Database {
     }
 
     #[cfg(feature = "sqlite")]
-    pub async fn update<M>(&self, id: M::Id, data: M::Update) -> Result<M>
+    pub fn update<M>(&self, id: M::Id) -> DatabaseUpdateBuilder<'_, M>
     where
         M: SqliteModel,
     {
-        match self {
-            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).update(id, data).await,
-        }
-    }
-
-    #[cfg(feature = "sqlite")]
-    pub fn update_fields<M>(&self, id: M::Id) -> UpdateBuilder<'_, M>
-    where
-        M: SqliteModel,
-    {
-        match self {
-            Self::Sqlite { backend, .. } => ModelManager::<M>::new(backend).update_fields(id),
+        DatabaseUpdateBuilder {
+            database: self,
+            id,
+            values: Vec::new(),
         }
     }
 
     #[cfg(feature = "postgres")]
-    pub async fn update<M>(&self, id: M::Id, data: M::Update) -> Result<M>
+    pub fn update<M>(&self, id: M::Id) -> DatabaseUpdateBuilder<'_, M>
     where
         M: PostgresModel,
     {
-        match self {
-            Self::Postgres { backend, .. } => PostgresModelManager::<M>::new(backend)
-                .update(id.into(), data)
-                .await?
-                .ok_or(Error::NotFound),
+        DatabaseUpdateBuilder {
+            database: self,
+            id,
+            values: Vec::new(),
         }
     }
 
@@ -437,17 +432,19 @@ impl<'db, M> DatabaseCreateBuilder<'db, M>
 where
     M: SqliteModel,
 {
-    pub fn set<V>(mut self, field: &str, value: V) -> Self
+    pub fn set<T, V>(mut self, field: ModelField<M, T>, value: V) -> Self
     where
-        V: Into<DatabaseValue>,
+        V: WriteValue<T>,
     {
-        self.values.push((field.to_string(), value.into()));
+        self.values
+            .push((field.db_name().to_string(), value.into_write_value()));
         self
     }
 
-    pub fn set_null(mut self, field: &str) -> Self {
-        self.values.push((field.to_string(), DatabaseValue::Null));
-        self
+    pub fn set_value(mut self, field: &str, value: DatabaseValue) -> Result<Self> {
+        let field = checked_write_field::<M>(field, &value)?;
+        self.values.push((field.db_name.to_string(), value));
+        Ok(self)
     }
 
     pub async fn execute(self) -> Result<M> {
@@ -464,22 +461,160 @@ where
     }
 }
 
+#[cfg(feature = "sqlite")]
+impl<'db, M> DatabaseUpdateBuilder<'db, M>
+where
+    M: SqliteModel,
+{
+    pub fn set<T, V>(mut self, field: ModelField<M, T>, value: V) -> Self
+    where
+        V: WriteValue<T>,
+    {
+        self.values
+            .push((field.db_name().to_string(), value.into_write_value()));
+        self
+    }
+
+    pub fn set_value(mut self, field: &str, value: DatabaseValue) -> Result<Self> {
+        let field = checked_write_field::<M>(field, &value)?;
+        self.values.push((field.db_name.to_string(), value));
+        Ok(self)
+    }
+
+    pub async fn execute(self) -> Result<M> {
+        if self.values.is_empty() {
+            return Err(Error::EmptyUpdate);
+        }
+        match self.database {
+            Database::Sqlite { backend, .. } => {
+                crate::manager::update_by_values::<M>(backend, self.id, self.values).await
+            }
+        }
+    }
+}
+
+fn checked_write_field<M: crate::Model>(
+    field: &str,
+    value: &DatabaseValue,
+) -> Result<&'static FieldInfo> {
+    let info = M::fields()
+        .iter()
+        .find(|info| info.db_name == field || info.rust_name == field)
+        .ok_or_else(|| Error::UnknownField(field.to_string()))?;
+    if info.primary_key || info.auto || info.auto_now_add || info.auto_now {
+        return Err(Error::ReadonlyField(field.to_string()));
+    }
+    if matches!(value, DatabaseValue::Null) {
+        return info
+            .nullable
+            .then_some(info)
+            .ok_or_else(|| Error::InvalidFieldValue {
+                field: field.to_string(),
+                expected: "non-null value",
+            });
+    }
+    let valid = matches!(
+        (info.ty, value),
+        (FieldType::Integer, DatabaseValue::I64(_))
+            | (
+                FieldType::Text | FieldType::FilePath,
+                DatabaseValue::String(_)
+            )
+            | (FieldType::Choice, DatabaseValue::String(_))
+            | (FieldType::Boolean, DatabaseValue::Bool(_))
+            | (FieldType::Real, DatabaseValue::F64(_))
+            | (FieldType::DateTime, DatabaseValue::DateTime(_))
+            | (FieldType::Json, DatabaseValue::Json(_))
+    );
+    if !valid {
+        return Err(Error::InvalidFieldValue {
+            field: field.to_string(),
+            expected: field_type_name(info.ty),
+        });
+    }
+    if let (FieldType::FilePath, DatabaseValue::String(value)) = (info.ty, value)
+        && crate::FilePath::new(value.clone()).is_err()
+    {
+        return Err(Error::InvalidFieldValue {
+            field: field.to_string(),
+            expected: "file path",
+        });
+    }
+    if let (FieldType::Choice, DatabaseValue::String(value)) = (info.ty, value)
+        && info
+            .choices
+            .is_some_and(|choices| !choices.contains(&value.as_str()))
+    {
+        return Err(Error::InvalidFieldValue {
+            field: field.to_string(),
+            expected: "allowed choice",
+        });
+    }
+    Ok(info)
+}
+
+fn field_type_name(ty: FieldType) -> &'static str {
+    match ty {
+        FieldType::Integer => "integer",
+        FieldType::Text | FieldType::Choice | FieldType::FilePath => "string",
+        FieldType::Boolean => "boolean",
+        FieldType::Real => "number",
+        FieldType::DateTime => "datetime",
+        FieldType::Json => "json",
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl<'db, M> DatabaseUpdateBuilder<'db, M>
+where
+    M: PostgresModel,
+{
+    pub fn set<T, V>(mut self, field: ModelField<M, T>, value: V) -> Self
+    where
+        V: WriteValue<T>,
+    {
+        self.values
+            .push((field.db_name().to_string(), value.into_write_value()));
+        self
+    }
+
+    pub fn set_value(mut self, field: &str, value: DatabaseValue) -> Result<Self> {
+        let field = checked_write_field::<M>(field, &value)?;
+        self.values.push((field.db_name.to_string(), value));
+        Ok(self)
+    }
+
+    pub async fn execute(self) -> Result<M> {
+        if self.values.is_empty() {
+            return Err(Error::EmptyUpdate);
+        }
+        match self.database {
+            Database::Postgres { backend, .. } => PostgresModelManager::<M>::new(backend)
+                .update_values(self.id.into(), self.values)
+                .await?
+                .ok_or(Error::NotFound),
+        }
+    }
+}
+
 #[cfg(feature = "postgres")]
 impl<'db, M> DatabaseCreateBuilder<'db, M>
 where
     M: PostgresModel,
 {
-    pub fn set<V>(mut self, field: &str, value: V) -> Self
+    pub fn set<T, V>(mut self, field: ModelField<M, T>, value: V) -> Self
     where
-        V: Into<DatabaseValue>,
+        V: WriteValue<T>,
     {
-        self.values.push((field.to_string(), value.into()));
+        self.values
+            .push((field.db_name().to_string(), value.into_write_value()));
         self
     }
 
-    pub fn set_null(mut self, field: &str) -> Self {
-        self.values.push((field.to_string(), DatabaseValue::Null));
-        self
+    pub fn set_value(mut self, field: &str, value: DatabaseValue) -> Result<Self> {
+        let field = checked_write_field::<M>(field, &value)?;
+        self.values.push((field.db_name.to_string(), value));
+        Ok(self)
     }
 
     pub async fn execute(self) -> Result<M> {

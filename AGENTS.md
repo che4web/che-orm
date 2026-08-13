@@ -33,5 +33,6 @@
 - `SqliteBackend::connect` enables `PRAGMA foreign_keys = ON`; keep relation tests in mind when changing connection setup.
 - `Database::query::<Model>()` and its typed `Q` predicates work with both backends. Relations, projections, annotations, grouped queries, and numeric aggregates remain SQLite-only. `DatabaseValue`, `Model`, `FilePath`, and derive output are shared; `FilePath` has backend-specific SQLx codecs.
 - `Model::objects` and `Model::postgres_objects` were removed. Use `Database` for basic CRUD and typed queries; use `as_sqlite()` only for SQLite-specific APIs such as relations and signals.
+- Partial updates use `Database::update::<Model>(id).set(ModelFields::FIELD, value).execute().await`; use `None::<InnerType>` to set a nullable field to NULL. Derive output no longer includes `Model::Update` or `ModelUpdate` structs.
 - Migration application uses a quote/comment-aware SQL statement parser and ignores comment-only statements; avoid adding migration SQL syntax that depends on unsupported dialect constructs without extending that parser.
 - The derive macro requires named structs and exactly relies on a `#[field(primary_key)]`; `i64` primary keys are auto-increment by default.

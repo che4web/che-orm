@@ -31,8 +31,8 @@ db.create_table::<User>().await?;
 
 let mut user = db
     .create::<User>()
-    .set("email", "alice@example.com")
-    .set("name", "Alice")
+    .set(UserFields::EMAIL, "alice@example.com")
+    .set(UserFields::NAME, "Alice")
     .execute()
     .await?;
 

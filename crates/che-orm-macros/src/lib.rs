@@ -142,15 +142,12 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
-    let update_name = format_ident!("{}Update", model_name);
     let fields_name = format_ident!("{}Fields", model_name);
     let relations_name = format_ident!("{}Relations", model_name);
 
     let mut infos = Vec::new();
     let mut row_fields = Vec::new();
     let mut postgres_row_fields = Vec::new();
-    let mut update_fields = Vec::new();
-    let mut update_values = Vec::new();
     let mut id_ty = None;
     let mut id_ident = None;
     let mut primary_key_count = 0;
@@ -315,8 +312,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         postgres_row_fields.push(postgres_row_field_quote(&ident, &ty, &db_name));
 
         if !primary_key && !auto_now_add && !auto_now {
-            update_fields.push(quote! { pub #ident: ::std::option::Option<#ty> });
-            update_values.push(database_value_update_quote(&ident, &ty, &db_name));
             save_values.push(database_value_ref_quote(&ident, &ty, &db_name));
         }
 
@@ -347,7 +342,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             impl ::che_orm::SqliteModel for #model_name {
                 fn from_row(row: &::che_orm::__private::sqlx::sqlite::SqliteRow) -> ::che_orm::__private::sqlx::Result<Self> { Ok(Self { #(#row_fields,)* }) }
                 fn id(&self) -> Self::Id { self.#id_ident.clone() }
-                fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> { let mut values = ::std::vec::Vec::new(); #(#update_values)* values }
                 fn save_values(&self) -> ::std::vec::Vec<(&'static str, ::che_orm::SqliteValue)> { let mut values = ::std::vec::Vec::new(); #(#save_values)* values }
             }
         }
@@ -359,7 +353,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             impl ::che_orm::PostgresModel for #model_name {
                 fn from_postgres_row(row: &::che_orm::__private::sqlx::postgres::PgRow) -> ::che_orm::__private::sqlx::Result<Self> { Ok(Self { #(#postgres_row_fields,)* }) }
                 fn id(&self) -> Self::Id { self.#id_ident.clone() }
-                fn update_values(data: Self::Update) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> { let mut values = ::std::vec::Vec::new(); #(#update_values)* values }
                 fn save_values(&self) -> ::std::vec::Vec<(&'static str, ::che_orm::DatabaseValue)> { let mut values = ::std::vec::Vec::new(); #(#save_values)* values }
             }
         }
@@ -368,11 +361,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     };
 
     Ok(quote! {
-        #[derive(Debug, Clone, Default)]
-        pub struct #update_name {
-            #(#update_fields,)*
-        }
-
         pub struct #fields_name;
 
         impl #fields_name {
@@ -387,8 +375,6 @@ fn expand_model(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
         impl ::che_orm::Model for #model_name {
             type Id = #id_ty;
-            type Update = #update_name;
-
             fn table_name() -> &'static str {
                 #table_name
             }
@@ -741,51 +727,6 @@ fn database_value_ref_quote(
     } else {
         quote! {
             values.push((#db_name, ::che_orm::DatabaseValue::from(self.#ident.clone())));
-        }
-    }
-}
-
-fn database_value_update_quote(
-    ident: &syn::Ident,
-    ty: &Type,
-    db_name: &str,
-) -> proc_macro2::TokenStream {
-    if let Some(choice) = choice_type(ty) {
-        if option_inner(ty).is_some() {
-            quote! {
-                if let ::std::option::Option::Some(value) = data.#ident {
-                    values.push((#db_name, match value {
-                        ::std::option::Option::Some(value) =>
-                            ::che_orm::DatabaseValue::String(
-                                <#choice as ::che_orm::Choice>::as_str(&value).to_string()
-                            ),
-                        ::std::option::Option::None => ::che_orm::DatabaseValue::Null,
-                    }));
-                }
-            }
-        } else {
-            quote! {
-                if let ::std::option::Option::Some(value) = data.#ident {
-                    values.push((#db_name, ::che_orm::DatabaseValue::String(
-                        <#choice as ::che_orm::Choice>::as_str(&value).to_string()
-                    )));
-                }
-            }
-        }
-    } else if is_option(ty) {
-        quote! {
-            if let ::std::option::Option::Some(value) = data.#ident {
-                values.push((#db_name, match value {
-                    ::std::option::Option::Some(value) => ::che_orm::DatabaseValue::from(value),
-                    ::std::option::Option::None => ::che_orm::DatabaseValue::Null,
-                }));
-            }
-        }
-    } else {
-        quote! {
-            if let ::std::option::Option::Some(value) = data.#ident {
-                values.push((#db_name, ::che_orm::DatabaseValue::from(value)));
-            }
         }
     }
 }

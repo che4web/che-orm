@@ -40,6 +40,12 @@ pub enum Error {
     #[error("field cannot be updated: {0}")]
     ReadonlyField(String),
 
+    #[error("invalid value for field {field}, expected {expected}")]
+    InvalidFieldValue {
+        field: String,
+        expected: &'static str,
+    },
+
     #[error("invalid file path: {0}")]
     InvalidFilePath(String),
 

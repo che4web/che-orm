@@ -36,14 +36,13 @@ fn sqlite_derive_and_file_path_codecs_compile() {
         db.create_table::<BackendCompileModel>().await?;
         db.get::<BackendCompileModel>(1).await?;
         db.all::<BackendCompileModel>().await?;
-        db.update::<BackendCompileModel>(
-            1,
-            BackendCompileModelUpdate {
-                path: None,
-                status: None,
-            },
-        )
-        .await?;
+        db.update::<BackendCompileModel>(1)
+            .set(
+                BackendCompileModelFields::PATH,
+                che_orm::FilePath::new("updated.txt")?,
+            )
+            .execute()
+            .await?;
         db.save(model).await?;
         db.delete::<BackendCompileModel>(1).await?;
         db.query::<BackendCompileModel>()
@@ -96,14 +95,13 @@ fn postgres_derive_and_file_path_codecs_compile() {
     ) -> che_orm::Result<()> {
         db.get::<BackendCompileModel>(1).await?;
         db.all::<BackendCompileModel>().await?;
-        db.update::<BackendCompileModel>(
-            1,
-            BackendCompileModelUpdate {
-                path: None,
-                status: None,
-            },
-        )
-        .await?;
+        db.update::<BackendCompileModel>(1)
+            .set(
+                BackendCompileModelFields::PATH,
+                che_orm::FilePath::new("updated.txt")?,
+            )
+            .execute()
+            .await?;
         db.save(model).await?;
         db.delete::<BackendCompileModel>(1).await?;
         db.query::<BackendCompileModel>()

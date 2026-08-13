@@ -49,7 +49,7 @@ async fn file_path_model_roundtrips() {
     let path = FilePath::new("aa/bb/report.txt").unwrap();
     let asset = db
         .create::<Asset>()
-        .set("path", path.clone())
+        .set(AssetFields::PATH, path.clone())
         .execute()
         .await
         .unwrap();
@@ -62,13 +62,25 @@ async fn file_path_model_roundtrips() {
 }
 
 #[tokio::test]
+async fn dynamic_writes_reject_unsafe_file_paths() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    db.create_table::<Asset>().await.unwrap();
+
+    assert!(
+        db.create::<Asset>()
+            .set_value("path", "../secret.txt".into())
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn typed_projection_decodes_file_paths_and_nullable_values() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.create_table::<Asset>().await.unwrap();
     let path = FilePath::new("typed/report.txt").unwrap();
     let asset = db
         .create::<Asset>()
-        .set("path", path.clone())
+        .set(AssetFields::PATH, path.clone())
         .execute()
         .await
         .unwrap();

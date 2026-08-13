@@ -99,28 +99,45 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
         )?)
     }
 
-    pub async fn update(&self, id: i64, data: M::Update) -> Result<Option<M>> {
-        let values = M::update_values(data);
-        self.update_values(id, values).await
-    }
-
     pub async fn save(&self, model: &M) -> Result<Option<M>> {
-        self.update_values(model.id().into(), M::save_values(model))
-            .await
+        self.update_values(
+            model.id().into(),
+            M::save_values(model)
+                .into_iter()
+                .map(|(field, value)| (field.to_string(), value))
+                .collect(),
+        )
+        .await
     }
 
-    async fn update_values(
+    pub(crate) async fn update_values(
         &self,
         id: i64,
-        values: Vec<(&'static str, DatabaseValue)>,
+        values: Vec<(String, DatabaseValue)>,
     ) -> Result<Option<M>> {
         if values.is_empty() {
             return Err(crate::Error::EmptyUpdate);
+        }
+        for (name, _) in &values {
+            let field = field_info::<M>(name)?;
+            if field.primary_key || field.auto || field.auto_now || field.auto_now_add {
+                return Err(crate::Error::ReadonlyField(name.clone()));
+            }
         }
         let assignments = values
             .iter()
             .enumerate()
             .map(|(index, (name, _))| format!("{name} = ${}", index + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let timestamp_fields = M::fields()
+            .iter()
+            .filter(|field| field.auto_now)
+            .map(|field| format!("{} = CURRENT_TIMESTAMP", field.db_name))
+            .collect::<Vec<_>>();
+        let assignments = std::iter::once(assignments)
+            .filter(|assignments| !assignments.is_empty())
+            .chain(timestamp_fields)
             .collect::<Vec<_>>()
             .join(", ");
         let primary_key = primary_key::<M>()?;
@@ -132,7 +149,7 @@ impl<'db, M: PostgresModel> PostgresModelManager<'db, M> {
         );
         let mut query = sqlx::query(&sql);
         for (name, value) in values {
-            query = bind_value(query, value, field_info::<M>(name)?);
+            query = bind_value(query, value, field_info::<M>(&name)?);
         }
         let row = query.bind(id).fetch_optional(self.db.pool()).await?;
         row.map(|row| M::from_postgres_row(&row).map_err(Into::into))

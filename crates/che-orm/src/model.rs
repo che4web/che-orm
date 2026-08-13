@@ -84,6 +84,10 @@ pub trait QueryValue<T> {
     fn into_query_value(self) -> DatabaseValue;
 }
 
+pub trait WriteValue<T> {
+    fn into_write_value(self) -> DatabaseValue;
+}
+
 #[cfg(feature = "sqlite")]
 pub trait AggregateValue:
     Sized + Send + Unpin + for<'q> sqlx::Decode<'q, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>
@@ -116,6 +120,79 @@ query_value_impl!(f32, f32);
 query_value_impl!(chrono::NaiveDateTime, chrono::NaiveDateTime);
 query_value_impl!(serde_json::Value, serde_json::Value);
 query_value_impl!(crate::FilePath, crate::FilePath);
+
+macro_rules! nullable_query_value_impl {
+    ($field_type:ty, $($value_type:ty),+ $(,)?) => {
+        $(impl QueryValue<Option<$field_type>> for $value_type {
+            fn into_query_value(self) -> DatabaseValue { self.into() }
+        })+
+        $(impl QueryValue<Option<$field_type>> for Option<$value_type> {
+            fn into_query_value(self) -> DatabaseValue {
+                self.map(Into::into).unwrap_or(DatabaseValue::Null)
+            }
+        })+
+    };
+}
+
+nullable_query_value_impl!(i64, i64, i32, u32);
+nullable_query_value_impl!(i32, i32);
+nullable_query_value_impl!(u32, u32);
+nullable_query_value_impl!(String, String, &str);
+nullable_query_value_impl!(bool, bool);
+nullable_query_value_impl!(f64, f64, f32);
+nullable_query_value_impl!(f32, f32);
+nullable_query_value_impl!(chrono::NaiveDateTime, chrono::NaiveDateTime);
+nullable_query_value_impl!(serde_json::Value, serde_json::Value);
+nullable_query_value_impl!(crate::FilePath, crate::FilePath);
+
+macro_rules! write_value_impl {
+    ($field_type:ty, $($value_type:ty),+ $(,)?) => {
+        $(impl WriteValue<$field_type> for $value_type {
+            fn into_write_value(self) -> DatabaseValue { self.into() }
+        })+
+        $(impl WriteValue<Option<$field_type>> for Option<$value_type> {
+            fn into_write_value(self) -> DatabaseValue {
+                self.map(Into::into).unwrap_or(DatabaseValue::Null)
+            }
+        })+
+        $(impl WriteValue<$field_type> for Option<$value_type> {
+            fn into_write_value(self) -> DatabaseValue {
+                self.map(Into::into).unwrap_or(DatabaseValue::Null)
+            }
+        })+
+    };
+}
+
+write_value_impl!(i64, i64, i32, u32);
+write_value_impl!(i32, i32);
+write_value_impl!(u32, u32);
+write_value_impl!(String, String, &str);
+write_value_impl!(bool, bool);
+write_value_impl!(f64, f64, f32);
+write_value_impl!(f32, f32);
+write_value_impl!(chrono::NaiveDateTime, chrono::NaiveDateTime);
+write_value_impl!(serde_json::Value, serde_json::Value);
+write_value_impl!(crate::FilePath, crate::FilePath);
+
+impl<T: Choice> WriteValue<T> for T {
+    fn into_write_value(self) -> DatabaseValue {
+        DatabaseValue::String(self.as_str().to_string())
+    }
+}
+
+impl<T: Choice> WriteValue<T> for Option<T> {
+    fn into_write_value(self) -> DatabaseValue {
+        self.map(|value| DatabaseValue::String(value.as_str().to_string()))
+            .unwrap_or(DatabaseValue::Null)
+    }
+}
+
+impl<T: Choice> WriteValue<Option<T>> for Option<T> {
+    fn into_write_value(self) -> DatabaseValue {
+        self.map(|value| DatabaseValue::String(value.as_str().to_string()))
+            .unwrap_or(DatabaseValue::Null)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum DatabaseValue {
@@ -199,7 +276,6 @@ impl From<crate::FilePath> for DatabaseValue {
 
 pub trait Model: Sized + Send + Sync + 'static {
     type Id: Clone + Send + Sync + Into<i64>;
-    type Update: Send + Sync;
 
     fn table_name() -> &'static str;
     fn fields() -> &'static [FieldInfo];
@@ -217,7 +293,6 @@ pub trait Model: Sized + Send + Sync + 'static {
 pub trait SqliteModel: Model {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> sqlx::Result<Self>;
     fn id(&self) -> Self::Id;
-    fn update_values(data: Self::Update) -> Vec<(&'static str, SqliteValue)>;
     fn save_values(&self) -> Vec<(&'static str, SqliteValue)>;
 }
 
@@ -225,6 +300,5 @@ pub trait SqliteModel: Model {
 pub trait PostgresModel: Model {
     fn from_postgres_row(row: &sqlx::postgres::PgRow) -> sqlx::Result<Self>;
     fn id(&self) -> Self::Id;
-    fn update_values(data: Self::Update) -> Vec<(&'static str, DatabaseValue)>;
     fn save_values(&self) -> Vec<(&'static str, DatabaseValue)>;
 }

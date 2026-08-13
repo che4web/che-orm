@@ -870,12 +870,6 @@ pub struct CreateBuilder<'db, M: Model> {
     _model: PhantomData<M>,
 }
 
-pub struct UpdateBuilder<'db, M: Model> {
-    db: &'db SqliteBackend,
-    id: M::Id,
-    values: Vec<(String, SqliteValue)>,
-}
-
 pub struct QueryBuilder<'db, M: Model> {
     db: &'db SqliteBackend,
     predicate: Option<Q<M>>,
@@ -1093,25 +1087,12 @@ where
             .map_err(Into::into)
     }
 
-    pub async fn update(&self, id: M::Id, data: M::Update) -> Result<M> {
-        let values = M::update_values(data);
-        if values.is_empty() {
-            return Err(Error::EmptyUpdate);
-        }
-        update_by_values::<M>(self.db, id, values).await
-    }
-
     pub async fn save(&self, model: &M) -> Result<M> {
-        let values = M::save_values(model);
+        let values = M::save_values(model)
+            .into_iter()
+            .map(|(field, value)| (field.to_string(), value))
+            .collect();
         update_by_values::<M>(self.db, model.id(), values).await
-    }
-
-    pub fn update_fields(&self, id: M::Id) -> UpdateBuilder<'db, M> {
-        UpdateBuilder {
-            db: self.db,
-            id,
-            values: Vec::new(),
-        }
     }
 
     pub async fn delete(&self, id: M::Id) -> Result<()> {
@@ -1833,41 +1814,10 @@ where
     }
 }
 
-impl<'db, M> UpdateBuilder<'db, M>
-where
-    M: SqliteModel,
-{
-    pub fn set<V>(mut self, field: &str, value: V) -> Self
-    where
-        V: Into<SqliteValue>,
-    {
-        self.values.push((field.to_string(), value.into()));
-        self
-    }
-
-    pub fn set_null(mut self, field: &str) -> Self {
-        self.values.push((field.to_string(), SqliteValue::Null));
-        self
-    }
-
-    pub async fn execute(self) -> Result<M> {
-        if self.values.is_empty() {
-            return Err(Error::EmptyUpdate);
-        }
-
-        let mut values = Vec::with_capacity(self.values.len());
-        for (field, value) in self.values {
-            values.push((checked_update_field::<M>(&field)?, value));
-        }
-
-        update_by_values::<M>(self.db, self.id, values).await
-    }
-}
-
-async fn update_by_values<M>(
+pub(crate) async fn update_by_values<M>(
     db: &SqliteBackend,
     id: M::Id,
-    values: Vec<(&'static str, SqliteValue)>,
+    values: Vec<(String, SqliteValue)>,
 ) -> Result<M>
 where
     M: SqliteModel,
@@ -1877,6 +1827,10 @@ where
     }
 
     let pk = M::primary_key().ok_or(Error::MissingPrimaryKey)?;
+    let values = values
+        .into_iter()
+        .map(|(field, value)| Ok((checked_update_field::<M>(&field)?, value)))
+        .collect::<Result<Vec<_>>>()?;
     let bind_count = values.len();
     let timestamp_fields = update_timestamp_fields::<M>();
 

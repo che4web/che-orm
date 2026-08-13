@@ -6,22 +6,26 @@ error[E0277]: the trait bound `&str: QueryValue<i64>` is not satisfied
    |                            |
    |                            required by a bound introduced by this call
    |
-help: the trait `QueryValue<i64>` is not implemented for `&str`
-      but trait `QueryValue<std::string::String>` is implemented for it
+help: the following other types implement trait `QueryValue<T>`
   --> src/model.rs
    |
    |         $(impl QueryValue<$field_type> for $value_type {
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `QueryValue<std::string::String>`
 ...
    | query_value_impl!(String, String, &str);
    | --------------------------------------- in this macro invocation
-   = help: for that trait implementation, expected `std::string::String`, found `i64`
+...
+   |         $(impl QueryValue<Option<$field_type>> for $value_type {
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `QueryValue<Option<std::string::String>>`
+...
+   | nullable_query_value_impl!(String, String, &str);
+   | ------------------------------------------------ in this macro invocation
 note: required by a bound in `che_orm::query::<impl ModelField<M, T>>::eq`
   --> src/query.rs
    |
    |     pub fn eq<V: QueryValue<T>>(self, value: V) -> Q<M> {
    |                  ^^^^^^^^^^^^^ required by this bound in `che_orm::query::<impl ModelField<M, T>>::eq`
-   = note: this error originates in the macro `query_value_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `query_value_impl` which comes from the expansion of the macro `nullable_query_value_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: the method `contains` exists for struct `ModelField<User, i64>`, but its trait bounds were not satisfied
   --> tests/ui/type_safe_query.rs:15:28
@@ -38,16 +42,20 @@ error[E0277]: the trait bound `&str: QueryValue<i64>` is not satisfied
 16 |     let _ = UserFields::ID.in_values(["text"]);
    |                            ^^^^^^^^^ the trait `QueryValue<i64>` is not implemented for `&str`
    |
-help: the trait `QueryValue<i64>` is not implemented for `&str`
-      but trait `QueryValue<std::string::String>` is implemented for it
+help: the following other types implement trait `QueryValue<T>`
   --> src/model.rs
    |
    |         $(impl QueryValue<$field_type> for $value_type {
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `QueryValue<std::string::String>`
 ...
    | query_value_impl!(String, String, &str);
    | --------------------------------------- in this macro invocation
-   = help: for that trait implementation, expected `std::string::String`, found `i64`
+...
+   |         $(impl QueryValue<Option<$field_type>> for $value_type {
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `QueryValue<Option<std::string::String>>`
+...
+   | nullable_query_value_impl!(String, String, &str);
+   | ------------------------------------------------ in this macro invocation
 note: required by a bound in `che_orm::query::<impl ModelField<M, T>>::in_values`
   --> src/query.rs
    |
@@ -56,7 +64,7 @@ note: required by a bound in `che_orm::query::<impl ModelField<M, T>>::in_values
 ...
    |         V: QueryValue<T>,
    |            ^^^^^^^^^^^^^ required by this bound in `che_orm::query::<impl ModelField<M, T>>::in_values`
-   = note: this error originates in the macro `query_value_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `query_value_impl` which comes from the expansion of the macro `nullable_query_value_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `ModelField<User, std::string::String>: NumericQueryField<User>` is not satisfied
   --> tests/ui/type_safe_query.rs:17:36
@@ -80,3 +88,31 @@ note: required by a bound in `che_orm::QueryBuilder::<'db, M>::sum`
    |     where
    |         F: NumericQueryField<M>,
    |            ^^^^^^^^^^^^^^^^^^^^ required by this bound in `QueryBuilder::<'db, M>::sum`
+
+error[E0277]: the trait bound `i64: WriteValue<std::string::String>` is not satisfied
+  --> tests/ui/type_safe_query.rs:18:56
+   |
+18 |     let _ = db.create::<User>().set(UserFields::EMAIL, 42_i64);
+   |                                 ---                    ^^^^^^ the trait `WriteValue<std::string::String>` is not implemented for `i64`
+   |                                 |
+   |                                 required by a bound introduced by this call
+   |
+help: the trait `WriteValue<std::string::String>` is not implemented for `i64`
+      but trait `WriteValue<i64>` is implemented for it
+  --> src/model.rs
+   |
+   |         $(impl WriteValue<$field_type> for $value_type {
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | write_value_impl!(i64, i64, i32, u32);
+   | ------------------------------------- in this macro invocation
+   = help: for that trait implementation, expected `i64`, found `std::string::String`
+note: required by a bound in `DatabaseCreateBuilder::<'db, M>::set`
+  --> src/database.rs
+   |
+   |     pub fn set<T, V>(mut self, field: ModelField<M, T>, value: V) -> Self
+   |            --- required by a bound in this associated function
+   |     where
+   |         V: WriteValue<T>,
+   |            ^^^^^^^^^^^^^ required by this bound in `DatabaseCreateBuilder::<'db, M>::set`
+   = note: this error originates in the macro `write_value_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
