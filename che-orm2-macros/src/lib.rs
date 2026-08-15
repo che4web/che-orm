@@ -1,0 +1,250 @@
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{Data, DeriveInput, Error, Fields, Ident, LitStr, Token, parse_macro_input};
+
+#[proc_macro_derive(Model, attributes(orm))]
+pub fn derive_model(input: TokenStream) -> TokenStream {
+    match derive_model_impl(parse_macro_input!(input as DeriveInput)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let model_attributes = parse_model_attributes(&input)?;
+    let table = model_attributes.table;
+    let fields = match input.data {
+        Data::Struct(data) => match data.fields {
+            Fields::Named(fields) => fields.named,
+            _ => {
+                return Err(Error::new_spanned(
+                    input.ident,
+                    "Model can only be derived for structs with named fields",
+                ));
+            }
+        },
+        _ => {
+            return Err(Error::new_spanned(
+                input.ident,
+                "Model can only be derived for structs",
+            ));
+        }
+    };
+
+    let model = input.ident;
+    let mut columns = Vec::with_capacity(fields.len());
+    let mut constants = Vec::with_capacity(fields.len());
+    let mut schema_columns = Vec::with_capacity(fields.len());
+    let mut row_fields = Vec::with_capacity(fields.len());
+    let mut insert_values = Vec::with_capacity(fields.len());
+
+    for (index, field) in fields.into_iter().enumerate() {
+        let field_name = field.ident.expect("named fields always have identifiers");
+        let column = field_name.to_string();
+        let constant = Ident::new(&column.to_uppercase(), field_name.span());
+        let field_type = field.ty;
+        let field_attributes = parse_field_attributes(&field.attrs)?;
+
+        columns.push(LitStr::new(&column, field_name.span()));
+        constants.push(quote! {
+            pub const #constant: ::che_orm2::ModelField<Self, #field_type> =
+                ::che_orm2::ModelField::new(#table, #column);
+        });
+
+        let primary_key = field_attributes.primary_key;
+        let unique = field_attributes.unique;
+        let default = field_attributes
+            .default
+            .map(|value| quote! { column.default = Some(#value); });
+        let check = field_attributes
+            .check
+            .map(|value| quote! { column.check = Some(#value); });
+        let references = field_attributes.references.map(|target| {
+            let on_delete = field_attributes
+                .on_delete
+                .clone()
+                .map(|value| quote! { Some(#value) })
+                .unwrap_or_else(|| quote! { None });
+            quote! {
+                column.references = Some(::che_orm2::ForeignKey {
+                    target: #target,
+                    on_delete: #on_delete,
+                });
+            }
+        });
+
+        schema_columns.push(quote! {
+            let mut column = ::che_orm2::ColumnSchema::new(
+                #column,
+                <#field_type as ::che_orm2::ColumnTypeOf>::column_type(),
+                <#field_type as ::che_orm2::ColumnTypeOf>::nullable(),
+            );
+            column.primary_key = #primary_key;
+            column.unique = #unique;
+            #default
+            #check
+            #references
+            columns.push(column);
+        });
+
+        row_fields.push(quote! {
+            #field_name: row.get(#index)?,
+        });
+
+        if !field_attributes.primary_key {
+            insert_values.push(quote! {
+                ::che_orm2::InsertValue {
+                    column: ::che_orm2::ColumnRef::new(#table, #column),
+                    value: ::che_orm2::QueryValue::<#field_type>::into_query_value(
+                        self.#field_name.clone(),
+                    ),
+                }
+            });
+        }
+    }
+
+    let unique_constraints = model_attributes.unique_constraints.iter().map(|columns| {
+        quote! { vec![#(#columns),*] }
+    });
+    let indexes = model_attributes.indexes.iter().map(|columns| {
+        quote! { vec![#(#columns),*] }
+    });
+
+    Ok(quote! {
+        impl ::che_orm2::Model for #model {
+            fn table_name() -> &'static str {
+                #table
+            }
+
+            fn columns() -> &'static [&'static str] {
+                &[#(#columns),*]
+            }
+
+            fn schema() -> ::che_orm2::TableSchema {
+                let mut columns = Vec::new();
+                #(#schema_columns)*
+                ::che_orm2::TableSchema {
+                    name: #table,
+                    columns,
+                    unique_constraints: vec![#(#unique_constraints),*],
+                    indexes: vec![#(#indexes),*],
+                }
+            }
+
+            fn from_row(row: &::che_orm2::rusqlite::Row<'_>) -> ::che_orm2::rusqlite::Result<Self> {
+                Ok(Self {
+                    #(#row_fields)*
+                })
+            }
+
+            fn insert_values(&self) -> ::std::vec::Vec<::che_orm2::InsertValue> {
+                vec![#(#insert_values),*]
+            }
+        }
+
+        impl #model {
+            #(#constants)*
+        }
+    })
+}
+
+struct ModelAttributes {
+    table: LitStr,
+    unique_constraints: Vec<Vec<LitStr>>,
+    indexes: Vec<Vec<LitStr>>,
+}
+
+fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
+    let mut table = None;
+    let mut unique_constraints = Vec::new();
+    let mut indexes = Vec::new();
+
+    for attribute in &input.attrs {
+        if !attribute.path().is_ident("orm") {
+            continue;
+        }
+
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("table") {
+                table = Some(meta.value()?.parse()?);
+                Ok(())
+            } else if meta.path.is_ident("unique") || meta.path.is_ident("index") {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let values =
+                    content.parse_terminated(|input| input.parse::<LitStr>(), Token![,])?;
+                if values.is_empty() {
+                    return Err(meta.error("constraint requires at least one column"));
+                }
+                let values = values.into_iter().collect::<Vec<_>>();
+                if meta.path.is_ident("unique") {
+                    unique_constraints.push(values);
+                } else {
+                    indexes.push(values);
+                }
+                Ok(())
+            } else {
+                Err(meta
+                    .error("unsupported orm attribute; expected table, unique(...) or index(...)"))
+            }
+        })?;
+    }
+
+    let table = table.ok_or_else(|| {
+        Error::new_spanned(
+            &input.ident,
+            "Model requires #[orm(table = \"table_name\")]",
+        )
+    })?;
+    Ok(ModelAttributes {
+        table,
+        unique_constraints,
+        indexes,
+    })
+}
+
+struct FieldAttributes {
+    primary_key: bool,
+    unique: bool,
+    default: Option<LitStr>,
+    check: Option<LitStr>,
+    references: Option<LitStr>,
+    on_delete: Option<LitStr>,
+}
+
+fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAttributes> {
+    let mut result = FieldAttributes {
+        primary_key: false,
+        unique: false,
+        default: None,
+        check: None,
+        references: None,
+        on_delete: None,
+    };
+
+    for attribute in attributes {
+        if !attribute.path().is_ident("orm") {
+            continue;
+        }
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("primary_key") {
+                result.primary_key = true;
+            } else if meta.path.is_ident("unique") {
+                result.unique = true;
+            } else if meta.path.is_ident("default") {
+                result.default = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("check") {
+                result.check = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("references") {
+                result.references = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("on_delete") {
+                result.on_delete = Some(meta.value()?.parse()?);
+            } else {
+                return Err(meta.error("unsupported field attribute"));
+            }
+            Ok(())
+        })?;
+    }
+
+    Ok(result)
+}

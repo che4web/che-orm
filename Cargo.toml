@@ -1,0 +1,19 @@
+[package]
+name = "che-orm2"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["che-orm2-macros"]
+
+[features]
+default = ["sqlite"]
+postgres = []
+sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
+
+[dependencies]
+che-orm2-macros = { path = "che-orm2-macros" }
+deadpool-sqlite = { version = "0.12", optional = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", optional = true, features = ["macros", "rt-multi-thread"] }
