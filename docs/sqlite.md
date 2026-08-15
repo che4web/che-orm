@@ -42,7 +42,42 @@ let compiled = che_orm2::SqlCompiler::<che_orm2::SqliteDialect>
 println!("{}", compiled.sql);
 ```
 
-## Insert
+## High-level CRUD
+
+Facade API возвращает модели, включая generated primary key и значения managed
+timestamp-полей:
+
+```rust
+let user = database
+    .create::<User>()
+    .set(User::EMAIL, "alice@example.test")
+    .set(User::NAME, "Alice")
+    .set(User::IS_ACTIVE, true)
+    .execute()
+    .await?;
+
+let loaded = database.get::<User>(user.id).await?;
+let users = database
+    .query::<User>()
+    .filter(User::IS_ACTIVE.eq(true))
+    .order_by(User::NAME.asc())
+    .limit(20)
+    .all()
+    .await?;
+
+let updated = database
+    .update::<User>(user.id)
+    .set(User::NAME, "Alice Cooper")
+    .execute()
+    .await?;
+
+let deleted = database.delete::<User>(user.id).await?;
+```
+
+`get` и `first` возвращают `Option`, если строка отсутствует. `update` также
+возвращает `Option`; `delete` возвращает `bool`.
+
+## Низкоуровневый insert
 
 ```rust
 let user = User {
@@ -63,29 +98,34 @@ println!("{:?}", result.last_insert_rowid);
 Поле `auto_now` автоматически добавляется в ORM-generated update.
 Остальные поля передаются как SQL parameters.
 
-## Select
+Для обычного создания используйте `database.create::<User>()`. Низкоуровневый
+`insert` сохраняет `ExecuteResult` и нужен для случаев, когда не требуется
+перечитывать созданную модель.
+
+## Typed select facade
 
 ```rust
 use che_orm2::Model;
 
 let users = database
-    .fetch_all(
-        User::query()
-            .filter(User::IS_ACTIVE.eq(true))
-            .order_by(User::NAME.asc())
-            .limit(20),
-    )
+    .query::<User>()
+    .filter(User::IS_ACTIVE.eq(true))
+    .order_by(User::NAME.asc())
+    .limit(20)
+    .all()
     .await?;
 
 let first = database
-    .fetch_one(User::query().filter(User::EMAIL.eq("alice@example.test")))
+    .query::<User>()
+    .filter(User::EMAIL.eq("alice@example.test"))
+    .first()
     .await?;
 ```
 
 Значения фильтра параметризуются. Имена таблиц и колонок берутся из derive
 metadata и не должны приходить от пользователя.
 
-## Update и delete
+## Низкоуровневые update и delete
 
 ```rust
 let update = User::update()
@@ -100,7 +140,9 @@ let delete = User::delete()
 database.execute(delete).await?;
 ```
 
-Без `filter` update/delete возвращают `QueryBuildError::MissingFilter`.
+Facade `update::<User>(id)` и `delete::<User>(id)` добавляют filter по primary
+key автоматически. При прямой работе с AST без `filter` update/delete
+возвращают `QueryBuildError::MissingFilter`.
 Если массовая операция действительно нужна:
 
 ```rust
@@ -165,8 +207,6 @@ commit.
 
 Текущий runtime не содержит:
 
-- миграций;
 - автоматического diff схемы;
-- relations и joins на уровне ORM-моделей;
+- automatic relations и joins на уровне ORM-моделей;
 - PostgreSQL connection pool;
-- typed update API для каждого backend-а.

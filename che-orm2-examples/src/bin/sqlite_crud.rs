@@ -1,4 +1,4 @@
-use che_orm2::{Database, Model};
+use che_orm2::Database;
 use che_orm2_examples::{ExamplePost, ExampleUser};
 
 #[tokio::main]
@@ -11,29 +11,41 @@ async fn main() -> Result<(), che_orm2::OrmError> {
         .as_nanos();
     let alice_email = format!("alice-{suffix}@example.test");
     let bob_email = format!("bob-{suffix}@example.test");
-    let alice = ExampleUser::new(&alice_email, "Alice");
-    let bob = ExampleUser::new(&bob_email, "Bob");
-    let alice_id = database.insert(&alice).await?.last_insert_rowid.unwrap();
-    database.insert(&bob).await?;
+    let alice = database
+        .create::<ExampleUser>()
+        .set(ExampleUser::EMAIL, alice_email.as_str())
+        .set(ExampleUser::NAME, "Alice")
+        .execute()
+        .await?;
+    let bob = database
+        .create::<ExampleUser>()
+        .set(ExampleUser::EMAIL, bob_email.as_str())
+        .set(ExampleUser::NAME, "Bob")
+        .execute()
+        .await?;
 
-    database
-        .insert(&ExamplePost {
-            id: 0,
-            user_id: alice_id,
-            title: "Alice's first post".into(),
-        })
+    let post = database
+        .create::<ExamplePost>()
+        .set(ExamplePost::USER_ID, alice.id)
+        .set(ExamplePost::TITLE, "Alice's first post")
+        .execute()
         .await?;
 
     let users = database
-        .fetch_all(ExampleUser::query().filter(ExampleUser::EMAIL.eq(alice_email)))
+        .query::<ExampleUser>()
+        .filter(ExampleUser::EMAIL.eq(alice_email))
+        .all()
         .await?;
 
     for user in users {
         println!("{user:?}");
     }
 
-    let posts = database.fetch_by(ExamplePost::USER_ID, alice_id).await?;
+    let posts = database.fetch_by(ExamplePost::USER_ID, alice.id).await?;
+    println!("created post: {post:?}");
     println!("posts for Alice: {posts:?}");
+
+    let _ = database.get::<ExampleUser>(bob.id).await?;
 
     Ok(())
 }

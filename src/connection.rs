@@ -3,8 +3,8 @@ use rusqlite::types::Value;
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
-    CompiledQuery, DatabaseValue, Model, ModelField, QueryAst, QueryBuildError, QueryValue,
-    SqlCompiler, SqliteDialect,
+    CompiledQuery, DatabaseValue, Expr, Model, ModelField, QueryAst, QueryBuildError, QueryValue,
+    SelectQuery, SqlCompiler, SqliteDialect,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -139,6 +139,55 @@ impl Database {
         Ok(rows.pop())
     }
 
+    /// Fetches a model by its generated integer primary key.
+    pub async fn get<M: Model + Send + 'static>(&self, id: i64) -> Result<Option<M>, OrmError> {
+        self.fetch_one(M::query().filter(M::primary_key().eq(id)))
+            .await
+    }
+
+    /// Fetches every row in a model's table.
+    pub async fn all<M: Model + Send + 'static>(&self) -> Result<Vec<M>, OrmError> {
+        self.fetch_all(M::query()).await
+    }
+
+    /// Starts a high-level insert builder.
+    pub fn create<M: Model>(&self) -> CreateBuilder<'_, M> {
+        CreateBuilder {
+            database: self,
+            query: M::insert(),
+        }
+    }
+
+    /// Starts a high-level update builder scoped to one primary key.
+    pub fn update<M: Model>(&self, id: i64) -> UpdateBuilder<'_, M> {
+        UpdateBuilder {
+            database: self,
+            query: M::update().filter(M::primary_key().eq(id)),
+            id,
+        }
+    }
+
+    /// Deletes one row by its generated integer primary key.
+    pub async fn delete<M: Model + Send + 'static>(&self, id: i64) -> Result<bool, OrmError> {
+        let result = self
+            .execute(
+                M::delete()
+                    .filter(M::primary_key().eq(id))
+                    .into_ast()
+                    .map_err(OrmError::QueryBuild)?,
+            )
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
+
+    /// Starts a high-level typed select builder bound to this database.
+    pub fn query<M: Model>(&self) -> DatabaseQuery<'_, M> {
+        DatabaseQuery {
+            database: self,
+            query: M::query(),
+        }
+    }
+
     /// Fetches related rows by a typed model field.
     ///
     /// This is the low-level building block for `has_many` and `belongs_to`:
@@ -200,6 +249,125 @@ impl Database {
             .await
             .map_err(|error| OrmError::Interaction(error.to_string()))?
             .map_err(OrmError::from)
+    }
+}
+
+/// High-level insert builder. The executed result is the complete inserted model.
+pub struct CreateBuilder<'db, M> {
+    database: &'db Database,
+    query: crate::InsertQuery<M>,
+}
+
+impl<M: Model> CreateBuilder<'_, M> {
+    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
+    where
+        V: QueryValue<T>,
+    {
+        Self {
+            database: self.database,
+            query: self.query.set(field, value),
+        }
+    }
+
+    pub async fn execute(self) -> Result<M, OrmError>
+    where
+        M: Send + 'static,
+    {
+        let result = self
+            .database
+            .execute(self.query.into_ast().map_err(OrmError::QueryBuild)?)
+            .await?;
+        let id = result
+            .last_insert_rowid
+            .ok_or_else(|| OrmError::Interaction("insert did not return a primary key".into()))?;
+        self.database
+            .get(id)
+            .await?
+            .ok_or_else(|| OrmError::Interaction("inserted row could not be loaded".into()))
+    }
+}
+
+/// High-level update builder scoped to one model primary key.
+pub struct UpdateBuilder<'db, M> {
+    database: &'db Database,
+    query: crate::UpdateQuery<M>,
+    id: i64,
+}
+
+impl<M: Model> UpdateBuilder<'_, M> {
+    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
+    where
+        V: QueryValue<T>,
+    {
+        Self {
+            database: self.database,
+            query: self.query.set(field, value),
+            id: self.id,
+        }
+    }
+
+    pub async fn execute(self) -> Result<Option<M>, OrmError>
+    where
+        M: Send + 'static,
+    {
+        let result = self
+            .database
+            .execute(self.query.into_ast().map_err(OrmError::QueryBuild)?)
+            .await?;
+        if result.rows_affected == 0 {
+            return Ok(None);
+        }
+        self.database.get(self.id).await
+    }
+}
+
+/// High-level typed select builder bound to a database.
+pub struct DatabaseQuery<'db, M> {
+    database: &'db Database,
+    query: SelectQuery<M>,
+}
+
+impl<M: Model> DatabaseQuery<'_, M> {
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.filter(expr),
+        }
+    }
+
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.order_by(order),
+        }
+    }
+
+    pub fn limit(self, limit: u64) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.limit(limit),
+        }
+    }
+
+    pub fn offset(self, offset: u64) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.offset(offset),
+        }
+    }
+
+    pub async fn all(self) -> Result<Vec<M>, OrmError>
+    where
+        M: Send + 'static,
+    {
+        self.database.fetch_all(self.query).await
+    }
+
+    pub async fn first(self) -> Result<Option<M>, OrmError>
+    where
+        M: Send + 'static,
+    {
+        self.database.fetch_one(self.query).await
     }
 }
 

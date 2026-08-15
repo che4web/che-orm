@@ -40,6 +40,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut insert_values = Vec::with_capacity(fields.len());
     let mut managed_update_values = Vec::with_capacity(fields.len());
     let mut primary_key_seen = false;
+    let mut primary_key_constant = None;
 
     for (index, field) in fields.into_iter().enumerate() {
         let field_name = field.ident.expect("named fields always have identifiers");
@@ -55,7 +56,14 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                     "a model can have only one primary_key field",
                 ));
             }
+            if !is_i64(&field_type) {
+                return Err(Error::new_spanned(
+                    &field_type,
+                    "primary_key requires an i64 field",
+                ));
+            }
             primary_key_seen = true;
+            primary_key_constant = Some(constant.clone());
         }
 
         if (field_attributes.auto_now_add || field_attributes.auto_now)
@@ -140,6 +148,13 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         }
     }
 
+    let primary_key_constant = primary_key_constant.ok_or_else(|| {
+        Error::new_spanned(
+            &model,
+            "Model requires exactly one #[orm(primary_key)] field",
+        )
+    })?;
+
     let unique_constraints = model_attributes.unique_constraints.iter().map(|columns| {
         quote! { vec![#(#columns),*] }
     });
@@ -155,6 +170,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
             fn columns() -> &'static [&'static str] {
                 &[#(#columns),*]
+            }
+
+            fn primary_key() -> ::che_orm2::ModelField<Self, i64> {
+                Self::#primary_key_constant
             }
 
             fn schema() -> ::che_orm2::TableSchema {
@@ -321,6 +340,13 @@ fn is_offset_date_time(ty: &syn::Type) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "OffsetDateTime")
+}
+
+fn is_i64(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(path) => path.qself.is_none() && path.path.is_ident("i64"),
+        _ => false,
+    }
 }
 
 fn validate_identifier(identifier: &str, span: proc_macro2::Span, kind: &str) -> syn::Result<()> {

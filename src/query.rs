@@ -147,6 +147,8 @@ impl QueryAst {
 pub trait Model: Sized {
     fn table_name() -> &'static str;
     fn columns() -> &'static [&'static str];
+    /// Returns the model's generated integer primary-key field.
+    fn primary_key() -> ModelField<Self, i64>;
     fn schema() -> TableSchema;
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self>;
     fn insert_values(&self) -> Vec<InsertValue>;

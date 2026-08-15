@@ -2,7 +2,8 @@
 
 ## Derive Model
 
-`#[derive(Model)]` генерирует реализацию `Model` и константы typed fields:
+`#[derive(Model)]` генерирует реализацию `Model` и константы typed fields.
+Каждая модель должна иметь ровно одно поле `#[orm(primary_key)]` типа `i64`:
 
 ```rust
 #[derive(Model)]
@@ -17,6 +18,8 @@ struct User {
 
 После derive доступны `User::ID`, `User::EMAIL`, `User::NAME`, которые
 используются в фильтрах, сортировке и assignment-ах.
+Также `User::primary_key()` используется high-level facade для `get`, `update`
+и `delete`.
 
 `Debug` в `#[derive(Debug, Model)]` не относится к ORM. Это стандартный Rust
 derive для печати модели через `{:?}`.

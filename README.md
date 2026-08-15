@@ -10,7 +10,8 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 - SQL AST и параметризованная генерация `SELECT`, `INSERT`, `UPDATE`, `DELETE`.
 - Генерация `CREATE TABLE`, индексов и ограничений.
 - Async SQLite pool через `deadpool-sqlite` и Tokio.
-- `insert`, `fetch_all`, `fetch_one`, выполнение произвольного `QueryAst`.
+- High-level `get`, `all`, `create`, `update`, `delete` и typed `query` facade.
+- Низкоуровневые `insert`, `fetch_all`, `fetch_one` и произвольный `QueryAst`.
 - Транзакции с commit/rollback.
 - Foreign keys с каскадным удалением и typed `fetch_by` для связанных строк.
 - Versioned migrations через Atlas и встроенный `manage` CLI.
@@ -18,7 +19,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 - `OffsetDateTime` и managed-поля `auto_now_add` / `auto_now`.
 - Защита от пустых mutation-запросов и случайных массовых update/delete.
 
-Проект находится в разработке. Миграции, relations, joins и PostgreSQL
+Проект находится в разработке. Automatic relations, joins и PostgreSQL
 executor пока не реализованы.
 
 ## Быстрый старт
@@ -57,27 +58,29 @@ struct User {
 Используйте модель через async SQLite database:
 
 ```rust
-use che_orm2::{Database, Model};
+use che_orm2::Database;
 
 #[tokio::main]
 async fn main() -> Result<(), che_orm2::OrmError> {
     let database = Database::connect("app.db")?;
     database.create_table::<User>().await?;
 
-    let user = User {
-        id: 0,
-        email: "alice@example.test".into(),
-        name: "Alice".into(),
-        is_active: true,
-        created_at: OffsetDateTime::now_utc(),
-        updated_at: OffsetDateTime::now_utc(),
-    };
-    database.insert(&user).await?;
+    let user = database
+        .create::<User>()
+        .set(User::EMAIL, "alice@example.test")
+        .set(User::NAME, "Alice")
+        .set(User::IS_ACTIVE, true)
+        .execute()
+        .await?;
 
     let users = database
-        .fetch_all(User::query().filter(User::NAME.eq("Alice")))
+        .query::<User>()
+        .filter(User::NAME.eq("Alice"))
+        .all()
         .await?;
+    let loaded = database.get::<User>(user.id).await?;
     println!("{users:?}");
+    println!("{loaded:?}");
     Ok(())
 }
 ```
@@ -115,6 +118,20 @@ let database = Database::connect_in_memory()?;
 
 ## CRUD и транзакции
 
+Основной facade автоматически ограничивает update/delete primary key:
+
+```rust
+let updated = database
+    .update::<User>(user.id)
+    .set(User::NAME, "Alice Cooper")
+    .execute()
+    .await?;
+
+let deleted = database.delete::<User>(user.id).await?;
+assert!(deleted);
+```
+
+Для сложных условий и массовых операций используйте низкоуровневый AST.
 `UPDATE` и `DELETE` должны иметь фильтр. Массовую операцию нужно разрешить
 явно через `.allow_all()`:
 
@@ -159,7 +176,13 @@ struct Post {
 Загрузить записи `has_many` можно через typed helper:
 
 ```rust
-let user_id = database.insert(&user).await?.last_insert_rowid.unwrap();
+let user = database
+    .create::<User>()
+    .set(User::EMAIL, "alice@example.test")
+    .set(User::NAME, "Alice")
+    .execute()
+    .await?;
+let user_id = user.id;
 let posts = database.fetch_by(Post::USER_ID, user_id).await?;
 ```
 

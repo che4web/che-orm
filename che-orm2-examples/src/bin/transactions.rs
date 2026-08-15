@@ -1,4 +1,4 @@
-use che_orm2::{Database, Model};
+use che_orm2::Database;
 use che_orm2_examples::ExampleUser;
 
 #[tokio::main]
@@ -33,7 +33,7 @@ async fn main() -> Result<(), che_orm2::OrmError> {
         .await;
 
     assert!(rollback.is_err());
-    let users = database.fetch_all(ExampleUser::query()).await?;
+    let users = database.all::<ExampleUser>().await?;
     println!("users after rollback: {}", users.len());
 
     Ok(())
