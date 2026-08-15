@@ -5,6 +5,7 @@ pub enum ColumnType {
     Integer,
     Text,
     Boolean,
+    DateTime,
 }
 
 pub trait ColumnTypeOf {
@@ -29,6 +30,12 @@ impl ColumnTypeOf for String {
 impl ColumnTypeOf for bool {
     fn column_type() -> ColumnType {
         ColumnType::Boolean
+    }
+}
+
+impl ColumnTypeOf for time::OffsetDateTime {
+    fn column_type() -> ColumnType {
+        ColumnType::DateTime
     }
 }
 
@@ -57,6 +64,8 @@ pub struct ColumnSchema {
     pub default: Option<&'static str>,
     pub check: Option<&'static str>,
     pub references: Option<ForeignKey>,
+    pub auto_now_add: bool,
+    pub auto_now: bool,
 }
 
 impl ColumnSchema {
@@ -70,6 +79,8 @@ impl ColumnSchema {
             default: None,
             check: None,
             references: None,
+            auto_now_add: false,
+            auto_now: false,
         }
     }
 }

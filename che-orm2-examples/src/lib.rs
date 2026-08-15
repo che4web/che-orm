@@ -1,16 +1,14 @@
-use crate::Model;
+use che_orm2::Model;
 use time::OffsetDateTime;
 
 #[derive(Debug, Model)]
-#[orm(table = "users", unique("email"), index("name"))]
-pub struct User {
+#[orm(table = "examples_users", index("name"))]
+pub struct ExampleUser {
     #[orm(primary_key)]
     pub id: i64,
     #[orm(unique)]
     pub email: String,
-    #[orm(check = "length(name) > 0")]
     pub name: String,
-    #[orm(default = "true")]
     pub is_active: bool,
     #[orm(auto_now_add)]
     pub created_at: OffsetDateTime,
@@ -18,15 +16,22 @@ pub struct User {
     pub updated_at: OffsetDateTime,
 }
 
-impl User {
-    pub fn new(name: String) -> Self {
+impl ExampleUser {
+    pub fn new(email: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: 0,
-            email: String::new(),
-            name,
+            email: email.into(),
+            name: name.into(),
             is_active: true,
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
         }
     }
+}
+
+pub fn database_schema_sql() -> String {
+    che_orm2::SqlCompiler::<che_orm2::SqliteDialect>::compile(
+        &ExampleUser::create_table().into_ast(),
+    )
+    .sql
 }

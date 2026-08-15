@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["che-orm2-macros"]
+members = ["che-orm2-macros", "che-orm2-examples"]
 
 [features]
 default = ["sqlite"]
@@ -14,6 +14,7 @@ sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
 [dependencies]
 che-orm2-macros = { path = "che-orm2-macros" }
 deadpool-sqlite = { version = "0.12", optional = true }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "time"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 thiserror = { version = "2", optional = true }
 tokio = { version = "1", optional = true, features = ["macros", "rt-multi-thread"] }

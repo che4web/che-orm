@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use time::OffsetDateTime;
+
 use crate::{OrderBy, OrderDirection};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -7,6 +9,7 @@ pub enum DatabaseValue {
     Integer(i64),
     Text(String),
     Boolean(bool),
+    DateTime(OffsetDateTime),
     Null,
 }
 
@@ -35,6 +38,12 @@ impl QueryValue<String> for &str {
 impl QueryValue<bool> for bool {
     fn into_query_value(self) -> DatabaseValue {
         DatabaseValue::Boolean(self)
+    }
+}
+
+impl QueryValue<OffsetDateTime> for OffsetDateTime {
+    fn into_query_value(self) -> DatabaseValue {
+        DatabaseValue::DateTime(self)
     }
 }
 

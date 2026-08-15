@@ -1,5 +1,6 @@
 use deadpool_sqlite::{Config, Pool, Runtime};
 use rusqlite::types::Value;
+use time::format_description::well_known::Rfc3339;
 
 use crate::{
     CompiledQuery, DatabaseValue, Model, QueryAst, QueryBuildError, SqlCompiler, SqliteDialect,
@@ -70,6 +71,9 @@ impl Database {
                 for index in compiled.indexes {
                     connection.execute_batch(&index)?;
                 }
+                for trigger in compiled.triggers {
+                    connection.execute_batch(&trigger)?;
+                }
                 Ok(ExecuteResult {
                     rows_affected: 0,
                     last_insert_rowid: None,
@@ -100,7 +104,7 @@ impl Database {
             .await?
             .interact(move |connection| {
                 let mut statement = connection.prepare(&compiled.sql)?;
-                let params = sqlite_params(&compiled);
+                let params = sqlite_params(&compiled)?;
                 let rows = statement.query_map(rusqlite::params_from_iter(params), M::from_row)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })
@@ -148,7 +152,7 @@ impl Database {
         pool.get()
             .await?
             .interact(move |connection| -> rusqlite::Result<ExecuteResult> {
-                let params = sqlite_params(&compiled);
+                let params = sqlite_params(&compiled)?;
                 let rows_affected =
                     connection.execute(&compiled.sql, rusqlite::params_from_iter(params))?;
                 Ok(ExecuteResult {
@@ -162,15 +166,19 @@ impl Database {
     }
 }
 
-fn sqlite_params(compiled: &CompiledQuery) -> Vec<Value> {
+fn sqlite_params(compiled: &CompiledQuery) -> rusqlite::Result<Vec<Value>> {
     compiled.params.iter().map(database_value).collect()
 }
 
-fn database_value(value: &DatabaseValue) -> Value {
+fn database_value(value: &DatabaseValue) -> rusqlite::Result<Value> {
     match value {
-        DatabaseValue::Integer(value) => Value::Integer(*value),
-        DatabaseValue::Text(value) => Value::Text(value.clone()),
-        DatabaseValue::Boolean(value) => Value::Integer(i64::from(*value)),
-        DatabaseValue::Null => Value::Null,
+        DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
+        DatabaseValue::Text(value) => Ok(Value::Text(value.clone())),
+        DatabaseValue::Boolean(value) => Ok(Value::Integer(i64::from(*value))),
+        DatabaseValue::DateTime(value) => value
+            .format(&Rfc3339)
+            .map(Value::Text)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into())),
+        DatabaseValue::Null => Ok(Value::Null),
     }
 }

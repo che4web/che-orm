@@ -45,6 +45,15 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         let field_type = field.ty;
         let field_attributes = parse_field_attributes(&field.attrs)?;
 
+        if (field_attributes.auto_now_add || field_attributes.auto_now)
+            && !is_offset_date_time(&field_type)
+        {
+            return Err(Error::new_spanned(
+                field_type,
+                "auto_now_add and auto_now require time::OffsetDateTime",
+            ));
+        }
+
         columns.push(LitStr::new(&column, field_name.span()));
         constants.push(quote! {
             pub const #constant: ::che_orm2::ModelField<Self, #field_type> =
@@ -53,6 +62,8 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
         let primary_key = field_attributes.primary_key;
         let unique = field_attributes.unique;
+        let auto_now_add = field_attributes.auto_now_add;
+        let auto_now = field_attributes.auto_now;
         let default = field_attributes
             .default
             .map(|value| quote! { column.default = Some(#value); });
@@ -81,6 +92,8 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             );
             column.primary_key = #primary_key;
             column.unique = #unique;
+            column.auto_now_add = #auto_now_add;
+            column.auto_now = #auto_now;
             #default
             #check
             #references
@@ -91,7 +104,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             #field_name: row.get(#index)?,
         });
 
-        if !field_attributes.primary_key {
+        if !field_attributes.primary_key && !auto_now_add && !auto_now {
             insert_values.push(quote! {
                 ::che_orm2::InsertValue {
                     column: ::che_orm2::ColumnRef::new(#table, #column),
@@ -210,6 +223,8 @@ struct FieldAttributes {
     check: Option<LitStr>,
     references: Option<LitStr>,
     on_delete: Option<LitStr>,
+    auto_now_add: bool,
+    auto_now: bool,
 }
 
 fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAttributes> {
@@ -220,6 +235,8 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
         check: None,
         references: None,
         on_delete: None,
+        auto_now_add: false,
+        auto_now: false,
     };
 
     for attribute in attributes {
@@ -239,6 +256,10 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
                 result.references = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("on_delete") {
                 result.on_delete = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("auto_now_add") {
+                result.auto_now_add = true;
+            } else if meta.path.is_ident("auto_now") {
+                result.auto_now = true;
             } else {
                 return Err(meta.error("unsupported field attribute"));
             }
@@ -247,4 +268,15 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
     }
 
     Ok(result)
+}
+
+fn is_offset_date_time(ty: &syn::Type) -> bool {
+    let syn::Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "OffsetDateTime")
 }
