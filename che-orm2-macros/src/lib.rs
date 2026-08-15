@@ -37,6 +37,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut schema_columns = Vec::with_capacity(fields.len());
     let mut row_fields = Vec::with_capacity(fields.len());
     let mut insert_values = Vec::with_capacity(fields.len());
+    let mut managed_update_values = Vec::with_capacity(fields.len());
 
     for (index, field) in fields.into_iter().enumerate() {
         let field_name = field.ident.expect("named fields always have identifiers");
@@ -114,6 +115,17 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 }
             });
         }
+
+        if auto_now {
+            managed_update_values.push(quote! {
+                ::che_orm2::Assignment {
+                    column: ::che_orm2::ColumnRef::new(#table, #column),
+                    value: ::che_orm2::QueryValue::<#field_type>::into_query_value(
+                        ::che_orm2::time::OffsetDateTime::now_utc(),
+                    ),
+                }
+            });
+        }
     }
 
     let unique_constraints = model_attributes.unique_constraints.iter().map(|columns| {
@@ -152,6 +164,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
             fn insert_values(&self) -> ::std::vec::Vec<::che_orm2::InsertValue> {
                 vec![#(#insert_values),*]
+            }
+
+            fn managed_update_values() -> ::std::vec::Vec<::che_orm2::Assignment> {
+                vec![#(#managed_update_values),*]
             }
         }
 

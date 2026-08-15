@@ -10,7 +10,6 @@ pub trait SqlDialect {
     fn column_type(column_type: ColumnType, output: &mut String);
     fn identity_primary_key(output: &mut String);
     fn timestamp_default(output: &mut String);
-    fn update_timestamp_trigger(table: &str, column: &str) -> Option<String>;
 }
 
 pub struct PostgresDialect;
@@ -36,10 +35,6 @@ impl SqlDialect for PostgresDialect {
     fn timestamp_default(output: &mut String) {
         output.push_str("CURRENT_TIMESTAMP");
     }
-
-    fn update_timestamp_trigger(_table: &str, _column: &str) -> Option<String> {
-        None
-    }
 }
 
 pub struct SqliteDialect;
@@ -62,12 +57,6 @@ impl SqlDialect for SqliteDialect {
     fn timestamp_default(output: &mut String) {
         output.push_str("(strftime('%Y-%m-%d %H:%M:%f', 'now'))");
     }
-
-    fn update_timestamp_trigger(table: &str, column: &str) -> Option<String> {
-        Some(format!(
-            "CREATE TRIGGER {table}_{column}_auto_update AFTER UPDATE ON {table} FOR EACH ROW WHEN NEW.{column} = OLD.{column} BEGIN UPDATE {table} SET {column} = (strftime('%Y-%m-%d %H:%M:%f', 'now')) WHERE rowid = OLD.rowid; END"
-        ))
-    }
 }
 
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
@@ -77,16 +66,17 @@ pub type CurrentDialect = PostgresDialect;
 pub type CurrentDialect = SqliteDialect;
 
 #[derive(Debug)]
+/// SQL text and ordered bound parameters.
 pub struct CompiledQuery {
     pub sql: String,
     pub params: Vec<DatabaseValue>,
 }
 
 #[derive(Debug)]
+/// Table DDL plus separately executable indexes.
 pub struct CompiledSchema {
     pub table: String,
     pub indexes: Vec<String>,
-    pub triggers: Vec<String>,
 }
 
 pub struct SqlCompiler<D> {
@@ -98,6 +88,7 @@ pub struct SqlCompiler<D> {
 pub type Compiler = SqlCompiler<CurrentDialect>;
 
 impl<D: SqlDialect> SqlCompiler<D> {
+    /// Compiles a model schema, including indexes.
     pub fn compile_schema(schema: &TableSchema) -> CompiledSchema {
         let table_ast = CreateTableAst {
             schema: schema.clone(),
@@ -126,19 +117,10 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 sql
             })
             .collect();
-        let triggers = schema
-            .columns
-            .iter()
-            .filter(|column| column.auto_now)
-            .filter_map(|column| D::update_timestamp_trigger(schema.name, column.name))
-            .collect();
-        CompiledSchema {
-            table,
-            indexes,
-            triggers,
-        }
+        CompiledSchema { table, indexes }
     }
 
+    /// Compiles a query AST using dialect `D`.
     pub fn compile(ast: &QueryAst) -> CompiledQuery {
         let mut compiler = Self {
             sql: String::new(),

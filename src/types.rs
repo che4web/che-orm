@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 use crate::{OrderBy, OrderDirection};
 
 #[derive(Debug, Clone, PartialEq)]
+/// Values bound to SQL placeholders.
 pub enum DatabaseValue {
     Integer(i64),
     Text(String),
@@ -90,6 +91,7 @@ pub enum CompareOp {
 }
 
 #[derive(Debug, Clone)]
+/// Boolean and comparison expression tree used by query builders.
 pub enum Expr {
     Column(ColumnRef),
     Value(DatabaseValue),
@@ -130,6 +132,7 @@ impl Expr {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// A typed reference to one model column.
 pub struct ModelField<M, T> {
     table: &'static str,
     column: &'static str,

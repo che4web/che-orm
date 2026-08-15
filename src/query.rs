@@ -70,6 +70,7 @@ pub enum QueryAst {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Errors detected while finalizing a query builder.
 pub enum QueryBuildError {
     EmptyInsert,
     EmptyUpdate,
@@ -82,12 +83,16 @@ pub enum QueryBuildError {
     },
 }
 
+/// Trait implemented by `#[derive(Model)]` for ORM models.
 pub trait Model: Sized {
     fn table_name() -> &'static str;
     fn columns() -> &'static [&'static str];
     fn schema() -> TableSchema;
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self>;
     fn insert_values(&self) -> Vec<InsertValue>;
+    fn managed_update_values() -> Vec<Assignment> {
+        Vec::new()
+    }
     fn query() -> SelectQuery<Self> {
         SelectQuery::new()
     }
@@ -245,7 +250,13 @@ impl<M: Model> UpdateQuery<M> {
         self.allow_all = true;
         self
     }
-    pub fn into_ast(self) -> Result<QueryAst, QueryBuildError> {
+    pub fn into_ast(mut self) -> Result<QueryAst, QueryBuildError> {
+        for managed in M::managed_update_values() {
+            self.ast
+                .assignments
+                .retain(|assignment| assignment.column.name != managed.column.name);
+            self.ast.assignments.push(managed);
+        }
         if self.ast.assignments.is_empty() {
             return Err(QueryBuildError::EmptyUpdate);
         }

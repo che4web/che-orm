@@ -1,8 +1,35 @@
+//! `che-orm2` — экспериментальная типизированная ORM для Rust.
+//!
+//! Runtime сейчас ориентирован на SQLite: [`Database`] предоставляет async
+//! pool, а [`Model`] derive генерирует metadata, row decoding и insert values.
+//! SQL можно также использовать отдельно через [`SqlCompiler`].
+//!
+//! Основной рабочий сценарий:
+//!
+//! ```no_run
+//! use che_orm2::{Database, Model};
+//!
+//! # #[derive(Debug, Model)]
+//! # #[orm(table = "users")]
+//! # struct User {
+//! #     #[orm(primary_key)]
+//! #     id: i64,
+//! #     name: String,
+//! # }
+//! # #[tokio::main]
+//! # async fn run() -> Result<(), che_orm2::OrmError> {
+//! let database = Database::connect_in_memory()?;
+//! database.create_table::<User>().await?;
+//! # Ok(())
+//! # }
+//! ```
+
 extern crate self as che_orm2;
 
 pub use che_orm2_macros::Model;
 
 pub use rusqlite;
+pub use time;
 
 mod query;
 mod schema;
@@ -12,7 +39,9 @@ mod types;
 #[cfg(feature = "sqlite")]
 mod connection;
 
+pub mod apps;
 pub mod models;
+pub mod settings;
 
 pub use query::*;
 pub use schema::*;

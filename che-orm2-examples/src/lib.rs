@@ -2,7 +2,7 @@ use che_orm2::Model;
 use time::OffsetDateTime;
 
 #[derive(Debug, Model)]
-#[orm(table = "examples_users", index("name"))]
+#[orm(table = "users", index("name"))]
 pub struct ExampleUser {
     #[orm(primary_key)]
     pub id: i64,
@@ -29,9 +29,19 @@ impl ExampleUser {
     }
 }
 
+#[derive(Debug, Model)]
+#[orm(table = "posts", index("user_id"))]
+pub struct ExamplePost {
+    #[orm(primary_key)]
+    pub id: i64,
+    #[orm(references = "users(id)", on_delete = "cascade")]
+    pub user_id: i64,
+    pub title: String,
+}
+
 pub fn database_schema_sql() -> String {
-    che_orm2::SqlCompiler::<che_orm2::SqliteDialect>::compile(
-        &ExampleUser::create_table().into_ast(),
-    )
-    .sql
+    che_orm2::SchemaSet::new()
+        .model::<ExampleUser>()
+        .model::<ExamplePost>()
+        .to_sql::<che_orm2::SqliteDialect>()
 }
