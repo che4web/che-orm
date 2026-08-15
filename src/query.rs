@@ -52,12 +52,14 @@ pub struct UpdateAst {
     pub assignments: Vec<Assignment>,
     pub filter: Option<Expr>,
     pub returning: Vec<ColumnRef>,
+    pub allow_all: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct DeleteAst {
     pub table: TableRef,
     pub filter: Option<Expr>,
+    pub allow_all: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,64 @@ pub enum QueryBuildError {
         table: &'static str,
         expected_table: &'static str,
     },
+    InvalidSchema(String),
+}
+
+impl QueryAst {
+    /// Validates a query before it is sent to a database.
+    pub fn validate(&self) -> Result<(), QueryBuildError> {
+        match self {
+            Self::Select(query) => {
+                validate_expr_table(query.filter.as_ref(), query.table.name)?;
+                validate_columns_table(
+                    query.table.name,
+                    query.order_by.iter().map(|order| &order.column),
+                )
+            }
+            Self::Insert(query) => {
+                if query.values.is_empty() {
+                    return Err(QueryBuildError::EmptyInsert);
+                }
+                validate_unique_columns(query.values.iter().map(|value| &value.column))?;
+                validate_columns_table(
+                    query.table.name,
+                    query.values.iter().map(|value| &value.column),
+                )
+            }
+            Self::Update(query) => {
+                if query.assignments.is_empty() {
+                    return Err(QueryBuildError::EmptyUpdate);
+                }
+                if query.filter.is_none() && !query.allow_all {
+                    return Err(QueryBuildError::MissingFilter);
+                }
+                validate_unique_columns(
+                    query
+                        .assignments
+                        .iter()
+                        .map(|assignment| &assignment.column),
+                )?;
+                validate_columns_table(
+                    query.table.name,
+                    query
+                        .assignments
+                        .iter()
+                        .map(|assignment| &assignment.column),
+                )?;
+                validate_expr_table(query.filter.as_ref(), query.table.name)
+            }
+            Self::Delete(query) => {
+                if query.filter.is_none() && !query.allow_all {
+                    return Err(QueryBuildError::MissingFilter);
+                }
+                validate_expr_table(query.filter.as_ref(), query.table.name)
+            }
+            Self::CreateTable(query) => query
+                .schema
+                .validate()
+                .map_err(|error| QueryBuildError::InvalidSchema(format!("{error:?}"))),
+        }
+    }
 }
 
 /// Trait implemented by `#[derive(Model)]` for ORM models.
@@ -216,6 +276,7 @@ impl<M: Model> UpdateQuery<M> {
                 assignments: Vec::new(),
                 filter: None,
                 returning: Vec::new(),
+                allow_all: false,
             },
             allow_all: false,
             _model: PhantomData,
@@ -270,6 +331,7 @@ impl<M: Model> UpdateQuery<M> {
                 .map(|assignment| &assignment.column),
         )?;
         validate_expr_table(self.ast.filter.as_ref(), self.ast.table.name)?;
+        self.ast.allow_all = self.allow_all;
         Ok(QueryAst::Update(self.ast))
     }
 }
@@ -286,6 +348,7 @@ impl<M: Model> DeleteQuery<M> {
             ast: DeleteAst {
                 table: TableRef::new(M::table_name()),
                 filter: None,
+                allow_all: false,
             },
             allow_all: false,
             _model: PhantomData,
@@ -303,11 +366,12 @@ impl<M: Model> DeleteQuery<M> {
         self.allow_all = true;
         self
     }
-    pub fn into_ast(self) -> Result<QueryAst, QueryBuildError> {
+    pub fn into_ast(mut self) -> Result<QueryAst, QueryBuildError> {
         if self.ast.filter.is_none() && !self.allow_all {
             return Err(QueryBuildError::MissingFilter);
         }
         validate_expr_table(self.ast.filter.as_ref(), self.ast.table.name)?;
+        self.ast.allow_all = self.allow_all;
         Ok(QueryAst::Delete(self.ast))
     }
 }
@@ -320,6 +384,16 @@ fn validate_unique_columns<'a>(
         if !names.insert(column.name) {
             return Err(QueryBuildError::DuplicateColumn(column.name));
         }
+    }
+    Ok(())
+}
+
+fn validate_columns_table<'a>(
+    table: &'static str,
+    columns: impl Iterator<Item = &'a ColumnRef>,
+) -> Result<(), QueryBuildError> {
+    for column in columns {
+        validate_column_table(column, table)?;
     }
     Ok(())
 }

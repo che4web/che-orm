@@ -1,4 +1,6 @@
-use crate::models::{Post, User};
+#[cfg(feature = "sqlite")]
+use crate::models::Post;
+use crate::models::User;
 use crate::{
     ColumnRef, DatabaseValue, Model, PostgresDialect, QueryBuildError, SqlCompiler, SqliteDialect,
 };
@@ -27,6 +29,27 @@ fn application_registry_preserves_app_and_dependency_order() {
 
     let sql = registry.to_sql::<SqliteDialect>();
     assert!(sql.find("CREATE TABLE users").unwrap() < sql.find("CREATE TABLE posts").unwrap());
+}
+
+#[test]
+fn schema_and_ast_validation_reject_invalid_metadata() {
+    let invalid_schema = crate::TableSchema {
+        name: "bad-table",
+        columns: Vec::new(),
+        unique_constraints: Vec::new(),
+        indexes: Vec::new(),
+    };
+    assert!(matches!(
+        invalid_schema.validate(),
+        Err(crate::SchemaError::InvalidIdentifier(_))
+    ));
+
+    let empty_insert = crate::QueryAst::Insert(crate::InsertAst {
+        table: crate::TableRef::new("users"),
+        values: Vec::new(),
+        returning: Vec::new(),
+    });
+    assert_eq!(empty_insert.validate(), Err(QueryBuildError::EmptyInsert));
 }
 
 #[test]

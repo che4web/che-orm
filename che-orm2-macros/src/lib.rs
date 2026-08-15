@@ -13,6 +13,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let model_attributes = parse_model_attributes(&input)?;
     let table = model_attributes.table;
+    validate_identifier(&table.value(), table.span(), "table")?;
     let fields = match input.data {
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => fields.named,
@@ -38,6 +39,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut row_fields = Vec::with_capacity(fields.len());
     let mut insert_values = Vec::with_capacity(fields.len());
     let mut managed_update_values = Vec::with_capacity(fields.len());
+    let mut primary_key_seen = false;
 
     for (index, field) in fields.into_iter().enumerate() {
         let field_name = field.ident.expect("named fields always have identifiers");
@@ -45,6 +47,16 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         let constant = Ident::new(&column.to_uppercase(), field_name.span());
         let field_type = field.ty;
         let field_attributes = parse_field_attributes(&field.attrs)?;
+
+        if field_attributes.primary_key {
+            if primary_key_seen {
+                return Err(Error::new_spanned(
+                    &field_name,
+                    "a model can have only one primary_key field",
+                ));
+            }
+            primary_key_seen = true;
+        }
 
         if (field_attributes.auto_now_add || field_attributes.auto_now)
             && !is_offset_date_time(&field_type)
@@ -206,6 +218,9 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
                     return Err(meta.error("constraint requires at least one column"));
                 }
                 let values = values.into_iter().collect::<Vec<_>>();
+                for value in &values {
+                    validate_identifier(&value.value(), value.span(), "constraint column")?;
+                }
                 if meta.path.is_ident("unique") {
                     unique_constraints.push(values);
                 } else {
@@ -269,9 +284,13 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
             } else if meta.path.is_ident("check") {
                 result.check = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("references") {
-                result.references = Some(meta.value()?.parse()?);
+                let value: LitStr = meta.value()?.parse()?;
+                validate_reference(&value.value(), value.span())?;
+                result.references = Some(value);
             } else if meta.path.is_ident("on_delete") {
-                result.on_delete = Some(meta.value()?.parse()?);
+                let value: LitStr = meta.value()?.parse()?;
+                validate_on_delete(&value.value(), value.span())?;
+                result.on_delete = Some(value);
             } else if meta.path.is_ident("auto_now_add") {
                 result.auto_now_add = true;
             } else if meta.path.is_ident("auto_now") {
@@ -281,6 +300,13 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
             }
             Ok(())
         })?;
+    }
+
+    if result.auto_now && result.auto_now_add {
+        return Err(Error::new_spanned(
+            &attributes[0],
+            "a field cannot use both auto_now and auto_now_add",
+        ));
     }
 
     Ok(result)
@@ -295,4 +321,50 @@ fn is_offset_date_time(ty: &syn::Type) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "OffsetDateTime")
+}
+
+fn validate_identifier(identifier: &str, span: proc_macro2::Span, kind: &str) -> syn::Result<()> {
+    let mut chars = identifier.chars();
+    let valid_start = chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic());
+    if valid_start && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            span,
+            format!("invalid {kind} identifier: {identifier}"),
+        ))
+    }
+}
+
+fn validate_reference(reference: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    let Some((table, column)) = reference.split_once('(') else {
+        return Err(Error::new(
+            span,
+            "references must use `table(column)` format",
+        ));
+    };
+    let Some(column) = column.strip_suffix(')') else {
+        return Err(Error::new(
+            span,
+            "references must use `table(column)` format",
+        ));
+    };
+    validate_identifier(table, span, "referenced table")?;
+    validate_identifier(column, span, "referenced column")
+}
+
+fn validate_on_delete(action: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    if matches!(
+        action.to_ascii_lowercase().as_str(),
+        "cascade" | "restrict" | "no action" | "set null" | "set default"
+    ) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            span,
+            format!("unsupported on_delete action: {action}"),
+        ))
+    }
 }

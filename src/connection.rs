@@ -70,6 +70,7 @@ impl Database {
 
     /// Executes a compiled AST query asynchronously.
     pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
+        ast.validate().map_err(OrmError::QueryBuild)?;
         let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
         self.execute_compiled(compiled).await
     }

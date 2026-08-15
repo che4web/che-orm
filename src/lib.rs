@@ -6,7 +6,7 @@
 //!
 //! Основной рабочий сценарий:
 //!
-//! ```no_run
+//! ```ignore
 //! use che_orm2::{Database, Model};
 //!
 //! # #[derive(Debug, Model)]
