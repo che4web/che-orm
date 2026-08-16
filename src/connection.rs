@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use deadpool_sqlite::{Config, Pool, Runtime};
 use rusqlite::{OptionalExtension, types::Value};
@@ -216,12 +216,23 @@ impl Database {
         I: IntoIterator<Item = V>,
         V: QueryValue<T>,
     {
-        let values = values.into_iter().collect::<Vec<_>>();
+        const SQLITE_SAFE_VARIABLE_LIMIT: usize = 900;
+        let values = values
+            .into_iter()
+            .map(QueryValue::<T>::into_query_value)
+            .collect::<Vec<_>>();
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        self.fetch_all(M::query().filter(field.in_values(values)))
-            .await
+        let mut result = Vec::new();
+        for chunk in values.chunks(SQLITE_SAFE_VARIABLE_LIMIT) {
+            let filter = Expr::In {
+                left: Box::new(Expr::Column(field.column())),
+                values: chunk.to_vec(),
+            };
+            result.extend(self.fetch_all(M::query().filter(filter)).await?);
+        }
+        Ok(result)
     }
 
     /// Runs a blocking SQLite closure in a pool worker transaction.
@@ -393,7 +404,10 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
     }
 
     /// Loads one foreign-key relation without per-row queries.
-    pub fn select_related<R>(self, relation: BelongsTo<M, R>) -> SelectRelatedQuery<'db, M, R> {
+    pub fn select_related<R, Relation, Key>(
+        self,
+        relation: BelongsTo<M, R, Relation, Key>,
+    ) -> SelectRelatedQuery<'db, M, R, Relation, Key> {
         SelectRelatedQuery {
             database: self.database,
             query: self.query,
@@ -402,7 +416,10 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
     }
 
     /// Loads a reverse foreign-key relation with one batched query.
-    pub fn prefetch_related<R>(self, relation: HasMany<M, R>) -> PrefetchRelatedQuery<'db, M, R> {
+    pub fn prefetch_related<R, Relation, Key>(
+        self,
+        relation: HasMany<M, R, Relation, Key>,
+    ) -> PrefetchRelatedQuery<'db, M, R, Relation, Key> {
         PrefetchRelatedQuery {
             database: self.database,
             query: self.query,
@@ -427,104 +444,233 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
 
 /// A model and its eagerly loaded `belongs_to` relation.
 #[derive(Debug)]
-pub struct WithOne<M, R> {
+pub struct WithOne<M, R, Relation = (), Key = i64> {
     pub model: M,
     pub related: R,
+    pub(crate) _relation: std::marker::PhantomData<Relation>,
+    pub(crate) _key: std::marker::PhantomData<Key>,
+}
+
+#[derive(Debug)]
+pub struct WithOptionalOne<M, R, Relation = ()> {
+    pub model: M,
+    pub related: Option<R>,
+    pub(crate) _relation: std::marker::PhantomData<Relation>,
 }
 
 /// A model and its eagerly loaded reverse relation.
 #[derive(Debug)]
-pub struct WithMany<M, R> {
+pub struct WithMany<M, R, Relation = (), Key = i64> {
     pub model: M,
     pub related: Vec<R>,
+    pub(crate) _relation: std::marker::PhantomData<Relation>,
+    pub(crate) _key: std::marker::PhantomData<Key>,
 }
 
 /// Query which materializes a model together with one related model.
-pub struct SelectRelatedQuery<'db, M, R> {
+pub struct SelectRelatedQuery<'db, M, R, Relation = (), Key = i64> {
     database: &'db Database,
     query: SelectQuery<M>,
-    relation: BelongsTo<M, R>,
+    relation: BelongsTo<M, R, Relation, Key>,
 }
 
-impl<M, R> SelectRelatedQuery<'_, M, R>
+impl<M, R, Relation> SelectRelatedQuery<'_, M, R, Relation, i64>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
-    pub async fn all(self) -> Result<Vec<WithOne<M, R>>, OrmError> {
-        let parents = self.database.fetch_all(self.query).await?;
-        let ids = parents
-            .iter()
-            .map(|parent| self.relation.foreign_key(parent))
-            .collect::<Vec<_>>();
-        let related = self.database.fetch_by_many(R::primary_key(), ids).await?;
-        let mut related_by_id = related
-            .into_iter()
-            .map(|model| (model.primary_key_value(), model))
-            .collect::<HashMap<_, _>>();
-
-        parents
-            .into_iter()
-            .map(|model| {
-                let id = self.relation.foreign_key(&model);
-                related_by_id
-                    .remove(&id)
-                    .map(|related| WithOne { model, related })
-                    .ok_or_else(|| {
-                        OrmError::Interaction(format!(
-                            "related row with primary key {id} could not be loaded"
-                        ))
-                    })
+    pub async fn all(self) -> Result<Vec<WithOne<M, R, Relation>>, OrmError>
+    where
+        Relation: Send + 'static,
+    {
+        let ast = self
+            .query
+            .into_joined_ast(self.relation)
+            .map_err(OrmError::QueryBuild)?;
+        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
+        let pool = self.database.pool.clone();
+        pool.get()
+            .await?
+            .interact(move |connection| {
+                configure_connection(connection)?;
+                load_joined_models::<M, R, Relation>(connection, &compiled)
             })
-            .collect()
+            .await
+            .map_err(|error| OrmError::Interaction(error.to_string()))?
+            .map_err(OrmError::from)
+    }
+}
+
+impl<M, R, Relation> SelectRelatedQuery<'_, M, R, Relation, Option<i64>>
+where
+    M: Model + Send + 'static,
+    R: Model + Send + 'static,
+{
+    pub async fn all(self) -> Result<Vec<WithOptionalOne<M, R, Relation>>, OrmError>
+    where
+        Relation: Send + 'static,
+    {
+        let ast = self
+            .query
+            .into_optional_joined_ast(self.relation)
+            .map_err(OrmError::QueryBuild)?;
+        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
+        let pool = self.database.pool.clone();
+        pool.get()
+            .await?
+            .interact(move |connection| {
+                configure_connection(connection)?;
+                load_optional_joined_models::<M, R, Relation>(connection, &compiled)
+            })
+            .await
+            .map_err(|error| OrmError::Interaction(error.to_string()))?
+            .map_err(OrmError::from)
     }
 }
 
 /// Query which materializes a model together with its reverse relation.
-pub struct PrefetchRelatedQuery<'db, M, R> {
+pub struct PrefetchRelatedQuery<'db, M, R, Relation = (), Key = i64> {
     database: &'db Database,
     query: SelectQuery<M>,
-    relation: HasMany<M, R>,
+    relation: HasMany<M, R, Relation, Key>,
 }
 
-impl<M, R> PrefetchRelatedQuery<'_, M, R>
+impl<M, R, Relation> PrefetchRelatedQuery<'_, M, R, Relation, i64>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
-    pub async fn all(self) -> Result<Vec<WithMany<M, R>>, OrmError> {
-        let parents = self.database.fetch_all(self.query).await?;
-        let parent_ids = parents
-            .iter()
-            .map(Model::primary_key_value)
-            .collect::<Vec<_>>();
-        let field = self.relation.field();
-        let related = self
-            .database
-            .fetch_by_many(
-                ModelField::<R, i64>::new(field.table, field.name),
-                parent_ids,
-            )
-            .await?;
-        let mut related_by_parent = HashMap::<i64, Vec<R>>::new();
-        for model in related {
-            related_by_parent
-                .entry(self.relation.foreign_key(&model))
-                .or_default()
-                .push(model);
-        }
-
-        Ok(parents
-            .into_iter()
-            .map(|model| {
-                let id = model.primary_key_value();
-                WithMany {
-                    model,
-                    related: related_by_parent.remove(&id).unwrap_or_default(),
+    pub async fn all(self) -> Result<Vec<WithMany<M, R, Relation>>, OrmError>
+    where
+        Relation: Send + 'static,
+    {
+        let parent_ast = self.query.into_ast().map_err(OrmError::QueryBuild)?;
+        let parent_compiled = SqlCompiler::<SqliteDialect>::compile(&parent_ast);
+        let relation = self.relation;
+        let pool = self.database.pool.clone();
+        pool.get()
+            .await?
+            .interact(move |connection| {
+                configure_connection(connection)?;
+                connection.execute_batch("BEGIN")?;
+                let result: rusqlite::Result<Vec<WithMany<M, R, Relation>>> = (|| {
+                    let parents = load_models::<M>(connection, &parent_compiled)?;
+                    let parent_ids = parents
+                        .iter()
+                        .map(Model::primary_key_value)
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let field = relation.field();
+                    let related = load_models_by_ids(
+                        connection,
+                        ModelField::<R, i64>::new(field.table, field.name),
+                        parent_ids,
+                    )?;
+                    let mut related_by_parent = HashMap::<i64, Vec<R>>::new();
+                    for model in related {
+                        related_by_parent
+                            .entry(relation.foreign_key(&model))
+                            .or_default()
+                            .push(model);
+                    }
+                    Ok(parents
+                        .into_iter()
+                        .map(|model| {
+                            let id = model.primary_key_value();
+                            WithMany {
+                                model,
+                                related: related_by_parent.remove(&id).unwrap_or_default(),
+                                _relation: std::marker::PhantomData,
+                                _key: std::marker::PhantomData,
+                            }
+                        })
+                        .collect())
+                })();
+                match result {
+                    Ok(value) => {
+                        connection.execute_batch("COMMIT")?;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        let _ = connection.execute_batch("ROLLBACK");
+                        Err(error)
+                    }
                 }
             })
-            .collect())
+            .await
+            .map_err(|error| OrmError::Interaction(error.to_string()))?
+            .map_err(OrmError::from)
     }
+}
+
+fn load_joined_models<M: Model, R: Model, Relation>(
+    connection: &rusqlite::Connection,
+    compiled: &CompiledQuery,
+) -> rusqlite::Result<Vec<WithOne<M, R, Relation>>> {
+    let mut statement = connection.prepare(&compiled.sql)?;
+    let params = sqlite_params(compiled)?;
+    let offset = M::columns().len();
+    let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok(WithOne {
+            model: M::from_row_at(row, 0)?,
+            related: R::from_row_at(row, offset)?,
+            _relation: std::marker::PhantomData,
+            _key: std::marker::PhantomData,
+        })
+    })?;
+    rows.collect()
+}
+
+fn load_optional_joined_models<M: Model, R: Model, Relation>(
+    connection: &rusqlite::Connection,
+    compiled: &CompiledQuery,
+) -> rusqlite::Result<Vec<WithOptionalOne<M, R, Relation>>> {
+    let mut statement = connection.prepare(&compiled.sql)?;
+    let params = sqlite_params(compiled)?;
+    let offset = M::columns().len();
+    let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
+        let related_id: Option<i64> = row.get(offset)?;
+        Ok(WithOptionalOne {
+            model: M::from_row_at(row, 0)?,
+            related: related_id
+                .map(|_| R::from_row_at(row, offset))
+                .transpose()?,
+            _relation: std::marker::PhantomData,
+        })
+    })?;
+    rows.collect()
+}
+
+fn load_models<M: Model>(
+    connection: &rusqlite::Connection,
+    compiled: &CompiledQuery,
+) -> rusqlite::Result<Vec<M>> {
+    let mut statement = connection.prepare(&compiled.sql)?;
+    let params = sqlite_params(compiled)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(params), M::from_row)?;
+    rows.collect()
+}
+
+fn load_models_by_ids<M: Model>(
+    connection: &rusqlite::Connection,
+    field: ModelField<M, i64>,
+    ids: Vec<i64>,
+) -> rusqlite::Result<Vec<M>> {
+    const SQLITE_SAFE_VARIABLE_LIMIT: usize = 900;
+    let mut result = Vec::new();
+    for chunk in ids.chunks(SQLITE_SAFE_VARIABLE_LIMIT) {
+        let ast = M::query()
+            .filter(Expr::In {
+                left: Box::new(Expr::Column(field.column())),
+                values: chunk.iter().copied().map(DatabaseValue::Integer).collect(),
+            })
+            .into_ast()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
+        result.extend(load_models(connection, &compiled)?);
+    }
+    Ok(result)
 }
 
 fn configure_connection(connection: &rusqlite::Connection) -> rusqlite::Result<()> {

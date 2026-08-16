@@ -1,6 +1,25 @@
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
-use syn::{Data, DeriveInput, Error, Fields, Ident, LitStr, Path, Token, parse_macro_input};
+use std::collections::HashSet;
+use syn::{
+    Data, DeriveInput, Error, Fields, Ident, LitStr, Path, Token, parse_macro_input,
+    spanned::Spanned,
+};
+
+fn orm_path() -> syn::Result<proc_macro2::TokenStream> {
+    match crate_name("che-orm2") {
+        Ok(FoundCrate::Itself) => Ok(quote!(crate)),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = Ident::new(&name, proc_macro2::Span::call_site());
+            Ok(quote!(::#ident))
+        }
+        Err(error) => Err(Error::new(
+            proc_macro2::Span::call_site(),
+            format!("could not resolve che-orm2 dependency: {error}"),
+        )),
+    }
+}
 
 #[proc_macro_derive(Model, attributes(orm))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
@@ -19,6 +38,7 @@ pub fn derive_model_serializer(input: TokenStream) -> TokenStream {
 }
 
 fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let orm = orm_path()?;
     let model = parse_serializer_model(&input.attrs)?;
     let serializer = input.ident.clone();
     let fields = match input.data {
@@ -45,13 +65,14 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         let name = field.ident.expect("named fields always have identifiers");
         let json_name = name.to_string();
         serialize_fields.push(quote! {
-            ::che_orm2::serde::ser::SerializeStruct::serialize_field(
+            #orm::serde::ser::SerializeStruct::serialize_field(
                 &mut state,
                 #json_name,
                 &self.#name,
             )?;
         });
         let mut nested_relation = None;
+        let mut relation_path = None;
         for attribute in &field.attrs {
             if !attribute.path().is_ident("serializer") {
                 continue;
@@ -67,15 +88,26 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                         }
                         nested_relation = Some((many, model));
                         Ok(())
+                    } else if meta.path.is_ident("relation") {
+                        relation_path = Some(meta.value()?.parse::<Path>()?);
+                        Ok(())
                     } else {
                         Err(meta.error(
-                            "unsupported serializer field attribute; expected read_only, many = Model or one = Model",
+                            "unsupported serializer field attribute; expected read_only, many = Model, one = Model or relation = Model::RELATION",
                         ))
                     }
                 })?;
         }
         if let Some((many, related_model)) = nested_relation {
-            nested.push((name, many, related_model));
+            let relation_path = relation_path.ok_or_else(|| {
+                Error::new_spanned(
+                    &name,
+                    "nested serializer fields require `relation = RelationMarker`",
+                )
+            })?;
+            let marker = relation_marker(&relation_path)?;
+            let optional = !many && is_option_type(&field.ty);
+            nested.push((name, many, related_model, marker, optional));
         } else {
             assignments.push(quote! { #name: model.#name });
         }
@@ -89,14 +121,20 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
 
     let has_nested = !nested.is_empty();
     let field_count = serialize_fields.len();
-    let conversion = if let Some((name, many, related_model)) = nested.into_iter().next() {
+    let conversion = if let Some((name, many, related_model, marker, optional)) =
+        nested.into_iter().next()
+    {
         let wrapper = if many {
-            quote! { ::che_orm2::WithMany<#model, #related_model> }
+            quote! { #orm::WithMany<#model, #related_model, #marker> }
+        } else if optional {
+            quote! { #orm::WithOptionalOne<#model, #related_model, #marker> }
         } else {
-            quote! { ::che_orm2::WithOne<#model, #related_model> }
+            quote! { #orm::WithOne<#model, #related_model, #marker> }
         };
         let nested_assignment = if many {
             quote! { #name: value.related.into_iter().map(::core::convert::Into::into).collect() }
+        } else if optional {
+            quote! { #name: value.related.map(::core::convert::Into::into) }
         } else {
             quote! { #name: ::core::convert::Into::into(value.related) }
         };
@@ -121,7 +159,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         quote! {
         impl ::core::convert::From<#model> for #serializer {
                 fn from(model: #model) -> Self {
-                    <Self as ::che_orm2::ModelSerializer>::from_model(model)
+                    <Self as #orm::ModelSerializer>::from_model(model)
                 }
             }
 
@@ -140,7 +178,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         quote! {}
     } else {
         quote! {
-            impl ::che_orm2::ModelSerializer for #serializer {
+            impl #orm::ModelSerializer for #serializer {
                 type Model = #model;
 
                 fn from_model(model: Self::Model) -> Self {
@@ -151,21 +189,21 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     };
 
     Ok(quote! {
-        impl ::che_orm2::serde::Serialize for #serializer {
+        impl #orm::serde::Serialize for #serializer {
             fn serialize<__Serializer>(
                 &self,
                 serializer: __Serializer,
             ) -> ::core::result::Result<__Serializer::Ok, __Serializer::Error>
             where
-                __Serializer: ::che_orm2::serde::Serializer,
+                __Serializer: #orm::serde::Serializer,
             {
-                let mut state = ::che_orm2::serde::Serializer::serialize_struct(
+                let mut state = #orm::serde::Serializer::serialize_struct(
                     serializer,
                     stringify!(#serializer),
                     #field_count,
                 )?;
                 #(#serialize_fields)*
-                ::che_orm2::serde::ser::SerializeStruct::end(state)
+                #orm::serde::ser::SerializeStruct::end(state)
             }
         }
 
@@ -182,6 +220,9 @@ fn parse_serializer_model(attributes: &[syn::Attribute]) -> syn::Result<Path> {
         }
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("model") {
+                if model.is_some() {
+                    return Err(meta.error("serializer model is declared more than once"));
+                }
                 model = Some(meta.value()?.parse()?);
                 Ok(())
             } else {
@@ -197,7 +238,49 @@ fn parse_serializer_model(attributes: &[syn::Attribute]) -> syn::Result<Path> {
     })
 }
 
+fn relation_marker(path: &Path) -> syn::Result<Ident> {
+    let mut segments = path.segments.iter();
+    let model = segments
+        .next()
+        .ok_or_else(|| Error::new_spanned(path, "relation must use `RelationMarker`"))?;
+    if segments.clone().next().is_none() {
+        return Ok(model.ident.clone());
+    }
+    let relation = segments
+        .next()
+        .ok_or_else(|| Error::new_spanned(path, "relation must use `RelationMarker`"))?;
+    if segments.next().is_some() {
+        return Err(Error::new_spanned(
+            path,
+            "relation must use `RelationMarker`",
+        ));
+    }
+    Ok(Ident::new(
+        &format!("{}{}Relation", model.ident, relation.ident),
+        path.span(),
+    ))
+}
+
+fn is_option_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "Option")
+}
+
+fn pascal_case(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_ascii_uppercase().to_string() + chars.as_str()
+}
+
 fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let orm = orm_path()?;
     let model_attributes = parse_model_attributes(&input)?;
     let table = model_attributes.table;
     validate_identifier(&table.value(), table.span(), "table")?;
@@ -226,10 +309,13 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut row_fields = Vec::with_capacity(fields.len());
     let mut insert_values = Vec::with_capacity(fields.len());
     let mut managed_update_values = Vec::with_capacity(fields.len());
+    let mut clone_fields = Vec::with_capacity(fields.len());
     let mut relation_constants = Vec::new();
+    let mut relation_markers = Vec::new();
     let mut primary_key_seen = false;
     let mut primary_key_constant = None;
     let mut primary_key_field = None;
+    let mut generated_constants = HashSet::new();
 
     for (index, field) in fields.into_iter().enumerate() {
         let field_name = field.ident.expect("named fields always have identifiers");
@@ -238,10 +324,37 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         let field_type = field.ty;
         let field_attributes = parse_field_attributes(&field.attrs)?;
 
-        if field_attributes.foreign_key.is_some() && !is_i64(&field_type) {
+        if !generated_constants.insert(constant.to_string()) {
+            return Err(Error::new_spanned(
+                &field_name,
+                format!("generated constant {constant} conflicts with another model field"),
+            ));
+        }
+
+        clone_fields.push(quote! {
+            #field_name: self.#field_name.clone(),
+        });
+
+        if field_attributes.foreign_key.is_some()
+            && !is_i64(&field_type)
+            && !is_option_i64(&field_type)
+        {
             return Err(Error::new_spanned(
                 &field_type,
                 "foreign_key currently requires an i64 field",
+            ));
+        }
+
+        if field_attributes.foreign_key.is_some()
+            && field_attributes
+                .on_delete
+                .as_ref()
+                .is_some_and(|action| action.value().eq_ignore_ascii_case("set null"))
+            && !is_option_i64(&field_type)
+        {
+            return Err(Error::new_spanned(
+                &field_type,
+                "on_delete = \"set null\" requires an Option<i64> foreign_key field",
             ));
         }
 
@@ -274,8 +387,8 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
         columns.push(LitStr::new(&column, field_name.span()));
         constants.push(quote! {
-            pub const #constant: ::che_orm2::ModelField<Self, #field_type> =
-                ::che_orm2::ModelField::new(#table, #column);
+            pub const #constant: #orm::ModelField<Self, #field_type> =
+                #orm::ModelField::new(#table, #column);
         });
 
         let primary_key = field_attributes.primary_key;
@@ -295,10 +408,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 .map(|value| quote! { Some(#value) })
                 .unwrap_or_else(|| quote! { None });
             quote! {
-                column.references = Some(::che_orm2::ForeignKey {
-                    target: #target.to_string(),
-                    on_delete: #on_delete,
-                });
+                column.references = Some(#orm::ForeignKey::new(
+                    #target,
+                    #on_delete,
+                ));
             }
         });
         let foreign_key = field_attributes.foreign_key.as_ref().map(|target| {
@@ -308,36 +421,54 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 .map(|value| quote! { Some(#value) })
                 .unwrap_or_else(|| quote! { None });
             quote! {
-                column.references = Some(::che_orm2::ForeignKey {
-                    target: format!(
+                column.references = Some(#orm::ForeignKey::new(
+                    format!(
                         "{}({})",
-                        <#target as ::che_orm2::Model>::table_name(),
-                        <#target as ::che_orm2::Model>::primary_key().column().name,
+                        <#target as #orm::Model>::table_name(),
+                        <#target as #orm::Model>::primary_key().column().name,
                     ),
-                    on_delete: #on_delete,
-                });
+                    #on_delete,
+                ));
             }
         });
         if let Some(target) = &field_attributes.foreign_key {
             let relation_name = column.strip_suffix("_id").unwrap_or(&column).to_uppercase();
             let relation_constant = Ident::new(&relation_name, field_name.span());
+            let marker_name = Ident::new(
+                &format!(
+                    "{}{}Relation",
+                    model,
+                    pascal_case(column.strip_suffix("_id").unwrap_or(&column))
+                ),
+                field_name.span(),
+            );
+            if !generated_constants.insert(relation_name.clone()) {
+                return Err(Error::new_spanned(
+                    &field_name,
+                    format!(
+                        "generated relation constant {relation_name} conflicts with a model field"
+                    ),
+                ));
+            }
             let reverse_name = format!("{}_set", model.to_string().to_lowercase());
             relation_constants.push(quote! {
-                pub const #relation_constant: ::che_orm2::BelongsTo<Self, #target> =
-                    ::che_orm2::BelongsTo::new(
+                pub const #relation_constant:
+                    #orm::BelongsTo<Self, #target, #marker_name, #field_type> =
+                    #orm::BelongsTo::new(
                         #table,
                         #column,
                         |model: &Self| model.#field_name,
                         #reverse_name,
                     );
             });
+            relation_markers.push(quote! { pub struct #marker_name; });
         }
 
         schema_columns.push(quote! {
-            let mut column = ::che_orm2::ColumnSchema::new(
+            let mut column = #orm::ColumnSchema::new(
                 #column,
-                <#field_type as ::che_orm2::ColumnTypeOf>::column_type(),
-                <#field_type as ::che_orm2::ColumnTypeOf>::nullable(),
+                <#field_type as #orm::ColumnTypeOf>::column_type(),
+                <#field_type as #orm::ColumnTypeOf>::nullable(),
             );
             column.primary_key = #primary_key;
             column.unique = #unique;
@@ -351,14 +482,14 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         });
 
         row_fields.push(quote! {
-            #field_name: row.get(#index)?,
+            #field_name: row.get(#index + offset)?,
         });
 
         if !field_attributes.primary_key && !auto_now_add && !auto_now {
             insert_values.push(quote! {
-                ::che_orm2::InsertValue {
-                    column: ::che_orm2::ColumnRef::new(#table, #column),
-                    value: ::che_orm2::QueryValue::<#field_type>::into_query_value(
+                #orm::InsertValue {
+                    column: #orm::ColumnRef::new(#table, #column),
+                    value: #orm::QueryValue::<#field_type>::into_query_value(
                         self.#field_name.clone(),
                     ),
                 }
@@ -367,10 +498,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
         if auto_now {
             managed_update_values.push(quote! {
-                ::che_orm2::Assignment {
-                    column: ::che_orm2::ColumnRef::new(#table, #column),
-                    value: ::che_orm2::QueryValue::<#field_type>::into_query_value(
-                        ::che_orm2::time::OffsetDateTime::now_utc(),
+                #orm::Assignment {
+                    column: #orm::ColumnRef::new(#table, #column),
+                    value: #orm::QueryValue::<#field_type>::into_query_value(
+                        #orm::time::OffsetDateTime::now_utc(),
                     ),
                 }
             });
@@ -393,7 +524,9 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     });
 
     Ok(quote! {
-        impl ::che_orm2::Model for #model {
+        #(#relation_markers)*
+
+        impl #orm::Model for #model {
             fn table_name() -> &'static str {
                 #table
             }
@@ -402,7 +535,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 &[#(#columns),*]
             }
 
-            fn primary_key() -> ::che_orm2::ModelField<Self, i64> {
+            fn primary_key() -> #orm::ModelField<Self, i64> {
                 Self::#primary_key_constant
             }
 
@@ -410,10 +543,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 self.#primary_key_field
             }
 
-            fn schema() -> ::che_orm2::TableSchema {
+            fn schema() -> #orm::TableSchema {
                 let mut columns = Vec::new();
                 #(#schema_columns)*
-                ::che_orm2::TableSchema {
+                #orm::TableSchema {
                     name: #table,
                     columns,
                     unique_constraints: vec![#(#unique_constraints),*],
@@ -421,18 +554,33 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 }
             }
 
-            fn from_row(row: &::che_orm2::rusqlite::Row<'_>) -> ::che_orm2::rusqlite::Result<Self> {
+            fn from_row(row: &#orm::rusqlite::Row<'_>) -> #orm::rusqlite::Result<Self> {
+                Self::from_row_at(row, 0)
+            }
+
+            fn from_row_at(
+                row: &#orm::rusqlite::Row<'_>,
+                offset: usize,
+            ) -> #orm::rusqlite::Result<Self> {
                 Ok(Self {
                     #(#row_fields)*
                 })
             }
 
-            fn insert_values(&self) -> ::std::vec::Vec<::che_orm2::InsertValue> {
+            fn insert_values(&self) -> ::std::vec::Vec<#orm::InsertValue> {
                 vec![#(#insert_values),*]
             }
 
-            fn managed_update_values() -> ::std::vec::Vec<::che_orm2::Assignment> {
+            fn managed_update_values() -> ::std::vec::Vec<#orm::Assignment> {
                 vec![#(#managed_update_values),*]
+            }
+        }
+
+        impl ::core::clone::Clone for #model {
+            fn clone(&self) -> Self {
+                Self {
+                    #(#clone_fields)*
+                }
             }
         }
 
@@ -596,6 +744,25 @@ fn is_i64(ty: &syn::Type) -> bool {
         syn::Type::Path(path) => path.qself.is_none() && path.path.is_ident("i64"),
         _ => false,
     }
+}
+
+fn is_option_i64(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    let Some(syn::GenericArgument::Type(inner)) = arguments.args.first() else {
+        return false;
+    };
+    is_i64(inner)
 }
 
 fn validate_identifier(identifier: &str, span: proc_macro2::Span, kind: &str) -> syn::Result<()> {

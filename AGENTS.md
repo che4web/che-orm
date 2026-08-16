@@ -54,6 +54,8 @@ before applications that define foreign keys to them.
   ORM models. This generates `Post::USER` and `Post::USER.reverse()`.
 - Use `#[orm(references = "table(column)")]` only for tables without an ORM
   model; it does not generate typed relations.
+- `foreign_key` supports `i64` and `Option<i64>`. Use `on_delete = "set null"`
+  only with `Option<i64>`.
 - Use `#[orm(auto_now_add)]` and `#[orm(auto_now)]` only with `OffsetDateTime`.
 - `auto_now` is updated by ORM-generated UPDATE statements. Raw SQL does not update it.
 - `Option<T>` maps to a nullable SQL column.
@@ -63,8 +65,10 @@ before applications that define foreign keys to them.
 `#[derive(ModelSerializer)]` generates a JSON serializer for materialized model
 data. It must not access `Database`. Use queryset `select_related` for
 `belongs_to` and `prefetch_related` for reverse relations before converting a
-result to a serializer. Nested fields use `#[serializer(many = Post)]` or
-`#[serializer(one = User)]` and accept only `WithMany`/`WithOne` results.
+result to a serializer. Nested fields use `#[serializer(many = Post, relation =
+PostUserRelation)]` or `#[serializer(one = User, relation = PostUserRelation)]` and accept
+only the matching `WithMany`/`WithOne` relation marker. Optional relations use
+`WithOptionalOne`.
 
 ## Migrations
 

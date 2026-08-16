@@ -1,0 +1,5 @@
+error: nested serializer fields require `relation = RelationMarker`
+  --> tests/ui/nested_relation_requires_relation.rs:24:5
+   |
+24 |     posts: Vec<PostSerializer>,
+   |     ^^^^^

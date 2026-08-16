@@ -212,10 +212,14 @@ struct UserSerializer {
     id: i64,
     email: String,
     name: String,
-    #[serializer(many = Post)]
+    #[serializer(many = Post, relation = PostUserRelation)]
     posts: Vec<PostSerializer>,
 }
 ```
+
+`PostUserRelation` генерируется рядом с моделью `Post`; его нужно импортировать
+из модуля модели. Это намеренная compile-time привязка serializer к конкретной
+foreign key relation.
 
 `UserSerializer` с nested-полем принимает только `WithMany<User, Post>`, то
 есть queryset обязан заранее вызвать `prefetch_related`. Serializer не

@@ -1,8 +1,8 @@
-use che_orm2::Database;
 use che_orm2_examples::{ExamplePost, ExampleUser};
+use orm::Database;
 
 #[tokio::main]
-async fn main() -> Result<(), che_orm2::OrmError> {
+async fn main() -> Result<(), orm::OrmError> {
     let database = Database::connect_configured()?;
 
     let suffix = std::time::SystemTime::now()

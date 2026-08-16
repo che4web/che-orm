@@ -1,10 +1,10 @@
-use che_orm2::Database;
 use che_orm2_examples::{
     ExamplePost, ExamplePostWithUserSerializer, ExampleUser, ExampleUserWithPostsSerializer,
 };
+use orm::Database;
 
 #[tokio::main]
-async fn main() -> Result<(), che_orm2::OrmError> {
+async fn main() -> Result<(), orm::OrmError> {
     let database = Database::connect_in_memory()?;
     database.create_table::<ExampleUser>().await?;
     database.create_table::<ExamplePost>().await?;

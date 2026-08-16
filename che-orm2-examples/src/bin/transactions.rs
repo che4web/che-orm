@@ -1,8 +1,8 @@
-use che_orm2::Database;
 use che_orm2_examples::ExampleUser;
+use orm::Database;
 
 #[tokio::main]
-async fn main() -> Result<(), che_orm2::OrmError> {
+async fn main() -> Result<(), orm::OrmError> {
     let database = Database::connect_configured()?;
 
     let suffix = std::time::SystemTime::now()
@@ -13,7 +13,7 @@ async fn main() -> Result<(), che_orm2::OrmError> {
     let rolled_back_email = format!("rolled-back-{suffix}@example.test");
 
     database
-        .transaction(move |connection| -> che_orm2::rusqlite::Result<()> {
+        .transaction(move |connection| -> orm::rusqlite::Result<()> {
             connection.execute(
                 "INSERT INTO users (email, name, is_active) VALUES (?1, ?2, ?3)",
                 (&committed_email, "Committed", true),
@@ -23,12 +23,12 @@ async fn main() -> Result<(), che_orm2::OrmError> {
         .await?;
 
     let rollback = database
-        .transaction(move |connection| -> che_orm2::rusqlite::Result<()> {
+        .transaction(move |connection| -> orm::rusqlite::Result<()> {
             connection.execute(
                 "INSERT INTO users (email, name, is_active) VALUES (?1, ?2, ?3)",
                 (&rolled_back_email, "Rolled back", true),
             )?;
-            Err(che_orm2::rusqlite::Error::InvalidQuery)
+            Err(orm::rusqlite::Error::InvalidQuery)
         })
         .await;
 

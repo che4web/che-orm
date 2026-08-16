@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 
 use crate::{
-    ColumnRef, CreateTableQuery, DatabaseValue, Expr, ModelField, QueryValue, TableRef, TableSchema,
+    ColumnRef, CompareOp, CreateTableQuery, DatabaseValue, Expr, ModelField, QueryValue, TableRef,
+    TableSchema,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -21,10 +22,24 @@ pub struct OrderBy {
 pub struct SelectAst {
     pub table: TableRef,
     pub columns: Vec<ColumnRef>,
+    pub joins: Vec<JoinAst>,
     pub filter: Option<Expr>,
     pub order_by: Vec<OrderBy>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinAst {
+    pub table: TableRef,
+    pub kind: JoinType,
+    pub on: Expr,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum JoinType {
+    Inner,
+    Left,
 }
 
 #[derive(Debug, Clone)]
@@ -150,9 +165,18 @@ pub trait Model: Sized {
     fn columns() -> &'static [&'static str];
     /// Returns the model's generated integer primary-key field.
     fn primary_key() -> ModelField<Self, i64>;
-    fn primary_key_value(&self) -> i64;
+    fn primary_key_value(&self) -> i64 {
+        panic!("Model::primary_key_value must be implemented for eager relations")
+    }
     fn schema() -> TableSchema;
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self>;
+    fn from_row_at(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Self> {
+        if offset == 0 {
+            Self::from_row(row)
+        } else {
+            Err(rusqlite::Error::InvalidColumnIndex(offset))
+        }
+    }
     fn insert_values(&self) -> Vec<InsertValue>;
     fn managed_update_values() -> Vec<Assignment> {
         Vec::new()
@@ -183,18 +207,18 @@ pub trait ModelSerializer: serde::Serialize + Sized {
 
 /// A typed forward foreign-key relation from one model to another.
 #[derive(Debug, Clone, Copy)]
-pub struct BelongsTo<From, To> {
+pub struct BelongsTo<From, To, Relation = (), Key = i64> {
     field: ColumnRef,
-    getter: fn(&From) -> i64,
+    getter: fn(&From) -> Key,
     related_name: &'static str,
-    _marker: PhantomData<fn() -> (From, To)>,
+    _marker: PhantomData<fn() -> (From, To, Relation, Key)>,
 }
 
-impl<From, To> BelongsTo<From, To> {
+impl<From, To, Relation, Key> BelongsTo<From, To, Relation, Key> {
     pub const fn new(
         table: &'static str,
         column: &'static str,
-        getter: fn(&From) -> i64,
+        getter: fn(&From) -> Key,
         related_name: &'static str,
     ) -> Self {
         Self {
@@ -209,11 +233,11 @@ impl<From, To> BelongsTo<From, To> {
         self.field
     }
 
-    pub fn foreign_key(&self, model: &From) -> i64 {
+    pub fn foreign_key(&self, model: &From) -> Key {
         (self.getter)(model)
     }
 
-    pub const fn reverse(&self) -> HasMany<To, From> {
+    pub const fn reverse(&self) -> HasMany<To, From, Relation, Key> {
         HasMany {
             field: self.field,
             getter: self.getter,
@@ -225,19 +249,19 @@ impl<From, To> BelongsTo<From, To> {
 
 /// A typed reverse foreign-key relation from one model to many related models.
 #[derive(Debug, Clone, Copy)]
-pub struct HasMany<From, To> {
+pub struct HasMany<From, To, Relation = (), Key = i64> {
     field: ColumnRef,
-    getter: fn(&To) -> i64,
+    getter: fn(&To) -> Key,
     related_name: &'static str,
-    _marker: PhantomData<fn() -> (From, To)>,
+    _marker: PhantomData<fn() -> (From, To, Relation, Key)>,
 }
 
-impl<From, To> HasMany<From, To> {
+impl<From, To, Relation, Key> HasMany<From, To, Relation, Key> {
     pub const fn field(&self) -> ColumnRef {
         self.field
     }
 
-    pub fn foreign_key(&self, model: &To) -> i64 {
+    pub fn foreign_key(&self, model: &To) -> Key {
         (self.getter)(model)
     }
 
@@ -262,6 +286,7 @@ impl<M: Model> SelectQuery<M> {
             ast: SelectAst {
                 table: TableRef::new(table),
                 columns,
+                joins: Vec::new(),
                 filter: None,
                 order_by: Vec::new(),
                 limit: None,
@@ -291,8 +316,49 @@ impl<M: Model> SelectQuery<M> {
         self
     }
     pub fn into_ast(self) -> Result<QueryAst, QueryBuildError> {
-        validate_expr_table(self.ast.filter.as_ref(), self.ast.table.name)?;
+        let mut tables = vec![self.ast.table.name];
+        tables.extend(self.ast.joins.iter().map(|join| join.table.name));
+        validate_expr_tables(self.ast.filter.as_ref(), &tables)?;
+        for join in &self.ast.joins {
+            validate_expr_tables(Some(&join.on), &tables)?;
+        }
         Ok(QueryAst::Select(self.ast))
+    }
+
+    pub fn into_joined_ast<R: Model, Relation>(
+        self,
+        relation: BelongsTo<M, R, Relation>,
+    ) -> Result<QueryAst, QueryBuildError> {
+        self.into_joined_ast_with_kind(relation, JoinType::Inner)
+    }
+
+    pub fn into_optional_joined_ast<R: Model, Relation>(
+        self,
+        relation: BelongsTo<M, R, Relation, Option<i64>>,
+    ) -> Result<QueryAst, QueryBuildError> {
+        self.into_joined_ast_with_kind(relation, JoinType::Left)
+    }
+
+    fn into_joined_ast_with_kind<R: Model, Relation, Key>(
+        mut self,
+        relation: BelongsTo<M, R, Relation, Key>,
+        kind: JoinType,
+    ) -> Result<QueryAst, QueryBuildError> {
+        self.ast.columns.extend(
+            R::columns()
+                .iter()
+                .map(|column| ColumnRef::new(R::table_name(), column)),
+        );
+        self.ast.joins.push(JoinAst {
+            table: TableRef::new(R::table_name()),
+            kind,
+            on: Expr::Compare {
+                left: Box::new(Expr::Column(relation.field())),
+                op: CompareOp::Eq,
+                right: Box::new(Expr::Column(R::primary_key().column())),
+            },
+        });
+        self.into_ast()
     }
 }
 
@@ -512,5 +578,38 @@ fn validate_column_table(column: &ColumnRef, table: &'static str) -> Result<(), 
             table: column.table,
             expected_table: table,
         })
+    }
+}
+
+fn validate_expr_tables(
+    expr: Option<&Expr>,
+    tables: &[&'static str],
+) -> Result<(), QueryBuildError> {
+    let Some(expr) = expr else {
+        return Ok(());
+    };
+    match expr {
+        Expr::Column(column) => {
+            if tables.contains(&column.table) {
+                Ok(())
+            } else {
+                Err(QueryBuildError::ForeignTableColumn {
+                    column: column.name,
+                    table: column.table,
+                    expected_table: tables[0],
+                })
+            }
+        }
+        Expr::Value(_) => Ok(()),
+        Expr::Compare { left, right, .. }
+        | Expr::And { left, right }
+        | Expr::Or { left, right } => {
+            validate_expr_tables(Some(left), tables)?;
+            validate_expr_tables(Some(right), tables)
+        }
+        Expr::In { left, .. } => validate_expr_tables(Some(left), tables),
+        Expr::Not(expr) | Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
+            validate_expr_tables(Some(expr), tables)
+        }
     }
 }

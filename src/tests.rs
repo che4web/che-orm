@@ -1,10 +1,32 @@
 #[cfg(feature = "sqlite")]
+use crate::apps::content::PostUserRelation;
+#[cfg(feature = "sqlite")]
 use crate::models::Post;
 use crate::models::User;
 use crate::{
     ColumnRef, DatabaseValue, Model, ModelSerializer, PostgresDialect, QueryBuildError,
     SqlCompiler, SqliteDialect,
 };
+
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Model)]
+#[orm(table = "optional_posts")]
+struct OptionalPost {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = User, on_delete = "set null")]
+    user_id: Option<i64>,
+    title: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = OptionalPost)]
+struct OptionalPostResponse {
+    id: i64,
+    #[serializer(one = User, relation = OptionalPostUserRelation)]
+    user: Option<UserResponse>,
+}
 
 #[derive(ModelSerializer)]
 #[serializer(model = User)]
@@ -32,7 +54,7 @@ struct PostResponse {
 struct UserWithPostsResponse {
     id: i64,
     name: String,
-    #[serializer(many = Post)]
+    #[serializer(many = Post, relation = PostUserRelation)]
     posts: Vec<PostResponse>,
 }
 
@@ -77,6 +99,8 @@ fn nested_model_serializer_accepts_only_prefetched_result() {
             user_id: 0,
             title: "First".into(),
         }],
+        _relation: std::marker::PhantomData,
+        _key: std::marker::PhantomData,
     };
     let response = UserWithPostsResponse::from(result);
     assert_eq!(response.posts.len(), 1);
@@ -85,6 +109,8 @@ fn nested_model_serializer_accepts_only_prefetched_result() {
     let responses = UserWithPostsResponse::many(vec![crate::WithMany {
         model: User::new("Bob".into()),
         related: Vec::new(),
+        _relation: std::marker::PhantomData,
+        _key: std::marker::PhantomData,
     }]);
     assert_eq!(responses.len(), 1);
 }
@@ -180,6 +206,23 @@ fn compiles_empty_in_expression_as_false() {
     let compiled = SqlCompiler::<SqliteDialect>::compile(&query);
     assert!(compiled.sql.ends_with("WHERE (1 = 0)"));
     assert!(compiled.params.is_empty());
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn compiles_select_related_as_one_join() {
+    let query = Post::query().into_joined_ast(Post::USER).unwrap();
+    let compiled = SqlCompiler::<SqliteDialect>::compile(&query);
+    assert_eq!(
+        compiled.sql,
+        "SELECT posts.id, posts.user_id, posts.title, users.id, users.email, users.name, users.is_active, users.created_at, users.updated_at FROM posts INNER JOIN users ON (posts.user_id = users.id)"
+    );
+
+    let optional_query = OptionalPost::query()
+        .into_optional_joined_ast(OptionalPost::USER)
+        .unwrap();
+    let optional_compiled = SqlCompiler::<SqliteDialect>::compile(&optional_query);
+    assert!(optional_compiled.sql.contains("LEFT JOIN users"));
 }
 
 #[test]
@@ -512,6 +555,15 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
         .await
         .unwrap();
 
+    let posts_with_users = database
+        .query::<Post>()
+        .select_related(Post::USER)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(posts_with_users.len(), 2);
+    assert!(posts_with_users.iter().all(|post| post.related.id > 0));
+
     let posts = database
         .fetch_by_many(Post::USER_ID, [user_id, second_user_id])
         .await
@@ -526,6 +578,9 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
             .unwrap()
             .is_empty()
     );
+    let many_ids = (0_i64..1_200).collect::<Vec<_>>();
+    let users_by_many_ids = database.fetch_by_many(User::ID, many_ids).await.unwrap();
+    assert_eq!(users_by_many_ids.len(), 2);
 
     let users_with_posts = database
         .query::<User>()
@@ -580,4 +635,59 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     );
 
     let _ = std::fs::remove_file(path);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_optional_foreign_key_uses_left_join_and_set_null() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<User>().await.unwrap();
+    database.create_table::<OptionalPost>().await.unwrap();
+    let user = database
+        .create::<User>()
+        .set(User::EMAIL, "optional@example.test")
+        .set(User::NAME, "Optional")
+        .set(User::IS_ACTIVE, true)
+        .execute()
+        .await
+        .unwrap();
+
+    database
+        .insert(&OptionalPost {
+            id: 0,
+            user_id: Some(user.id),
+            title: "Attached".into(),
+        })
+        .await
+        .unwrap();
+    database
+        .insert(&OptionalPost {
+            id: 0,
+            user_id: None,
+            title: "Detached".into(),
+        })
+        .await
+        .unwrap();
+
+    let rows = database
+        .query::<OptionalPost>()
+        .select_related(OptionalPost::USER)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.iter().filter(|row| row.related.is_some()).count(), 1);
+    assert_eq!(rows.iter().filter(|row| row.related.is_none()).count(), 1);
+    let serialized = OptionalPostResponse::many(rows);
+    assert_eq!(serialized.len(), 2);
+
+    assert!(database.delete::<User>(user.id).await.unwrap());
+    let detached = database
+        .all::<OptionalPost>()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|post| post.title == "Attached")
+        .unwrap();
+    assert_eq!(detached.user_id, None);
 }

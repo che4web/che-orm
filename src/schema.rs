@@ -53,8 +53,25 @@ impl<T: ColumnTypeOf> ColumnTypeOf for Option<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Foreign key metadata attached to a column.
 pub struct ForeignKey {
-    pub target: String,
-    pub on_delete: Option<&'static str>,
+    target: String,
+    on_delete: Option<&'static str>,
+}
+
+impl ForeignKey {
+    pub fn new(target: impl Into<String>, on_delete: Option<&'static str>) -> Self {
+        Self {
+            target: target.into(),
+            on_delete,
+        }
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn on_delete(&self) -> Option<&'static str> {
+        self.on_delete
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,8 +140,8 @@ impl TableSchema {
                 });
             }
             if let Some(reference) = &column.references {
-                validate_reference(&reference.target)?;
-                if let Some(action) = reference.on_delete {
+                validate_reference(reference.target())?;
+                if let Some(action) = reference.on_delete() {
                     if !matches!(
                         action.to_ascii_lowercase().as_str(),
                         "cascade" | "restrict" | "no action" | "set null" | "set default"
@@ -170,12 +187,12 @@ impl SchemaSet {
                     .and_then(|(table, column)| {
                         column.strip_suffix(')').map(|column| (table, column))
                     })
-                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target.clone()))?;
+                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target().into()))?;
                 let target = self
                     .tables
                     .iter()
                     .find(|candidate| candidate.name == target_table)
-                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target.clone()))?;
+                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target().into()))?;
                 if !target
                     .columns
                     .iter()

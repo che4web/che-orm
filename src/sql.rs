@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     ColumnRef, ColumnType, CompareOp, CreateTableAst, DatabaseValue, DeleteAst, Expr, InsertAst,
-    OrderDirection, QueryAst, SelectAst, TableSchema, UpdateAst,
+    JoinType, OrderDirection, QueryAst, SelectAst, TableSchema, UpdateAst,
 };
 
 pub trait SqlDialect {
@@ -227,6 +227,16 @@ impl<D: SqlDialect> SqlCompiler<D> {
         }
         self.sql.push_str(" FROM ");
         self.push_identifier(query.table.name);
+        for join in &query.joins {
+            self.sql.push(' ');
+            self.sql.push_str(match join.kind {
+                JoinType::Inner => "INNER JOIN ",
+                JoinType::Left => "LEFT JOIN ",
+            });
+            self.push_identifier(join.table.name);
+            self.sql.push_str(" ON ");
+            self.compile_expr(&join.on);
+        }
         if let Some(filter) = &query.filter {
             self.sql.push_str(" WHERE ");
             self.compile_expr(filter);
@@ -344,8 +354,8 @@ impl<D: SqlDialect> SqlCompiler<D> {
             }
             if let Some(reference) = &column.references {
                 self.sql.push_str(" REFERENCES ");
-                self.sql.push_str(&reference.target);
-                if let Some(on_delete) = reference.on_delete {
+                self.sql.push_str(reference.target());
+                if let Some(on_delete) = reference.on_delete() {
                     self.sql.push_str(" ON DELETE ");
                     self.sql.push_str(&on_delete.to_uppercase());
                 }

@@ -1,5 +1,14 @@
-use che_orm2::{Model, ModelSerializer};
+use orm::{Model, ModelSerializer};
 use time::OffsetDateTime;
+
+#[allow(dead_code)]
+#[derive(orm::Model)]
+#[orm(table = "aliased_models")]
+struct AliasedModel {
+    #[orm(primary_key)]
+    id: i64,
+    name: String,
+}
 
 #[derive(Debug, Model)]
 #[orm(table = "users", index("name"))]
@@ -62,7 +71,7 @@ pub struct ExamplePostSerializer {
 pub struct ExampleUserWithPostsSerializer {
     pub id: i64,
     pub name: String,
-    #[serializer(many = ExamplePost)]
+    #[serializer(many = ExamplePost, relation = ExamplePostUserRelation)]
     pub posts: Vec<ExamplePostSerializer>,
 }
 
@@ -71,13 +80,13 @@ pub struct ExampleUserWithPostsSerializer {
 pub struct ExamplePostWithUserSerializer {
     pub id: i64,
     pub title: String,
-    #[serializer(one = ExampleUser)]
+    #[serializer(one = ExampleUser, relation = ExamplePostUserRelation)]
     pub user: ExampleUserSerializer,
 }
 
 pub fn database_schema_sql() -> String {
-    che_orm2::SchemaSet::new()
+    orm::SchemaSet::new()
         .model::<ExampleUser>()
         .model::<ExamplePost>()
-        .to_sql::<che_orm2::SqliteDialect>()
+        .to_sql::<orm::SqliteDialect>()
 }

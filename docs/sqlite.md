@@ -218,6 +218,16 @@ let users = database
 быть передан в serializer. Serializer не получает `Database` и не выполняет
 дополнительные запросы.
 
+Nullable foreign key поддерживает `LEFT JOIN`:
+
+```rust
+#[orm(foreign_key = User, on_delete = "set null")]
+user_id: Option<i64>,
+```
+
+Такой `select_related` возвращает `WithOptionalOne<Post, User>`, где `related`
+может быть `None`.
+
 ## Транзакции
 
 ```rust
