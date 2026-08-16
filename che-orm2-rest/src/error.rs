@@ -17,6 +17,10 @@ pub enum RestError {
     NotFound,
     #[error(transparent)]
     Filter(#[from] crate::FilterError),
+    #[error("forbidden")]
+    Forbidden,
+    #[error("unauthorized")]
+    Unauthorized,
 }
 
 pub type RestResult<T> = Result<T, RestError>;
@@ -26,6 +30,8 @@ impl IntoResponse for RestError {
         let status = match self {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Filter(_) => StatusCode::BAD_REQUEST,
+            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Json(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Orm(che_orm2::OrmError::QueryBuild(che_orm2::QueryBuildError::EmptyUpdate)) => {
                 StatusCode::BAD_REQUEST

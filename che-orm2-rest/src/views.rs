@@ -1,13 +1,13 @@
 use std::{collections::HashMap, marker::PhantomData};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::get,
 };
-use che_orm2::{Model, ModelSerializer, ModelWriteSerializer};
+use che_orm2::{DatabaseQuery, Model, ModelSerializer, ModelWriteSerializer};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
@@ -15,6 +15,7 @@ use crate::{
     RestError, RestResult, RestState,
     filters::{FilterError, FilterSet, FilterSetSpec},
     openapi::{OpenApiOptions, openapi_json_for},
+    permissions::{AuthenticatedUser, Permission, ViewAction},
 };
 
 pub trait ViewSet: Clone + Send + Sync + 'static {
@@ -24,11 +25,40 @@ pub trait ViewSet: Clone + Send + Sync + 'static {
         + Send
         + 'static;
     type FilterSet: FilterSetSpec<Model = Self::Model> + Default;
+    type Permission: Permission<Self::Model> + Default;
 
     fn path(&self) -> &'static str;
 
     fn filterset(&self) -> Self::FilterSet {
         Default::default()
+    }
+
+    fn list_query<'db>(
+        &self,
+        query: DatabaseQuery<'db, Self::Model>,
+    ) -> DatabaseQuery<'db, Self::Model> {
+        query
+    }
+
+    fn retrieve_query<'db>(
+        &self,
+        query: DatabaseQuery<'db, Self::Model>,
+    ) -> DatabaseQuery<'db, Self::Model> {
+        query
+    }
+
+    fn create_input(
+        &self,
+        input: <Self::Serializer as ModelWriteSerializer>::CreateInput,
+    ) -> <Self::Serializer as ModelWriteSerializer>::CreateInput {
+        input
+    }
+
+    fn patch_input(
+        &self,
+        input: <Self::Serializer as ModelWriteSerializer>::PatchInput,
+    ) -> <Self::Serializer as ModelWriteSerializer>::PatchInput {
+        input
     }
 }
 
@@ -67,6 +97,7 @@ where
     type Model = M;
     type Serializer = S;
     type FilterSet = FilterSet<M>;
+    type Permission = crate::permissions::AllowAny;
 
     fn path(&self) -> &'static str {
         self.path
@@ -116,6 +147,7 @@ async fn openapi_handler<V: ViewSet>(
 
 async fn list<V>(
     State((state, viewset)): State<(RestState, V)>,
+    user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> RestResult<impl IntoResponse>
 where
@@ -123,14 +155,21 @@ where
     V::Serializer: Serialize,
 {
     let filterset = viewset.filterset();
-    let count_query = filterset.apply(state.database().query::<V::Model>(), &params)?;
+    let permission = V::Permission::default();
+    let user = user.as_ref().map(|extension| &extension.0);
+    permission.check(&state, user, ViewAction::List)?;
+    let base_query = viewset.list_query(state.database().query::<V::Model>());
+    let count_query = filterset.apply(base_query, &params)?;
     let count = state
         .database()
         .count_query(count_query.into_select_query())
         .await?;
     let offset = parse_page_param(&params, "offset")?.unwrap_or(0);
     let limit = parse_page_param(&params, "limit")?.unwrap_or(20);
-    let query = filterset.apply(state.database().query::<V::Model>(), &params)?;
+    let query = filterset.apply(
+        viewset.list_query(state.database().query::<V::Model>()),
+        &params,
+    )?;
     let rows = query
         .limit(limit)
         .offset(offset)
@@ -160,45 +199,64 @@ fn parse_page_param(
 }
 
 async fn retrieve<V>(
-    State((state, _viewset)): State<(RestState, V)>,
+    State((state, viewset)): State<(RestState, V)>,
+    user: Option<Extension<AuthenticatedUser>>,
     Path(id): Path<i64>,
 ) -> RestResult<impl IntoResponse>
 where
     V: ViewSet,
     V::Serializer: Serialize,
 {
-    let model = state
-        .database()
-        .get::<V::Model>(id)
+    let permission = V::Permission::default();
+    let user = user.as_ref().map(|extension| &extension.0);
+    permission.check(&state, user, ViewAction::Retrieve)?;
+    let model = viewset
+        .retrieve_query(state.database().query::<V::Model>())
+        .filter(V::Model::primary_key().eq(id))
+        .first()
         .await?
         .ok_or(RestError::NotFound)?;
+    permission.check_object(&state, user, ViewAction::Retrieve, &model)?;
     Ok(Json(serde_json::to_value(V::Serializer::from_input(
         model,
     ))?))
 }
 
 async fn destroy<V>(
-    State((state, _viewset)): State<(RestState, V)>,
+    State((state, viewset)): State<(RestState, V)>,
+    user: Option<Extension<AuthenticatedUser>>,
     Path(id): Path<i64>,
 ) -> RestResult<impl IntoResponse>
 where
     V: ViewSet,
 {
-    if !state.database().delete::<V::Model>(id).await? {
-        return Err(RestError::NotFound);
-    }
+    let permission = V::Permission::default();
+    let user = user.as_ref().map(|extension| &extension.0);
+    permission.check(&state, user, ViewAction::Delete)?;
+    let model = viewset
+        .retrieve_query(state.database().query::<V::Model>())
+        .filter(V::Model::primary_key().eq(id))
+        .first()
+        .await?
+        .ok_or(RestError::NotFound)?;
+    permission.check_object(&state, user, ViewAction::Delete, &model)?;
+    state.database().delete::<V::Model>(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create<V>(
-    State((state, _viewset)): State<(RestState, V)>,
+    State((state, viewset)): State<(RestState, V)>,
+    user: Option<Extension<AuthenticatedUser>>,
     Json(input): Json<<V::Serializer as ModelWriteSerializer>::CreateInput>,
 ) -> RestResult<impl IntoResponse>
 where
     V: ViewSet,
     V::Serializer: Serialize,
 {
-    let model = V::Serializer::create(state.database(), input).await?;
+    let permission = V::Permission::default();
+    let user = user.as_ref().map(|extension| &extension.0);
+    permission.check(&state, user, ViewAction::Create)?;
+    let model = V::Serializer::create(state.database(), viewset.create_input(input)).await?;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::to_value(V::Serializer::from_input(model))?),
@@ -206,7 +264,8 @@ where
 }
 
 async fn patch<V>(
-    State((state, _viewset)): State<(RestState, V)>,
+    State((state, viewset)): State<(RestState, V)>,
+    user: Option<Extension<AuthenticatedUser>>,
     Path(id): Path<i64>,
     Json(input): Json<<V::Serializer as ModelWriteSerializer>::PatchInput>,
 ) -> RestResult<impl IntoResponse>
@@ -214,7 +273,17 @@ where
     V: ViewSet,
     V::Serializer: Serialize,
 {
-    let model = V::Serializer::patch(state.database(), id, input)
+    let permission = V::Permission::default();
+    let user = user.as_ref().map(|extension| &extension.0);
+    permission.check(&state, user, ViewAction::Patch)?;
+    let current = viewset
+        .retrieve_query(state.database().query::<V::Model>())
+        .filter(V::Model::primary_key().eq(id))
+        .first()
+        .await?
+        .ok_or(RestError::NotFound)?;
+    permission.check_object(&state, user, ViewAction::Patch, &current)?;
+    let model = V::Serializer::patch(state.database(), id, viewset.patch_input(input))
         .await?
         .ok_or(RestError::NotFound)?;
     Ok(Json(serde_json::to_value(V::Serializer::from_input(
