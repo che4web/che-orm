@@ -67,8 +67,8 @@ data. It must not access `Database`. Use queryset `select_related` for
 `belongs_to` and `prefetch_related` for reverse relations before converting a
 result to a serializer. Nested fields use `#[serializer(many = Post, relation =
 PostUserRelation)]` or `#[serializer(one = User, relation = PostUserRelation)]` and accept
-only the matching `WithMany`/`WithOne` relation marker. Optional relations use
-`WithOptionalOne`.
+only the matching `WithMany`/`WithOne`/`LoadedMany` relation marker. Optional
+relations use `WithOptionalOne`.
 
 ## Migrations
 

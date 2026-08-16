@@ -107,29 +107,32 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             })?;
             let marker = relation_marker(&relation_path)?;
             let optional = !many && is_option_type(&field.ty);
-            nested.push((name, many, related_model, marker, optional));
+            let serializer_type = nested_serializer_type(&field.ty, many, optional)?;
+            nested.push((name, many, related_model, marker, optional, serializer_type));
         } else {
             assignments.push(quote! { #name: model.#name });
         }
     }
-    if nested.len() > 1 {
-        return Err(Error::new(
-            proc_macro2::Span::call_site(),
-            "a ModelSerializer currently supports one nested relation field",
-        ));
-    }
-
     let has_nested = !nested.is_empty();
     let field_count = serialize_fields.len();
-    let conversion = if let Some((name, many, related_model, marker, optional)) =
-        nested.into_iter().next()
-    {
+    let conversion = if nested.len() == 1 {
+        let (name, many, _related_model, marker, optional, serializer_type) =
+            nested.into_iter().next().unwrap();
+        let child_input = quote! { <#serializer_type as #orm::ModelSerializer>::Input };
         let wrapper = if many {
-            quote! { #orm::WithMany<#model, #related_model, #marker> }
+            quote! { #orm::WithMany<#model, #child_input, #marker> }
         } else if optional {
-            quote! { #orm::WithOptionalOne<#model, #related_model, #marker> }
+            quote! { #orm::WithOptionalOne<#model, #child_input, #marker> }
         } else {
-            quote! { #orm::WithOne<#model, #related_model, #marker> }
+            quote! { #orm::WithOne<#model, #child_input, #marker> }
+        };
+        let loaded_wrapper = quote! {
+            #orm::Loaded<#model, (#orm::LoadedMany<#child_input, #marker>,)>
+        };
+        let many_input = if many {
+            loaded_wrapper.clone()
+        } else {
+            wrapper.clone()
         };
         let nested_assignment = if many {
             quote! { #name: value.related.into_iter().map(::core::convert::Into::into).collect() }
@@ -137,6 +140,34 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             quote! { #name: value.related.map(::core::convert::Into::into) }
         } else {
             quote! { #name: ::core::convert::Into::into(value.related) }
+        };
+        let loaded_conversion = if many {
+            quote! {
+                impl ::core::convert::From<#loaded_wrapper> for #serializer {
+                    fn from(value: #loaded_wrapper) -> Self {
+                        let model = value.model;
+                        let (relation,) = value.relations;
+                        Self {
+                            #(#assignments,)*
+                            #name: relation.related
+                                .into_iter()
+                                .map(::core::convert::Into::into)
+                                .collect()
+                        }
+                    }
+                }
+
+                impl #orm::ModelSerializer for #serializer {
+                    type Model = #model;
+                    type Input = #loaded_wrapper;
+
+                    fn from_input(value: Self::Input) -> Self {
+                        <Self as ::core::convert::From<#loaded_wrapper>>::from(value)
+                    }
+                }
+            }
+        } else {
+            quote! {}
         };
         quote! {
             impl ::core::convert::From<#wrapper> for #serializer {
@@ -146,10 +177,70 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                 }
             }
 
+            #loaded_conversion
+
             impl #serializer {
                 pub fn many<I>(values: I) -> ::std::vec::Vec<Self>
                 where
-                    I: ::core::iter::IntoIterator<Item = #wrapper>,
+                    I: ::core::iter::IntoIterator<Item = #many_input>,
+                {
+                    values.into_iter().map(::core::convert::Into::into).collect()
+                }
+            }
+        }
+    } else if nested.len() > 1 {
+        let mut wrappers = Vec::new();
+        let mut relation_vars = Vec::new();
+        let mut nested_assignments = Vec::new();
+        for (index, (name, many, _related_model, marker, optional, serializer_type)) in
+            nested.into_iter().enumerate()
+        {
+            if !many || optional {
+                return Err(Error::new_spanned(
+                    name,
+                    "multiple nested fields currently support only `many` relations",
+                ));
+            }
+            let relation_var = Ident::new(
+                &format!("__relation{index}"),
+                proc_macro2::Span::call_site(),
+            );
+            relation_vars.push(relation_var.clone());
+            let child_input = quote! { <#serializer_type as #orm::ModelSerializer>::Input };
+            wrappers.push(quote! { #orm::LoadedMany<#child_input, #marker> });
+            nested_assignments.push(quote! {
+                #name: #relation_var.related
+                    .into_iter()
+                    .map(::core::convert::Into::into)
+                    .collect()
+            });
+        }
+        let loaded_type = quote! {
+            #orm::Loaded<#model, (#(#wrappers),*,)>
+        };
+        let destructure = quote! { let (#(#relation_vars),*,) = value.relations; };
+        quote! {
+            impl ::core::convert::From<#loaded_type> for #serializer {
+                fn from(value: #loaded_type) -> Self {
+                    let model = value.model;
+                    #destructure
+                    Self { #(#assignments,)* #(#nested_assignments),* }
+                }
+            }
+
+            impl #orm::ModelSerializer for #serializer {
+                type Model = #model;
+                type Input = #loaded_type;
+
+                fn from_input(value: Self::Input) -> Self {
+                    <Self as ::core::convert::From<#loaded_type>>::from(value)
+                }
+            }
+
+            impl #serializer {
+                pub fn many<I>(values: I) -> ::std::vec::Vec<Self>
+                where
+                    I: ::core::iter::IntoIterator<Item = #loaded_type>,
                 {
                     values.into_iter().map(::core::convert::Into::into).collect()
                 }
@@ -159,11 +250,15 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         quote! {
         impl ::core::convert::From<#model> for #serializer {
                 fn from(model: #model) -> Self {
-                    <Self as #orm::ModelSerializer>::from_model(model)
+                    <Self as #orm::ModelSerializer>::from_input(model)
                 }
             }
 
             impl #serializer {
+                pub fn from_model(model: #model) -> Self {
+                    <Self as #orm::ModelSerializer>::from_input(model)
+                }
+
                 pub fn many<I>(values: I) -> ::std::vec::Vec<Self>
                 where
                     I: ::core::iter::IntoIterator<Item = #model>,
@@ -180,8 +275,9 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         quote! {
             impl #orm::ModelSerializer for #serializer {
                 type Model = #model;
+                type Input = #model;
 
-                fn from_model(model: Self::Model) -> Self {
+                fn from_input(model: Self::Input) -> Self {
                     Self { #(#assignments),* }
                 }
             }
@@ -269,6 +365,62 @@ fn is_option_type(ty: &syn::Type) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "Option")
+}
+
+fn nested_serializer_type(ty: &syn::Type, many: bool, optional: bool) -> syn::Result<Path> {
+    let inner = if many {
+        let syn::Type::Path(path) = ty else {
+            return Err(Error::new_spanned(
+                ty,
+                "many serializer field must be Vec<Serializer>",
+            ));
+        };
+        let segment = path.path.segments.last().ok_or_else(|| {
+            Error::new_spanned(ty, "many serializer field must be Vec<Serializer>")
+        })?;
+        if segment.ident != "Vec" {
+            return Err(Error::new_spanned(
+                ty,
+                "many serializer field must be Vec<Serializer>",
+            ));
+        }
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return Err(Error::new_spanned(
+                ty,
+                "many serializer field must be Vec<Serializer>",
+            ));
+        };
+        arguments.args.first().cloned()
+    } else if optional {
+        let syn::Type::Path(path) = ty else {
+            return Err(Error::new_spanned(
+                ty,
+                "optional relation must be Option<Serializer>",
+            ));
+        };
+        let segment = path.path.segments.last().ok_or_else(|| {
+            Error::new_spanned(ty, "optional relation must be Option<Serializer>")
+        })?;
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return Err(Error::new_spanned(
+                ty,
+                "optional relation must be Option<Serializer>",
+            ));
+        };
+        arguments.args.first().cloned()
+    } else {
+        match ty {
+            syn::Type::Path(_) => Some(syn::GenericArgument::Type(ty.clone())),
+            _ => None,
+        }
+    };
+    match inner {
+        Some(syn::GenericArgument::Type(syn::Type::Path(path))) => Ok(path.path),
+        _ => Err(Error::new_spanned(
+            ty,
+            "nested serializer field must contain a serializer type",
+        )),
+    }
 }
 
 fn pascal_case(value: &str) -> String {

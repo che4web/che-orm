@@ -224,6 +224,22 @@ foreign key relation.
 `UserSerializer` с nested-полем принимает только `WithMany<User, Post>`, то
 есть queryset обязан заранее вызвать `prefetch_related`. Serializer не
 принимает `Database`, не выполняет запросы и не может создать N+1.
+Несколько reverse relations загружаются цепочкой и сериализуются как typed
+tuple:
+
+```rust
+let users = database
+    .query::<User>()
+    .prefetch_related(Post::USER.reverse())
+    .prefetch_related(Audit::USER.reverse())
+    .all()
+    .await?;
+
+let response = UserWithPostsAndAuditsSerializer::many(users);
+```
+
+Для нескольких nested-полей используются `LoadedMany` и relation markers;
+порядок `prefetch_related` должен соответствовать materialized graph.
 Для множества materialized объектов используется `UserSerializer::many(...)`:
 
 ```rust

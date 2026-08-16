@@ -201,8 +201,9 @@ pub trait Model: Sized {
 /// Converts a materialized ORM model into an API representation.
 pub trait ModelSerializer: serde::Serialize + Sized {
     type Model: Model;
+    type Input;
 
-    fn from_model(model: Self::Model) -> Self;
+    fn from_input(input: Self::Input) -> Self;
 }
 
 /// A typed forward foreign-key relation from one model to another.

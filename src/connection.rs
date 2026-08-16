@@ -416,15 +416,11 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
     }
 
     /// Loads a reverse foreign-key relation with one batched query.
-    pub fn prefetch_related<R, Relation, Key>(
-        self,
-        relation: HasMany<M, R, Relation, Key>,
-    ) -> PrefetchRelatedQuery<'db, M, R, Relation, Key> {
-        PrefetchRelatedQuery {
-            database: self.database,
-            query: self.query,
-            relation,
-        }
+    pub fn prefetch_related<P>(self, plan: P) -> P::Query<'db>
+    where
+        P: PrefetchRelation<M>,
+    {
+        plan.into_query(self.database, self.query)
     }
 
     pub async fn all(self) -> Result<Vec<M>, OrmError>
@@ -440,6 +436,20 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
     {
         self.database.fetch_one(self.query).await
     }
+}
+
+pub trait PrefetchRelation<Owner: Model> {
+    type Query<'db>
+    where
+        Owner: 'db;
+
+    fn into_query<'db>(
+        self,
+        database: &'db Database,
+        query: SelectQuery<Owner>,
+    ) -> Self::Query<'db>
+    where
+        Owner: 'db;
 }
 
 /// A model and its eagerly loaded `belongs_to` relation.
@@ -465,6 +475,20 @@ pub struct WithMany<M, R, Relation = (), Key = i64> {
     pub related: Vec<R>,
     pub(crate) _relation: std::marker::PhantomData<Relation>,
     pub(crate) _key: std::marker::PhantomData<Key>,
+}
+
+/// A materialized model and a tuple of preloaded relations.
+#[derive(Debug)]
+pub struct Loaded<M, Relations> {
+    pub model: M,
+    pub relations: Relations,
+}
+
+/// One reverse relation inside a materialized relation tuple.
+#[derive(Debug)]
+pub struct LoadedMany<R, Relation = ()> {
+    pub related: Vec<R>,
+    pub(crate) _relation: std::marker::PhantomData<Relation>,
 }
 
 /// Query which materializes a model together with one related model.
@@ -535,12 +559,84 @@ pub struct PrefetchRelatedQuery<'db, M, R, Relation = (), Key = i64> {
     relation: HasMany<M, R, Relation, Key>,
 }
 
-impl<M, R, Relation> PrefetchRelatedQuery<'_, M, R, Relation, i64>
+impl<M: Model, R, Relation> PrefetchRelation<M> for HasMany<M, R, Relation, i64> {
+    type Query<'db>
+        = PrefetchRelatedQuery<'db, M, R, Relation, i64>
+    where
+        M: 'db;
+
+    fn into_query<'db>(self, database: &'db Database, query: SelectQuery<M>) -> Self::Query<'db>
+    where
+        M: 'db,
+    {
+        PrefetchRelatedQuery {
+            database,
+            query,
+            relation: self,
+        }
+    }
+}
+
+pub struct NestedPrefetchPlan<M, R, Relation, C, ChildRelation> {
+    outer: HasMany<M, R, Relation, i64>,
+    inner: HasMany<R, C, ChildRelation, i64>,
+}
+
+impl<M, R, Relation> HasMany<M, R, Relation, i64> {
+    pub fn prefetch<C, ChildRelation>(
+        self,
+        inner: HasMany<R, C, ChildRelation, i64>,
+    ) -> NestedPrefetchPlan<M, R, Relation, C, ChildRelation> {
+        NestedPrefetchPlan { outer: self, inner }
+    }
+}
+
+impl<M: Model, R, Relation, C, ChildRelation> PrefetchRelation<M>
+    for NestedPrefetchPlan<M, R, Relation, C, ChildRelation>
+{
+    type Query<'db>
+        = NestedPrefetchQuery<'db, M, R, Relation, C, ChildRelation>
+    where
+        M: 'db;
+
+    fn into_query<'db>(self, database: &'db Database, query: SelectQuery<M>) -> Self::Query<'db>
+    where
+        M: 'db,
+    {
+        NestedPrefetchQuery {
+            database,
+            query,
+            outer: self.outer,
+            inner: self.inner,
+        }
+    }
+}
+
+pub struct NestedPrefetchQuery<'db, M, R, Relation, C, ChildRelation> {
+    database: &'db Database,
+    query: SelectQuery<M>,
+    outer: HasMany<M, R, Relation, i64>,
+    inner: HasMany<R, C, ChildRelation, i64>,
+}
+
+impl<'db, M, R, Relation> PrefetchRelatedQuery<'db, M, R, Relation, i64>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
-    pub async fn all(self) -> Result<Vec<WithMany<M, R, Relation>>, OrmError>
+    pub fn prefetch_related<R2, Relation2>(
+        self,
+        relation: HasMany<M, R2, Relation2>,
+    ) -> MultiPrefetchRelatedQuery<'db, M, R, Relation, R2, Relation2> {
+        MultiPrefetchRelatedQuery {
+            database: self.database,
+            query: self.query,
+            first: self.relation,
+            second: relation,
+        }
+    }
+
+    pub async fn all(self) -> Result<Vec<Loaded<M, (LoadedMany<R, Relation>,)>>, OrmError>
     where
         Relation: Send + 'static,
     {
@@ -553,7 +649,7 @@ where
             .interact(move |connection| {
                 configure_connection(connection)?;
                 connection.execute_batch("BEGIN")?;
-                let result: rusqlite::Result<Vec<WithMany<M, R, Relation>>> = (|| {
+                let result: rusqlite::Result<Vec<Loaded<M, (LoadedMany<R, Relation>,)>>> = (|| {
                     let parents = load_models::<M>(connection, &parent_compiled)?;
                     let parent_ids = parents
                         .iter()
@@ -578,15 +674,17 @@ where
                         .into_iter()
                         .map(|model| {
                             let id = model.primary_key_value();
-                            WithMany {
+                            Loaded {
                                 model,
-                                related: related_by_parent.remove(&id).unwrap_or_default(),
-                                _relation: std::marker::PhantomData,
-                                _key: std::marker::PhantomData,
+                                relations: (LoadedMany {
+                                    related: related_by_parent.remove(&id).unwrap_or_default(),
+                                    _relation: std::marker::PhantomData,
+                                },),
                             }
                         })
                         .collect())
-                })();
+                })(
+                );
                 match result {
                     Ok(value) => {
                         connection.execute_batch("COMMIT")?;
@@ -601,6 +699,172 @@ where
             .await
             .map_err(|error| OrmError::Interaction(error.to_string()))?
             .map_err(OrmError::from)
+    }
+}
+
+/// Query which materializes two reverse relations in one typed result.
+pub struct MultiPrefetchRelatedQuery<'db, M, R1, Relation1, R2, Relation2> {
+    database: &'db Database,
+    query: SelectQuery<M>,
+    first: HasMany<M, R1, Relation1>,
+    second: HasMany<M, R2, Relation2>,
+}
+
+impl<M, R, Relation, C, ChildRelation> NestedPrefetchQuery<'_, M, R, Relation, C, ChildRelation>
+where
+    M: Model + Send + 'static,
+    R: Model + Send + 'static,
+    C: Model + Send + 'static,
+    Relation: Send + 'static,
+    ChildRelation: Send + 'static,
+{
+    pub async fn all(
+        self,
+    ) -> Result<
+        Vec<Loaded<M, (LoadedMany<Loaded<R, (LoadedMany<C, ChildRelation>,)>, Relation>,)>>,
+        OrmError,
+    > {
+        let parents = self.database.fetch_all(self.query).await?;
+        let parent_ids = parents
+            .iter()
+            .map(Model::primary_key_value)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let outer_field = self.outer.field();
+        let children = self
+            .database
+            .fetch_by_many(
+                ModelField::<R, i64>::new(outer_field.table, outer_field.name),
+                parent_ids,
+            )
+            .await?;
+        let child_ids = children
+            .iter()
+            .map(Model::primary_key_value)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let inner_field = self.inner.field();
+        let grandchildren = self
+            .database
+            .fetch_by_many(
+                ModelField::<C, i64>::new(inner_field.table, inner_field.name),
+                child_ids,
+            )
+            .await?;
+        let mut grandchildren_by_child = HashMap::<i64, Vec<C>>::new();
+        for model in grandchildren {
+            grandchildren_by_child
+                .entry(self.inner.foreign_key(&model))
+                .or_default()
+                .push(model);
+        }
+        let children = children
+            .into_iter()
+            .map(|model| {
+                let id = model.primary_key_value();
+                Loaded {
+                    model,
+                    relations: (LoadedMany {
+                        related: grandchildren_by_child.remove(&id).unwrap_or_default(),
+                        _relation: std::marker::PhantomData,
+                    },),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut children_by_parent = HashMap::<i64, Vec<_>>::new();
+        for child in children {
+            children_by_parent
+                .entry(self.outer.foreign_key(&child.model))
+                .or_default()
+                .push(child);
+        }
+        Ok(parents
+            .into_iter()
+            .map(|model| {
+                let id = model.primary_key_value();
+                Loaded {
+                    model,
+                    relations: (LoadedMany {
+                        related: children_by_parent.remove(&id).unwrap_or_default(),
+                        _relation: std::marker::PhantomData,
+                    },),
+                }
+            })
+            .collect())
+    }
+}
+
+impl<M, R1, Relation1, R2, Relation2> MultiPrefetchRelatedQuery<'_, M, R1, Relation1, R2, Relation2>
+where
+    M: Model + Send + 'static,
+    R1: Model + Send + 'static,
+    R2: Model + Send + 'static,
+    Relation1: Send + 'static,
+    Relation2: Send + 'static,
+{
+    pub async fn all(
+        self,
+    ) -> Result<Vec<Loaded<M, (LoadedMany<R1, Relation1>, LoadedMany<R2, Relation2>)>>, OrmError>
+    {
+        let parents = self.database.fetch_all(self.query).await?;
+        let parent_ids = parents
+            .iter()
+            .map(Model::primary_key_value)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let first_field = self.first.field();
+        let second_field = self.second.field();
+        let first = self
+            .database
+            .fetch_by_many(
+                ModelField::<R1, i64>::new(first_field.table, first_field.name),
+                parent_ids.clone(),
+            )
+            .await?;
+        let second = self
+            .database
+            .fetch_by_many(
+                ModelField::<R2, i64>::new(second_field.table, second_field.name),
+                parent_ids,
+            )
+            .await?;
+        let mut first_by_parent = HashMap::<i64, Vec<R1>>::new();
+        for model in first {
+            first_by_parent
+                .entry(self.first.foreign_key(&model))
+                .or_default()
+                .push(model);
+        }
+        let mut second_by_parent = HashMap::<i64, Vec<R2>>::new();
+        for model in second {
+            second_by_parent
+                .entry(self.second.foreign_key(&model))
+                .or_default()
+                .push(model);
+        }
+
+        Ok(parents
+            .into_iter()
+            .map(|model| {
+                let id = model.primary_key_value();
+                Loaded {
+                    model,
+                    relations: (
+                        LoadedMany {
+                            related: first_by_parent.remove(&id).unwrap_or_default(),
+                            _relation: std::marker::PhantomData,
+                        },
+                        LoadedMany {
+                            related: second_by_parent.remove(&id).unwrap_or_default(),
+                            _relation: std::marker::PhantomData,
+                        },
+                    ),
+                }
+            })
+            .collect())
     }
 }
 

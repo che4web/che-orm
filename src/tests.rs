@@ -20,6 +20,28 @@ struct OptionalPost {
 }
 
 #[cfg(feature = "sqlite")]
+#[derive(Debug, Model)]
+#[orm(table = "audits", index("user_id"))]
+struct Audit {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = User, on_delete = "cascade")]
+    user_id: i64,
+    action: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Model)]
+#[orm(table = "comments", index("post_id"))]
+struct Comment {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = Post, on_delete = "cascade")]
+    post_id: i64,
+    body: String,
+}
+
+#[cfg(feature = "sqlite")]
 #[derive(ModelSerializer)]
 #[serializer(model = OptionalPost)]
 struct OptionalPostResponse {
@@ -56,6 +78,52 @@ struct UserWithPostsResponse {
     name: String,
     #[serializer(many = Post, relation = PostUserRelation)]
     posts: Vec<PostResponse>,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = Audit)]
+struct AuditResponse {
+    id: i64,
+    action: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = User)]
+struct UserWithPostsAndAuditsResponse {
+    id: i64,
+    #[serializer(many = Post, relation = PostUserRelation)]
+    posts: Vec<PostResponse>,
+    #[serializer(many = Audit, relation = AuditUserRelation)]
+    audits: Vec<AuditResponse>,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = Comment)]
+struct CommentResponse {
+    id: i64,
+    body: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = Post)]
+struct PostWithCommentsResponse {
+    id: i64,
+    title: String,
+    #[serializer(many = Comment, relation = CommentPostRelation)]
+    comments: Vec<CommentResponse>,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = User)]
+struct UserWithNestedPostsResponse {
+    id: i64,
+    #[serializer(many = Post, relation = PostUserRelation)]
+    posts: Vec<PostWithCommentsResponse>,
 }
 
 #[test]
@@ -106,11 +174,12 @@ fn nested_model_serializer_accepts_only_prefetched_result() {
     assert_eq!(response.posts.len(), 1);
     assert_eq!(response.posts[0].title, "First");
 
-    let responses = UserWithPostsResponse::many(vec![crate::WithMany {
+    let responses = UserWithPostsResponse::many(vec![crate::Loaded {
         model: User::new("Bob".into()),
-        related: Vec::new(),
-        _relation: std::marker::PhantomData,
-        _key: std::marker::PhantomData,
+        relations: (crate::LoadedMany {
+            related: Vec::new(),
+            _relation: std::marker::PhantomData,
+        },),
     }]);
     assert_eq!(responses.len(), 1);
 }
@@ -497,6 +566,8 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
         crate::Database::connect_with_pool_size(path.to_string_lossy().into_owned(), 2).unwrap();
     database.create_table::<User>().await.unwrap();
     database.create_table::<Post>().await.unwrap();
+    database.create_table::<Audit>().await.unwrap();
+    database.create_table::<Comment>().await.unwrap();
 
     let user = User::new("Alice".into());
     let user = User {
@@ -510,11 +581,29 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
         .last_insert_rowid
         .unwrap();
 
-    database
+    let first_post_id = database
         .insert(&Post {
             id: 0,
             user_id,
             title: "First post".into(),
+        })
+        .await
+        .unwrap()
+        .last_insert_rowid
+        .unwrap();
+    database
+        .insert(&Comment {
+            id: 0,
+            post_id: first_post_id,
+            body: "Nice post".into(),
+        })
+        .await
+        .unwrap();
+    database
+        .insert(&Audit {
+            id: 0,
+            user_id,
+            action: "created".into(),
         })
         .await
         .unwrap();
@@ -564,6 +653,34 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     assert_eq!(posts_with_users.len(), 2);
     assert!(posts_with_users.iter().all(|post| post.related.id > 0));
 
+    let users_with_two_relations = database
+        .query::<User>()
+        .prefetch_related(Post::USER.reverse())
+        .prefetch_related(Audit::USER.reverse())
+        .all()
+        .await
+        .unwrap();
+    let alice = users_with_two_relations
+        .into_iter()
+        .find(|user| user.model.id == user_id)
+        .unwrap();
+    let serialized = UserWithPostsAndAuditsResponse::from(alice);
+    assert_eq!(serialized.posts.len(), 1);
+    assert_eq!(serialized.audits.len(), 1);
+
+    let nested_users = database
+        .query::<User>()
+        .prefetch_related(Post::USER.reverse().prefetch(Comment::POST.reverse()))
+        .all()
+        .await
+        .unwrap();
+    let nested_user = nested_users
+        .into_iter()
+        .find(|user| user.model.id == user_id)
+        .unwrap();
+    let nested_response = UserWithNestedPostsResponse::from(nested_user);
+    assert_eq!(nested_response.posts[0].comments.len(), 1);
+
     let posts = database
         .fetch_by_many(Post::USER_ID, [user_id, second_user_id])
         .await
@@ -592,7 +709,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
         .iter()
         .find(|user| user.model.id == user_id)
         .unwrap();
-    assert_eq!(alice.related.len(), 1);
+    assert_eq!(alice.relations.0.related.len(), 1);
 
     let invalid_post = || {
         crate::QueryAst::Insert(crate::InsertAst {
