@@ -61,9 +61,12 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     let mut assignments = Vec::new();
     let mut nested = Vec::new();
     let mut serialize_fields = Vec::new();
+    let mut input_fields = Vec::new();
     for field in fields {
         let name = field.ident.expect("named fields always have identifiers");
         let json_name = name.to_string();
+        let mut read_only = false;
+        let mut write_only = false;
         serialize_fields.push(quote! {
             #orm::serde::ser::SerializeStruct::serialize_field(
                 &mut state,
@@ -79,6 +82,10 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             }
             attribute.parse_nested_meta(|meta| {
                     if meta.path.is_ident("read_only") {
+                        read_only = true;
+                        Ok(())
+                    } else if meta.path.is_ident("write_only") {
+                        write_only = true;
                         Ok(())
                     } else if meta.path.is_ident("many") || meta.path.is_ident("one") {
                         let many = meta.path.is_ident("many");
@@ -98,6 +105,9 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                     }
                 })?;
         }
+        if write_only {
+            serialize_fields.pop();
+        }
         if let Some((many, related_model)) = nested_relation {
             let relation_path = relation_path.ok_or_else(|| {
                 Error::new_spanned(
@@ -110,6 +120,10 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             let serializer_type = nested_serializer_type(&field.ty, many, optional)?;
             nested.push((name, many, related_model, marker, optional, serializer_type));
         } else {
+            if !read_only && !write_only {
+                let constant = Ident::new(&name.to_string().to_uppercase(), name.span());
+                input_fields.push((name.clone(), field.ty.clone(), constant));
+            }
             assignments.push(quote! { #name: model.#name });
         }
     }
@@ -284,7 +298,122 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         }
     };
 
+    let create_name = Ident::new(&format!("{}CreateInput", serializer), serializer.span());
+    let update_name = Ident::new(&format!("{}UpdateInput", serializer), serializer.span());
+    let patch_name = Ident::new(&format!("{}PatchInput", serializer), serializer.span());
+    let input_names = input_fields
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect::<Vec<_>>();
+    let input_types = input_fields
+        .iter()
+        .map(|(_, ty, _)| ty.clone())
+        .collect::<Vec<_>>();
+    let create_sets = input_fields.iter().map(|(name, _, constant)| {
+        quote! {
+            let builder = builder.set(<#model>::#constant, input.#name);
+        }
+    });
+    let update_sets = input_fields.iter().map(|(name, _, constant)| {
+        quote! {
+            let builder = builder.set(<#model>::#constant, input.#name);
+        }
+    });
+    let patch_sets = input_fields.iter().map(|(name, _, constant)| {
+        quote! {
+            let builder = match input.#name {
+                #orm::PatchField::Missing => builder,
+                #orm::PatchField::Value(value) => builder.set(<#model>::#constant, value),
+            };
+        }
+    });
+
     Ok(quote! {
+        #[derive(Debug, #orm::serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct #create_name {
+            #(pub #input_names: #input_types,)*
+        }
+
+        #[derive(Debug, #orm::serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct #update_name {
+            #(pub #input_names: #input_types,)*
+        }
+
+        #[derive(Debug, #orm::serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct #patch_name {
+            #(#[serde(default)] pub #input_names: #orm::PatchField<#input_types>,)*
+        }
+
+        #[cfg(feature = "sqlite")]
+        impl #serializer {
+            pub async fn create(
+                database: &#orm::Database,
+                input: #create_name,
+            ) -> ::core::result::Result<#model, #orm::OrmError>
+            where
+                #model: Send + 'static,
+            {
+                let builder = database.create::<#model>();
+                #(#create_sets)*
+                builder.execute().await
+            }
+
+            pub async fn update(
+                database: &#orm::Database,
+                id: i64,
+                input: #update_name,
+            ) -> ::core::result::Result<Option<#model>, #orm::OrmError>
+            where
+                #model: Send + 'static,
+            {
+                let builder = database.update::<#model>(id);
+                #(#update_sets)*
+                builder.execute().await
+            }
+
+            pub async fn patch(
+                database: &#orm::Database,
+                id: i64,
+                input: #patch_name,
+            ) -> ::core::result::Result<Option<#model>, #orm::OrmError>
+            where
+                #model: Send + 'static,
+            {
+                let builder = database.update::<#model>(id);
+                #(#patch_sets)*
+                builder.execute().await
+            }
+        }
+
+        #[cfg(feature = "sqlite")]
+        impl #orm::ModelWriteSerializer for #serializer {
+            type Model = #model;
+            type CreateInput = #create_name;
+            type UpdateInput = #update_name;
+            type PatchInput = #patch_name;
+
+            fn create<'a>(database: &'a #orm::Database, input: Self::CreateInput)
+                -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::core::result::Result<Self::Model, #orm::OrmError>> + Send + 'a>>
+            {
+                Box::pin(Self::create(database, input))
+            }
+
+            fn update<'a>(database: &'a #orm::Database, id: i64, input: Self::UpdateInput)
+                -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::core::result::Result<Option<Self::Model>, #orm::OrmError>> + Send + 'a>>
+            {
+                Box::pin(Self::update(database, id, input))
+            }
+
+            fn patch<'a>(database: &'a #orm::Database, id: i64, input: Self::PatchInput)
+                -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::core::result::Result<Option<Self::Model>, #orm::OrmError>> + Send + 'a>>
+            {
+                Box::pin(Self::patch(database, id, input))
+            }
+        }
+
         impl #orm::serde::Serialize for #serializer {
             fn serialize<__Serializer>(
                 &self,

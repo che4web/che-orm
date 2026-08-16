@@ -75,6 +75,21 @@ struct UserResponse {
     updated_at: time::OffsetDateTime,
 }
 
+#[derive(ModelSerializer)]
+#[serializer(model = User)]
+#[allow(dead_code)]
+struct UserWriteSerializer {
+    #[serializer(read_only)]
+    id: i64,
+    email: String,
+    name: String,
+    is_active: bool,
+    #[serializer(read_only)]
+    created_at: time::OffsetDateTime,
+    #[serializer(read_only)]
+    updated_at: time::OffsetDateTime,
+}
+
 #[cfg(feature = "sqlite")]
 #[derive(ModelSerializer)]
 #[serializer(model = Post)]
@@ -167,6 +182,26 @@ fn model_serializer_maps_materialized_models_without_database_access() {
     let responses = UserResponse::many(vec![User::new("Bob".into())]);
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0].name, "Bob");
+}
+
+#[test]
+fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
+    let create: UserWriteSerializerCreateInput = crate::serde_json::from_str(
+        r#"{"email":"alice@example.test","name":"Alice","is_active":true}"#,
+    )
+    .unwrap();
+    assert_eq!(create.name, "Alice");
+
+    let patch: UserWriteSerializerPatchInput =
+        crate::serde_json::from_str(r#"{"name":"Updated","is_active":false}"#).unwrap();
+    assert_eq!(patch.email, crate::PatchField::Missing);
+    assert_eq!(patch.name, crate::PatchField::Value("Updated".to_string()));
+    assert_eq!(patch.is_active, crate::PatchField::Value(false));
+
+    let unknown = crate::serde_json::from_str::<UserWriteSerializerCreateInput>(
+        r#"{"email":"a","name":"A","is_active":true,"id":1}"#,
+    );
+    assert!(unknown.is_err());
 }
 
 #[cfg(feature = "sqlite")]

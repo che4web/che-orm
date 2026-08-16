@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::{future::Future, pin::Pin};
 
 use deadpool_sqlite::{Config, Pool, Runtime};
 use rusqlite::{OptionalExtension, types::Value};
@@ -20,6 +21,31 @@ pub enum OrmError {
     Sqlite(#[from] rusqlite::Error),
     #[error("query build error: {0:?}")]
     QueryBuild(QueryBuildError),
+}
+
+/// Bridge implemented by generated serializers for generic HTTP adapters.
+pub trait ModelWriteSerializer {
+    type Model: crate::Model;
+    type CreateInput: serde::de::DeserializeOwned + Send;
+    type UpdateInput: serde::de::DeserializeOwned + Send;
+    type PatchInput: serde::de::DeserializeOwned + Send;
+
+    fn create<'a>(
+        database: &'a Database,
+        input: Self::CreateInput,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Model, OrmError>> + Send + 'a>>;
+
+    fn update<'a>(
+        database: &'a Database,
+        id: i64,
+        input: Self::UpdateInput,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Self::Model>, OrmError>> + Send + 'a>>;
+
+    fn patch<'a>(
+        database: &'a Database,
+        id: i64,
+        input: Self::PatchInput,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Self::Model>, OrmError>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
