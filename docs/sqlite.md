@@ -77,6 +77,14 @@ let deleted = database.delete::<User>(user.id).await?;
 `get` и `first` возвращают `Option`, если строка отсутствует. `update` также
 возвращает `Option`; `delete` возвращает `bool`.
 
+`create` и `update` используют SQLite `RETURNING` и возвращают значения,
+полученные непосредственно из ORM-операции. ORM не создаёт `AFTER INSERT` или
+`AFTER UPDATE` triggers, поэтому при работе с базой только через ORM
+возвращаемая модель соответствует записанным значениям. Если такие triggers
+добавлены вручную, через raw SQL или миграцию, они могут изменить строку после
+того, как SQLite сформировал результат `RETURNING`; это значение не отражает
+последующие trigger-изменения.
+
 ## Низкоуровневый insert
 
 ```rust
@@ -162,7 +170,7 @@ let query = User::update()
 struct Post {
     #[orm(primary_key)]
     id: i64,
-    #[orm(references = "users(id)", on_delete = "cascade")]
+    #[orm(foreign_key = User, on_delete = "cascade")]
     user_id: i64,
     title: String,
 }
@@ -177,9 +185,38 @@ database.create_table::<Post>().await?;
 let posts = database.fetch_by(Post::USER_ID, user_id).await?;
 ```
 
+Для нескольких пользователей используйте batch-загрузку, чтобы не получить
+N+1 запросов:
+
+```rust
+let users = database.all::<User>().await?;
+let user_ids = users.iter().map(|user| user.id);
+let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
+```
+
+`fetch_by_many` строит параметризованный `IN`-запрос. Пустой набор возвращает
+пустой список без обращения к базе. Результаты следует сгруппировать по
+`post.user_id` в памяти. При большом количестве ключей разделяйте их на
+порции, чтобы не превысить лимит SQLite на bind-параметры.
+
 `Database` включает `PRAGMA foreign_keys = ON` при каждом получении
 соединения, поэтому несуществующий `user_id` завершится ошибкой SQLite, а
 удаление пользователя каскадно удалит его posts.
+
+`foreign_key = User` также генерирует typed relation `Post::USER`. Для
+`belongs_to` используйте `select_related(Post::USER)`, а для `has_many`:
+
+```rust
+let users = database
+    .query::<User>()
+    .prefetch_related(Post::USER.reverse())
+    .all()
+    .await?;
+```
+
+Результат содержит `WithOne<Post, User>` или `WithMany<User, Post>` и может
+быть передан в serializer. Serializer не получает `Database` и не выполняет
+дополнительные запросы.
 
 ## Транзакции
 

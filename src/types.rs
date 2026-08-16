@@ -100,6 +100,10 @@ pub enum Expr {
         op: CompareOp,
         right: Box<Expr>,
     },
+    In {
+        left: Box<Expr>,
+        values: Vec<DatabaseValue>,
+    },
     And {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -168,6 +172,19 @@ impl<M, T> ModelField<M, T> {
         V: QueryValue<T>,
     {
         self.comparison(CompareOp::Eq, value)
+    }
+    pub fn in_values<I, V>(self, values: I) -> Expr
+    where
+        I: IntoIterator<Item = V>,
+        V: QueryValue<T>,
+    {
+        Expr::In {
+            left: Box::new(Expr::Column(self.column())),
+            values: values
+                .into_iter()
+                .map(QueryValue::into_query_value)
+                .collect(),
+        }
     }
     pub fn ne<V>(self, value: V) -> Expr
     where

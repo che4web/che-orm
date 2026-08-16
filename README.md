@@ -167,7 +167,7 @@ Foreign key задаётся на поле дочерней модели:
 struct Post {
     #[orm(primary_key)]
     id: i64,
-    #[orm(references = "users(id)", on_delete = "cascade")]
+    #[orm(foreign_key = User, on_delete = "cascade")]
     user_id: i64,
     title: String,
 }
@@ -186,13 +186,37 @@ let user_id = user.id;
 let posts = database.fetch_by(Post::USER_ID, user_id).await?;
 ```
 
+Для нескольких пользователей используйте `fetch_by_many`, а не вызывайте
+`fetch_by` в цикле: это устраняет N+1 запросов.
+
+```rust
+let users = database.all::<User>().await?;
+let user_ids = users.iter().map(|user| user.id);
+let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
+```
+
+Дочерние строки затем группируются по `post.user_id` в памяти. Пустой набор
+возвращает пустой список; для очень больших наборов ключей используйте
+несколько порций из-за лимита SQLite на bind-параметры.
+
 `fetch_by` строит обычный параметризованный `SELECT`. SQLite foreign keys
 включаются для каждого соединения пула автоматически. Поэтому
 `on_delete = "cascade"` будет работать и при удалении пользователя.
 
-Автоматических полей `post.user` и `user.posts` пока нет: связанные модели
-загружаются отдельным запросом, что делает границу запросов явной и позволяет
-контролировать N+1 поведение.
+`Post::USER` описывает forward relation, а `Post::USER.reverse()` имеет
+reverse name `post_set` по умолчанию. Связанные модели загружаются через typed
+queryset:
+
+```rust
+let users = database
+    .query::<User>()
+    .prefetch_related(Post::USER.reverse())
+    .all()
+    .await?;
+```
+
+Результат `WithMany<User, Post>` можно передать в `ModelSerializer`; serializer
+получает только материализованные данные и не имеет доступа к `Database`.
 
 ## Примеры
 
@@ -203,6 +227,7 @@ cargo run -p che-orm2-examples --bin schema
 cargo run --bin manage -- migrate
 cargo run -p che-orm2-examples --bin sqlite_crud
 cargo run -p che-orm2-examples --bin transactions
+cargo run -p che-orm2-examples --bin serializers
 ```
 
 ## Миграции

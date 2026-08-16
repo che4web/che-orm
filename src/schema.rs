@@ -53,7 +53,7 @@ impl<T: ColumnTypeOf> ColumnTypeOf for Option<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Foreign key metadata attached to a column.
 pub struct ForeignKey {
-    pub target: &'static str,
+    pub target: String,
     pub on_delete: Option<&'static str>,
 }
 
@@ -123,7 +123,7 @@ impl TableSchema {
                 });
             }
             if let Some(reference) = &column.references {
-                validate_reference(reference.target)?;
+                validate_reference(&reference.target)?;
                 if let Some(action) = reference.on_delete {
                     if !matches!(
                         action.to_ascii_lowercase().as_str(),
@@ -170,12 +170,12 @@ impl SchemaSet {
                     .and_then(|(table, column)| {
                         column.strip_suffix(')').map(|column| (table, column))
                     })
-                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target.into()))?;
+                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target.clone()))?;
                 let target = self
                     .tables
                     .iter()
                     .find(|candidate| candidate.name == target_table)
-                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target.into()))?;
+                    .ok_or_else(|| SchemaError::InvalidForeignKey(reference.target.clone()))?;
                 if !target
                     .columns
                     .iter()

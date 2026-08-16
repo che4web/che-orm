@@ -5,7 +5,7 @@ use crate::Model;
 pub struct Post {
     #[orm(primary_key)]
     pub id: i64,
-    #[orm(references = "users(id)", on_delete = "cascade")]
+    #[orm(foreign_key = crate::apps::accounts::User, on_delete = "cascade")]
     pub user_id: i64,
     pub title: String,
 }

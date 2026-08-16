@@ -15,6 +15,7 @@ sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
 che-orm2-macros = { path = "che-orm2-macros" }
 deadpool-sqlite = { version = "0.12", optional = true }
 rusqlite = { version = "0.37", features = ["bundled", "time"] }
-time = { version = "0.3", features = ["formatting", "parsing"] }
+serde = { version = "1", features = ["derive"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 thiserror = { version = "2", optional = true }
 tokio = { version = "1", optional = true, features = ["macros", "rt-multi-thread"] }

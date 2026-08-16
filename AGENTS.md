@@ -50,12 +50,21 @@ before applications that define foreign keys to them.
 - Use `#[derive(Debug, Model)]` for application models.
 - Always specify `#[orm(table = "...")]`.
 - Mark generated integer keys with `#[orm(primary_key)]`.
-- Use `#[orm(references = "table(column)", on_delete = "cascade")]` for foreign keys.
+- Use `#[orm(foreign_key = User, on_delete = "cascade")]` for foreign keys to
+  ORM models. This generates `Post::USER` and `Post::USER.reverse()`.
+- Use `#[orm(references = "table(column)")]` only for tables without an ORM
+  model; it does not generate typed relations.
 - Use `#[orm(auto_now_add)]` and `#[orm(auto_now)]` only with `OffsetDateTime`.
 - `auto_now` is updated by ORM-generated UPDATE statements. Raw SQL does not update it.
 - `Option<T>` maps to a nullable SQL column.
 - Avoid declaring both field-level `#[orm(unique)]` and a duplicate table-level
   `unique("field")` constraint.
+
+`#[derive(ModelSerializer)]` generates a JSON serializer for materialized model
+data. It must not access `Database`. Use queryset `select_related` for
+`belongs_to` and `prefetch_related` for reverse relations before converting a
+result to a serializer. Nested fields use `#[serializer(many = Post)]` or
+`#[serializer(one = User)]` and accept only `WithMany`/`WithOne` results.
 
 ## Migrations
 
@@ -90,6 +99,13 @@ when a non-default executable path is needed. Some Atlas versions require
 
 Migration files and `atlas.sum` are committed to the repository. Review every
 generated migration before applying it.
+
+The ORM high-level `create` and `update` APIs use SQLite `RETURNING`. The ORM
+does not generate `AFTER INSERT` or `AFTER UPDATE` triggers. Do not add such
+triggers for ORM models without explicitly reviewing the returned-value
+semantics: triggers created by migrations or raw SQL may change a row after
+SQLite has produced the `RETURNING` result, so the returned model will not
+include those post-trigger changes.
 
 ## Verification
 

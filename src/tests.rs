@@ -2,8 +2,39 @@
 use crate::models::Post;
 use crate::models::User;
 use crate::{
-    ColumnRef, DatabaseValue, Model, PostgresDialect, QueryBuildError, SqlCompiler, SqliteDialect,
+    ColumnRef, DatabaseValue, Model, ModelSerializer, PostgresDialect, QueryBuildError,
+    SqlCompiler, SqliteDialect,
 };
+
+#[derive(ModelSerializer)]
+#[serializer(model = User)]
+struct UserResponse {
+    #[serializer(read_only)]
+    id: i64,
+    email: String,
+    name: String,
+    is_active: bool,
+    created_at: time::OffsetDateTime,
+    updated_at: time::OffsetDateTime,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = Post)]
+struct PostResponse {
+    id: i64,
+    title: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(ModelSerializer)]
+#[serializer(model = User)]
+struct UserWithPostsResponse {
+    id: i64,
+    name: String,
+    #[serializer(many = Post)]
+    posts: Vec<PostResponse>,
+}
 
 #[test]
 fn derive_model_defines_consistent_metadata() {
@@ -21,6 +52,41 @@ fn derive_model_defines_consistent_metadata() {
     );
     assert_eq!(User::NAME.column(), ColumnRef::new("users", "name"));
     assert_eq!(User::primary_key().column(), ColumnRef::new("users", "id"));
+}
+
+#[test]
+fn model_serializer_maps_materialized_models_without_database_access() {
+    let user = User::new("Alice".into());
+    let response = UserResponse::from_model(user);
+    assert_eq!(response.name, "Alice");
+    assert_eq!(response.id, 0);
+
+    let responses = UserResponse::many(vec![User::new("Bob".into())]);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].name, "Bob");
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn nested_model_serializer_accepts_only_prefetched_result() {
+    let user = User::new("Alice".into());
+    let result = crate::WithMany {
+        model: user,
+        related: vec![Post {
+            id: 1,
+            user_id: 0,
+            title: "First".into(),
+        }],
+    };
+    let response = UserWithPostsResponse::from(result);
+    assert_eq!(response.posts.len(), 1);
+    assert_eq!(response.posts[0].title, "First");
+
+    let responses = UserWithPostsResponse::many(vec![crate::WithMany {
+        model: User::new("Bob".into()),
+        related: Vec::new(),
+    }]);
+    assert_eq!(responses.len(), 1);
 }
 
 #[test]
@@ -74,6 +140,69 @@ fn compiles_select_with_sqlite_parameters() {
 }
 
 #[test]
+fn compiles_in_expression_for_sqlite_and_postgres() {
+    let sqlite_query = User::query()
+        .filter(
+            User::ID
+                .in_values([1_i64, 2, 3])
+                .and(User::IS_ACTIVE.eq(true)),
+        )
+        .into_ast()
+        .unwrap();
+    let sqlite = SqlCompiler::<SqliteDialect>::compile(&sqlite_query);
+    assert_eq!(
+        sqlite.sql,
+        "SELECT users.id, users.email, users.name, users.is_active, users.created_at, users.updated_at FROM users WHERE ((users.id IN (?, ?, ?)) AND (users.is_active = ?))"
+    );
+    assert_eq!(
+        sqlite.params,
+        vec![
+            DatabaseValue::Integer(1),
+            DatabaseValue::Integer(2),
+            DatabaseValue::Integer(3),
+            DatabaseValue::Boolean(true),
+        ]
+    );
+
+    let postgres = SqlCompiler::<PostgresDialect>::compile(&sqlite_query);
+    assert_eq!(
+        postgres.sql,
+        "SELECT users.id, users.email, users.name, users.is_active, users.created_at, users.updated_at FROM users WHERE ((users.id IN ($1, $2, $3)) AND (users.is_active = $4))"
+    );
+}
+
+#[test]
+fn compiles_empty_in_expression_as_false() {
+    let query = User::query()
+        .filter(User::ID.in_values(std::iter::empty::<i64>()))
+        .into_ast()
+        .unwrap();
+    let compiled = SqlCompiler::<SqliteDialect>::compile(&query);
+    assert!(compiled.sql.ends_with("WHERE (1 = 0)"));
+    assert!(compiled.params.is_empty());
+}
+
+#[test]
+fn rejects_in_expression_from_a_foreign_table() {
+    let query = User::query()
+        .filter(crate::Expr::In {
+            left: Box::new(crate::Expr::Column(crate::ColumnRef::new(
+                "posts", "user_id",
+            ))),
+            values: vec![DatabaseValue::Integer(1)],
+        })
+        .into_ast();
+    assert_eq!(
+        query.unwrap_err(),
+        QueryBuildError::ForeignTableColumn {
+            column: "user_id",
+            table: "posts",
+            expected_table: "users",
+        }
+    );
+}
+
+#[test]
 fn compiles_insert_with_postgres_parameters() {
     let query = User::insert()
         .set(User::EMAIL, "alice@example.test")
@@ -111,6 +240,14 @@ fn rejects_invalid_mutating_queries() {
             .into_ast()
             .unwrap_err(),
         QueryBuildError::MissingFilter
+    );
+    assert_eq!(
+        User::update()
+            .set(User::ID, 2)
+            .filter(User::ID.eq(1))
+            .into_ast()
+            .unwrap_err(),
+        QueryBuildError::PrimaryKeyUpdate
     );
     assert_eq!(
         User::delete().into_ast().unwrap_err(),
@@ -305,6 +442,7 @@ async fn sqlite_pool_persists_and_loads_models() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
+    assert_eq!(Post::USER.reverse().related_name(), "post_set");
     let path = std::env::temp_dir().join(format!(
         "che_orm2_relation_test_{}_{}.db",
         std::process::id(),
@@ -341,6 +479,65 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let posts = database.fetch_by(Post::USER_ID, user_id).await.unwrap();
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].title, "First post");
+
+    let post_with_user = database
+        .query::<Post>()
+        .select_related(Post::USER)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(post_with_user.len(), 1);
+    assert_eq!(post_with_user[0].related.id, user_id);
+
+    let second_user = User {
+        id: 0,
+        email: "bob@example.test".into(),
+        name: "Bob".into(),
+        is_active: true,
+        created_at: time::OffsetDateTime::now_utc(),
+        updated_at: time::OffsetDateTime::now_utc(),
+    };
+    let second_user_id = database
+        .insert(&second_user)
+        .await
+        .unwrap()
+        .last_insert_rowid
+        .unwrap();
+    database
+        .insert(&Post {
+            id: 0,
+            user_id: second_user_id,
+            title: "Second post".into(),
+        })
+        .await
+        .unwrap();
+
+    let posts = database
+        .fetch_by_many(Post::USER_ID, [user_id, second_user_id])
+        .await
+        .unwrap();
+    assert_eq!(posts.len(), 2);
+    assert!(posts.iter().any(|post| post.user_id == user_id));
+    assert!(posts.iter().any(|post| post.user_id == second_user_id));
+    assert!(
+        database
+            .fetch_by_many(Post::USER_ID, std::iter::empty::<i64>())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let users_with_posts = database
+        .query::<User>()
+        .prefetch_related(Post::USER.reverse())
+        .all()
+        .await
+        .unwrap();
+    let alice = users_with_posts
+        .iter()
+        .find(|user| user.model.id == user_id)
+        .unwrap();
+    assert_eq!(alice.related.len(), 1);
 
     let invalid_post = || {
         crate::QueryAst::Insert(crate::InsertAst {

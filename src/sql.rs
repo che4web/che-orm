@@ -173,6 +173,22 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 self.compile_expr(right);
                 self.sql.push(')');
             }
+            Expr::In { left, values } => {
+                if values.is_empty() {
+                    self.sql.push_str("(1 = 0)");
+                } else {
+                    self.sql.push('(');
+                    self.compile_expr(left);
+                    self.sql.push_str(" IN (");
+                    for (index, value) in values.iter().enumerate() {
+                        if index != 0 {
+                            self.sql.push_str(", ");
+                        }
+                        self.push_value(value);
+                    }
+                    self.sql.push_str("))");
+                }
+            }
             Expr::And { left, right } => self.compile_binary(left, right, " AND "),
             Expr::Or { left, right } => self.compile_binary(left, right, " OR "),
             Expr::Not(expr) => {
@@ -328,7 +344,7 @@ impl<D: SqlDialect> SqlCompiler<D> {
             }
             if let Some(reference) = &column.references {
                 self.sql.push_str(" REFERENCES ");
-                self.sql.push_str(reference.target);
+                self.sql.push_str(&reference.target);
                 if let Some(on_delete) = reference.on_delete {
                     self.sql.push_str(" ON DELETE ");
                     self.sql.push_str(&on_delete.to_uppercase());

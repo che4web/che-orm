@@ -34,9 +34,10 @@
 
 extern crate self as che_orm2;
 
-pub use che_orm2_macros::Model;
+pub use che_orm2_macros::{Model, ModelSerializer};
 
 pub use rusqlite;
+pub use serde;
 pub use time;
 
 mod query;

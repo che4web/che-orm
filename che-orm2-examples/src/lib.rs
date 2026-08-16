@@ -1,4 +1,4 @@
-use che_orm2::Model;
+use che_orm2::{Model, ModelSerializer};
 use time::OffsetDateTime;
 
 #[derive(Debug, Model)]
@@ -34,9 +34,45 @@ impl ExampleUser {
 pub struct ExamplePost {
     #[orm(primary_key)]
     pub id: i64,
-    #[orm(references = "users(id)", on_delete = "cascade")]
+    #[orm(foreign_key = ExampleUser, on_delete = "cascade")]
     pub user_id: i64,
     pub title: String,
+}
+
+#[derive(ModelSerializer)]
+#[serializer(model = ExampleUser)]
+pub struct ExampleUserSerializer {
+    #[serializer(read_only)]
+    pub id: i64,
+    pub email: String,
+    pub name: String,
+    pub is_active: bool,
+}
+
+#[derive(ModelSerializer)]
+#[serializer(model = ExamplePost)]
+pub struct ExamplePostSerializer {
+    #[serializer(read_only)]
+    pub id: i64,
+    pub title: String,
+}
+
+#[derive(ModelSerializer)]
+#[serializer(model = ExampleUser)]
+pub struct ExampleUserWithPostsSerializer {
+    pub id: i64,
+    pub name: String,
+    #[serializer(many = ExamplePost)]
+    pub posts: Vec<ExamplePostSerializer>,
+}
+
+#[derive(ModelSerializer)]
+#[serializer(model = ExamplePost)]
+pub struct ExamplePostWithUserSerializer {
+    pub id: i64,
+    pub title: String,
+    #[serializer(one = ExampleUser)]
+    pub user: ExampleUserSerializer,
 }
 
 pub fn database_schema_sql() -> String {

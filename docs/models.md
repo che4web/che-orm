@@ -141,7 +141,7 @@ let registry = che_orm2::AppRegistry::new()
 
 Это разделяет ownership моделей и оставляет единый desired schema для Atlas.
 
-Foreign key описывается через `references`:
+Foreign key между ORM-моделями описывается через `foreign_key`:
 
 ```rust
 #[derive(Model)]
@@ -149,14 +149,17 @@ Foreign key описывается через `references`:
 struct Post {
     #[orm(primary_key)]
     id: i64,
-    #[orm(references = "users(id)", on_delete = "cascade")]
+    #[orm(foreign_key = User, on_delete = "cascade")]
     user_id: i64,
     title: String,
 }
 ```
 
-`references = "users(id)"` добавляет foreign key в DDL, а
-`on_delete = "cascade"` добавляет каскадное удаление. При работе через
+`foreign_key = User` генерирует `Post::USER`, DDL foreign key на `users(id)` и
+`Post::USER.reverse()` для обратной связи. Имя обратной связи по умолчанию
+`post_set`. `on_delete = "cascade"` добавляет каскадное удаление. Для таблиц
+без ORM-модели можно использовать `references = "table(column)"`, но typed
+relation для такого поля не создаётся. При работе через
 `Database` SQLite `PRAGMA foreign_keys = ON` включается на каждом соединении
 пула.
 
@@ -167,4 +170,66 @@ let posts = database.fetch_by(Post::USER_ID, user_id).await?;
 ```
 
 Это эквивалентно фильтру `Post::query().filter(Post::USER_ID.eq(user_id))`.
-Автоматических relation objects и eager loading пока нет.
+Для коллекции владельцев не вызывайте `fetch_by` в цикле: это создаёт N+1
+запросов. Используйте пакетную выборку:
+
+```rust
+let users = database.all::<User>().await?;
+let user_ids = users.iter().map(|user| user.id);
+let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
+```
+
+`fetch_by_many` выполняет один параметризованный `IN`-запрос и для пустого
+набора возвращает пустой список. Затем дочерние строки нужно сгруппировать по
+`post.user_id` в памяти.
+
+Для queryset доступны typed eager-loading wrappers:
+
+```rust
+let posts = database
+    .query::<Post>()
+    .select_related(Post::USER)
+    .all()
+    .await?;
+
+let users = database
+    .query::<User>()
+    .prefetch_related(Post::USER.reverse())
+    .all()
+    .await?;
+```
+
+Они возвращают `WithOne` и `WithMany`. Serializer получает эти
+материализованные значения и не имеет доступа к базе.
+
+Serializer описывает JSON-поля отдельно от ORM-модели:
+
+```rust
+#[derive(che_orm2::ModelSerializer)]
+#[serializer(model = User)]
+struct UserSerializer {
+    #[serializer(read_only)]
+    id: i64,
+    email: String,
+    name: String,
+    #[serializer(many = Post)]
+    posts: Vec<PostSerializer>,
+}
+```
+
+`UserSerializer` с nested-полем принимает только `WithMany<User, Post>`, то
+есть queryset обязан заранее вызвать `prefetch_related`. Serializer не
+принимает `Database`, не выполняет запросы и не может создать N+1.
+Для множества materialized объектов используется `UserSerializer::many(...)`:
+
+```rust
+let response = UserSerializer::many(users);
+```
+
+Для nested serializer `many` принимает `WithMany`/`WithOne`, поэтому
+непредзагруженная relation не может попасть в вызов случайно.
+Полный runnable-пример находится в `che-orm2-examples`:
+
+```bash
+cargo run -p che-orm2-examples --bin serializers
+```

@@ -76,6 +76,7 @@ pub enum QueryAst {
 pub enum QueryBuildError {
     EmptyInsert,
     EmptyUpdate,
+    PrimaryKeyUpdate,
     MissingFilter,
     DuplicateColumn(&'static str),
     ForeignTableColumn {
@@ -149,6 +150,7 @@ pub trait Model: Sized {
     fn columns() -> &'static [&'static str];
     /// Returns the model's generated integer primary-key field.
     fn primary_key() -> ModelField<Self, i64>;
+    fn primary_key_value(&self) -> i64;
     fn schema() -> TableSchema;
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self>;
     fn insert_values(&self) -> Vec<InsertValue>;
@@ -169,6 +171,78 @@ pub trait Model: Sized {
     }
     fn create_table() -> CreateTableQuery<Self> {
         CreateTableQuery::new(Self::schema())
+    }
+}
+
+/// Converts a materialized ORM model into an API representation.
+pub trait ModelSerializer: serde::Serialize + Sized {
+    type Model: Model;
+
+    fn from_model(model: Self::Model) -> Self;
+}
+
+/// A typed forward foreign-key relation from one model to another.
+#[derive(Debug, Clone, Copy)]
+pub struct BelongsTo<From, To> {
+    field: ColumnRef,
+    getter: fn(&From) -> i64,
+    related_name: &'static str,
+    _marker: PhantomData<fn() -> (From, To)>,
+}
+
+impl<From, To> BelongsTo<From, To> {
+    pub const fn new(
+        table: &'static str,
+        column: &'static str,
+        getter: fn(&From) -> i64,
+        related_name: &'static str,
+    ) -> Self {
+        Self {
+            field: ColumnRef::new(table, column),
+            getter,
+            related_name,
+            _marker: PhantomData,
+        }
+    }
+
+    pub const fn field(&self) -> ColumnRef {
+        self.field
+    }
+
+    pub fn foreign_key(&self, model: &From) -> i64 {
+        (self.getter)(model)
+    }
+
+    pub const fn reverse(&self) -> HasMany<To, From> {
+        HasMany {
+            field: self.field,
+            getter: self.getter,
+            related_name: self.related_name,
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// A typed reverse foreign-key relation from one model to many related models.
+#[derive(Debug, Clone, Copy)]
+pub struct HasMany<From, To> {
+    field: ColumnRef,
+    getter: fn(&To) -> i64,
+    related_name: &'static str,
+    _marker: PhantomData<fn() -> (From, To)>,
+}
+
+impl<From, To> HasMany<From, To> {
+    pub const fn field(&self) -> ColumnRef {
+        self.field
+    }
+
+    pub fn foreign_key(&self, model: &To) -> i64 {
+        (self.getter)(model)
+    }
+
+    pub const fn related_name(&self) -> &'static str {
+        self.related_name
     }
 }
 
@@ -326,6 +400,15 @@ impl<M: Model> UpdateQuery<M> {
         if self.ast.filter.is_none() && !self.allow_all {
             return Err(QueryBuildError::MissingFilter);
         }
+        let primary_key = M::primary_key().column();
+        if self
+            .ast
+            .assignments
+            .iter()
+            .any(|assignment| assignment.column == primary_key)
+        {
+            return Err(QueryBuildError::PrimaryKeyUpdate);
+        }
         validate_unique_columns(
             self.ast
                 .assignments
@@ -413,6 +496,7 @@ fn validate_expr_table(expr: Option<&Expr>, table: &'static str) -> Result<(), Q
             validate_expr_table(Some(left), table)?;
             validate_expr_table(Some(right), table)
         }
+        Expr::In { left, .. } => validate_expr_table(Some(left), table),
         Expr::Not(expr) | Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
             validate_expr_table(Some(expr), table)
         }
