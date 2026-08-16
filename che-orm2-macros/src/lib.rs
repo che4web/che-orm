@@ -62,6 +62,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     let mut nested = Vec::new();
     let mut serialize_fields = Vec::new();
     let mut input_fields = Vec::new();
+    let mut serializer_fields = Vec::new();
     for field in fields {
         let name = field.ident.expect("named fields always have identifiers");
         let json_name = name.to_string();
@@ -108,6 +109,13 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         if write_only {
             serialize_fields.pop();
         }
+        serializer_fields.push(quote! {
+            #orm::SerializerField {
+                name: #json_name,
+                read_only: #read_only,
+                write_only: #write_only,
+            }
+        });
         if let Some((many, related_model)) = nested_relation {
             let relation_path = relation_path.ok_or_else(|| {
                 Error::new_spanned(
@@ -120,13 +128,14 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             let serializer_type = nested_serializer_type(&field.ty, many, optional)?;
             nested.push((name, many, related_model, marker, optional, serializer_type));
         } else {
-            if !read_only && !write_only {
+            if !read_only {
                 let constant = Ident::new(&name.to_string().to_uppercase(), name.span());
                 input_fields.push((name.clone(), field.ty.clone(), constant));
             }
             assignments.push(quote! { #name: model.#name });
         }
     }
+    let serializer_fields = quote! { &[#(#serializer_fields),*] };
     let has_nested = !nested.is_empty();
     let field_count = serialize_fields.len();
     let conversion = if nested.len() == 1 {
@@ -177,6 +186,10 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
 
                     fn from_input(value: Self::Input) -> Self {
                         <Self as ::core::convert::From<#loaded_wrapper>>::from(value)
+                    }
+
+                    fn fields() -> &'static [#orm::SerializerField] {
+                        #serializer_fields
                     }
                 }
             }
@@ -249,6 +262,10 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                 fn from_input(value: Self::Input) -> Self {
                     <Self as ::core::convert::From<#loaded_type>>::from(value)
                 }
+
+                fn fields() -> &'static [#orm::SerializerField] {
+                    #serializer_fields
+                }
             }
 
             impl #serializer {
@@ -294,6 +311,10 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                 fn from_input(model: Self::Input) -> Self {
                     Self { #(#assignments),* }
                 }
+
+                fn fields() -> &'static [#orm::SerializerField] {
+                    #serializer_fields
+                }
             }
         }
     };
@@ -327,6 +348,15 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             };
         }
     });
+    let patch_missing_checks = input_fields
+        .iter()
+        .map(|(name, _, _)| quote! { input.#name.is_missing() })
+        .collect::<Vec<_>>();
+    let patch_empty = if patch_missing_checks.is_empty() {
+        quote! { true }
+    } else {
+        quote! { #(#patch_missing_checks)&&* }
+    };
 
     Ok(quote! {
         #[derive(Debug, #orm::serde::Deserialize)]
@@ -382,6 +412,9 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             where
                 #model: Send + 'static,
             {
+                if #patch_empty {
+                    return Err(#orm::OrmError::QueryBuild(#orm::QueryBuildError::EmptyUpdate));
+                }
                 let builder = database.update::<#model>(id);
                 #(#patch_sets)*
                 builder.execute().await

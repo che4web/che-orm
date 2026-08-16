@@ -178,6 +178,23 @@ impl Database {
         self.fetch_all(M::query()).await
     }
 
+    pub async fn count<M: Model + Send + 'static>(&self) -> Result<usize, OrmError> {
+        let table = M::table_name();
+        let pool = self.pool.clone();
+        pool.get()
+            .await?
+            .interact(move |connection| {
+                configure_connection(connection)?;
+                connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .await
+            .map_err(|error| OrmError::Interaction(error.to_string()))?
+            .map(|count| count as usize)
+            .map_err(OrmError::from)
+    }
+
     /// Starts a high-level insert builder.
     pub fn create<M: Model>(&self) -> CreateBuilder<'_, M> {
         CreateBuilder {

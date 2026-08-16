@@ -72,6 +72,12 @@ impl<T> Default for PatchField<T> {
     }
 }
 
+impl<T> PatchField<T> {
+    pub const fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
 impl<'de, T> serde::Deserialize<'de> for PatchField<T>
 where
     T: serde::Deserialize<'de>,

@@ -101,7 +101,7 @@ where
 async fn openapi_handler<V: ViewSet>(
     State((_state, viewset)): State<(RestState, V)>,
 ) -> impl IntoResponse {
-    Json(openapi_json_for::<V::Model>(
+    Json(openapi_json_for::<V::Model, V::Serializer>(
         viewset.path(),
         OpenApiOptions::default(),
     ))
@@ -121,14 +121,17 @@ where
     V: ViewSet,
     V::Serializer: Serialize,
 {
-    let all = state.database().all::<V::Model>().await?;
-    let count = all.len();
+    let count = state.database().count::<V::Model>().await?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(20);
-    let rows = all
+    let rows = state
+        .database()
+        .query::<V::Model>()
+        .limit(limit as u64)
+        .offset(offset as u64)
+        .all()
+        .await?
         .into_iter()
-        .skip(offset)
-        .take(limit)
         .map(|model| {
             serde_json::to_value(V::Serializer::from_input(model)).map_err(RestError::from)
         })

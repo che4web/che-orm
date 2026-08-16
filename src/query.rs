@@ -295,6 +295,17 @@ pub trait ModelSerializer: serde::Serialize + Sized {
     type Input;
 
     fn from_input(input: Self::Input) -> Self;
+
+    fn fields() -> &'static [SerializerField] {
+        &[]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerializerField {
+    pub name: &'static str,
+    pub read_only: bool,
+    pub write_only: bool,
 }
 
 /// A typed forward foreign-key relation from one model to another.

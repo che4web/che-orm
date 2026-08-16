@@ -24,6 +24,9 @@ impl IntoResponse for RestError {
         let status = match self {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Json(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Orm(che_orm2::OrmError::QueryBuild(che_orm2::QueryBuildError::EmptyUpdate)) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Orm(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({"detail": self.to_string()}))).into_response()

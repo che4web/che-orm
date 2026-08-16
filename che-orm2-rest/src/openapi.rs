@@ -1,4 +1,4 @@
-use che_orm2::{ColumnType, Model};
+use che_orm2::{ColumnType, Model, ModelSerializer};
 use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone)]
@@ -16,36 +16,40 @@ impl Default for OpenApiOptions {
     }
 }
 
-pub fn openapi_json(options: OpenApiOptions) -> Value {
-    json!({
-        "openapi": "3.0.3",
-        "info": { "title": options.title, "version": options.version },
-        "paths": {},
-    })
-}
-
-pub fn openapi_json_for<M: Model>(path: &str, options: OpenApiOptions) -> Value {
+pub fn openapi_json_for<M, S>(path: &str, options: OpenApiOptions) -> Value
+where
+    M: Model,
+    S: ModelSerializer<Model = M, Input = M>,
+{
     let model_name = std::any::type_name::<M>()
         .rsplit("::")
         .next()
         .unwrap_or("Model");
     let schema = M::schema();
-    let primary_key = M::primary_key().column().name;
     let mut response_properties = Map::new();
     let mut create_properties = Map::new();
     let mut response_required = Vec::new();
     let mut create_required = Vec::new();
 
-    for column in &schema.columns {
+    for field in S::fields() {
+        let Some(column) = schema
+            .columns
+            .iter()
+            .find(|column| column.name == field.name)
+        else {
+            continue;
+        };
         let property = field_schema(column.column_type, column.nullable);
-        response_properties.insert(column.name.to_string(), property.clone());
-        if !column.nullable {
-            response_required.push(column.name.to_string());
+        if !field.write_only {
+            response_properties.insert(field.name.to_string(), property.clone());
+            if !column.nullable {
+                response_required.push(field.name.to_string());
+            }
         }
-        if column.name != primary_key {
-            create_properties.insert(column.name.to_string(), property);
+        if !field.read_only {
+            create_properties.insert(field.name.to_string(), property);
             if !column.nullable && column.default.is_none() && !column.auto_now_add {
-                create_required.push(column.name.to_string());
+                create_required.push(field.name.to_string());
             }
         }
     }
@@ -56,12 +60,16 @@ pub fn openapi_json_for<M: Model>(path: &str, options: OpenApiOptions) -> Value 
         schema
             .columns
             .iter()
-            .filter(|column| column.name != primary_key)
-            .map(|column| {
-                (
-                    column.name.to_string(),
-                    field_schema(column.column_type, column.nullable),
-                )
+            .filter_map(|column| {
+                S::fields()
+                    .iter()
+                    .find(|field| field.name == column.name && !field.read_only)
+                    .map(|field| {
+                        (
+                            field.name.to_string(),
+                            field_schema(column.column_type, column.nullable),
+                        )
+                    })
             })
             .collect(),
         Vec::new(),
@@ -141,4 +149,41 @@ fn schema_ref(name: &str) -> Value {
 
 fn response_ref(name: &str) -> Value {
     json!({ "description": "OK", "content": { "application/json": { "schema": schema_ref(name) } } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(che_orm2::Model)]
+    #[orm(table = "api_tasks")]
+    struct ApiTask {
+        #[orm(primary_key)]
+        id: i64,
+        title: String,
+        secret: String,
+    }
+
+    #[derive(che_orm2::ModelSerializer)]
+    #[serializer(model = ApiTask)]
+    #[allow(dead_code)]
+    struct ApiTaskSerializer {
+        #[serializer(read_only)]
+        id: i64,
+        title: String,
+        #[serializer(write_only)]
+        secret: String,
+    }
+
+    #[test]
+    fn openapi_uses_serializer_visibility() {
+        let document =
+            openapi_json_for::<ApiTask, ApiTaskSerializer>("/tasks", OpenApiOptions::default());
+        assert!(document["paths"]["/tasks/"]["post"].is_object());
+        assert!(document["components"]["schemas"]["ApiTask"]["properties"]["title"].is_object());
+        assert!(document["components"]["schemas"]["ApiTask"]["properties"]["secret"].is_null());
+        assert!(
+            document["components"]["schemas"]["ApiTaskCreate"]["properties"]["secret"].is_object()
+        );
+    }
 }

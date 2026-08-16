@@ -81,6 +81,7 @@ struct UserResponse {
 struct UserWriteSerializer {
     #[serializer(read_only)]
     id: i64,
+    #[serializer(write_only)]
     email: String,
     name: String,
     is_active: bool,
@@ -197,11 +198,35 @@ fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
     assert_eq!(patch.email, crate::PatchField::Missing);
     assert_eq!(patch.name, crate::PatchField::Value("Updated".to_string()));
     assert_eq!(patch.is_active, crate::PatchField::Value(false));
+    assert_eq!(UserWriteSerializer::fields()[1].write_only, true);
 
     let unknown = crate::serde_json::from_str::<UserWriteSerializerCreateInput>(
         r#"{"email":"a","name":"A","is_active":true,"id":1}"#,
     );
     assert!(unknown.is_err());
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn generated_serializer_rejects_empty_patch_before_database_update() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<User>().await.unwrap();
+    let result = UserWriteSerializer::patch(
+        &database,
+        1,
+        UserWriteSerializerPatchInput {
+            email: crate::PatchField::Missing,
+            name: crate::PatchField::Missing,
+            is_active: crate::PatchField::Missing,
+        },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(crate::OrmError::QueryBuild(
+            crate::QueryBuildError::EmptyUpdate
+        ))
+    ));
 }
 
 #[cfg(feature = "sqlite")]
