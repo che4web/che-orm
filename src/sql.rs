@@ -173,6 +173,13 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 self.compile_expr(right);
                 self.sql.push(')');
             }
+            Expr::Like { left, pattern } => {
+                self.sql.push('(');
+                self.compile_expr(left);
+                self.sql.push_str(" LIKE ");
+                self.compile_expr(pattern);
+                self.sql.push(')');
+            }
             Expr::In { left, values } => {
                 if values.is_empty() {
                     self.sql.push_str("(1 = 0)");

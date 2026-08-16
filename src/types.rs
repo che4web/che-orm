@@ -100,6 +100,10 @@ pub enum Expr {
         op: CompareOp,
         right: Box<Expr>,
     },
+    Like {
+        left: Box<Expr>,
+        pattern: Box<Expr>,
+    },
     In {
         left: Box<Expr>,
         values: Vec<DatabaseValue>,
@@ -132,6 +136,13 @@ impl Expr {
     }
     pub fn not(self) -> Expr {
         Expr::Not(Box::new(self))
+    }
+
+    pub fn like(self, pattern: impl Into<String>) -> Expr {
+        Expr::Like {
+            left: Box::new(self),
+            pattern: Box::new(Expr::Value(DatabaseValue::Text(pattern.into()))),
+        }
     }
 }
 
@@ -221,6 +232,10 @@ impl<M, T> ModelField<M, T> {
     }
     pub fn is_not_null(self) -> Expr {
         Expr::IsNotNull(Box::new(Expr::Column(self.column())))
+    }
+
+    pub fn contains(self, value: impl Into<String>) -> Expr {
+        Expr::Column(self.column()).like(format!("%{}%", value.into()))
     }
     pub fn asc(self) -> OrderBy {
         OrderBy {

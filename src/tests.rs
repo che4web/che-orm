@@ -308,6 +308,17 @@ fn compiles_select_with_sqlite_parameters() {
 }
 
 #[test]
+fn compiles_contains_expression_with_parameter() {
+    let query = User::query()
+        .filter(User::NAME.contains("Ali"))
+        .into_ast()
+        .unwrap();
+    let compiled = SqlCompiler::<SqliteDialect>::compile(&query);
+    assert!(compiled.sql.contains("users.name LIKE ?"));
+    assert_eq!(compiled.params, vec![DatabaseValue::Text("%Ali%".into())]);
+}
+
+#[test]
 fn compiles_in_expression_for_sqlite_and_postgres() {
     let sqlite_query = User::query()
         .filter(

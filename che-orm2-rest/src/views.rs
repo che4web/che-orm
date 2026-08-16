@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{collections::HashMap, marker::PhantomData};
 
 use axum::{
     Json, Router,
@@ -13,6 +13,7 @@ use serde_json::json;
 
 use crate::{
     RestError, RestResult, RestState,
+    filters::{FilterError, FilterSet, FilterSetSpec},
     openapi::{OpenApiOptions, openapi_json_for},
 };
 
@@ -22,8 +23,13 @@ pub trait ViewSet: Clone + Send + Sync + 'static {
         + ModelWriteSerializer<Model = Self::Model>
         + Send
         + 'static;
+    type FilterSet: FilterSetSpec<Model = Self::Model> + Default;
 
     fn path(&self) -> &'static str;
+
+    fn filterset(&self) -> Self::FilterSet {
+        Default::default()
+    }
 }
 
 pub struct CrudViewSet<M, S> {
@@ -60,6 +66,7 @@ where
 {
     type Model = M;
     type Serializer = S;
+    type FilterSet = FilterSet<M>;
 
     fn path(&self) -> &'static str {
         self.path
@@ -107,28 +114,26 @@ async fn openapi_handler<V: ViewSet>(
     ))
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ListParams {
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
 async fn list<V>(
-    State((state, _viewset)): State<(RestState, V)>,
-    Query(params): Query<ListParams>,
+    State((state, viewset)): State<(RestState, V)>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> RestResult<impl IntoResponse>
 where
     V: ViewSet,
     V::Serializer: Serialize,
 {
-    let count = state.database().count::<V::Model>().await?;
-    let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(20);
-    let rows = state
+    let filterset = viewset.filterset();
+    let count_query = filterset.apply(state.database().query::<V::Model>(), &params)?;
+    let count = state
         .database()
-        .query::<V::Model>()
-        .limit(limit as u64)
-        .offset(offset as u64)
+        .count_query(count_query.into_select_query())
+        .await?;
+    let offset = parse_page_param(&params, "offset")?.unwrap_or(0);
+    let limit = parse_page_param(&params, "limit")?.unwrap_or(20);
+    let query = filterset.apply(state.database().query::<V::Model>(), &params)?;
+    let rows = query
+        .limit(limit)
+        .offset(offset)
         .all()
         .await?
         .into_iter()
@@ -137,6 +142,21 @@ where
         })
         .collect::<RestResult<Vec<_>>>()?;
     Ok(Json(json!({"count": count, "results": rows})))
+}
+
+fn parse_page_param(
+    params: &HashMap<String, String>,
+    name: &str,
+) -> Result<Option<u64>, FilterError> {
+    params
+        .get(name)
+        .map(|value| {
+            value.parse().map_err(|_| FilterError::InvalidValue {
+                field: name.to_owned(),
+                expected: "integer",
+            })
+        })
+        .transpose()
 }
 
 async fn retrieve<V>(

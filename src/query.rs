@@ -442,6 +442,14 @@ impl<M: Model> SelectQuery<M> {
         Ok(QueryAst::Select(self.ast))
     }
 
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn into_select_ast(self) -> Result<SelectAst, QueryBuildError> {
+        match self.into_ast()? {
+            QueryAst::Select(select) => Ok(select),
+            _ => unreachable!(),
+        }
+    }
+
     pub fn into_joined_ast<R: Model, Relation>(
         self,
         relation: BelongsTo<M, R, Relation>,
@@ -677,6 +685,10 @@ fn validate_expr_table(expr: Option<&Expr>, table: &'static str) -> Result<(), Q
     match expr {
         Expr::Column(column) => validate_column_table(column, table),
         Expr::Value(_) => Ok(()),
+        Expr::Like { left, pattern } => {
+            validate_expr_table(Some(left), table)?;
+            validate_expr_table(Some(pattern), table)
+        }
         Expr::Compare { left, right, .. }
         | Expr::And { left, right }
         | Expr::Or { left, right } => {
@@ -720,6 +732,10 @@ fn validate_expr_tables(
                     expected_table: tables[0],
                 })
             }
+        }
+        Expr::Like { left, pattern } => {
+            validate_expr_tables(Some(left), tables)?;
+            validate_expr_tables(Some(pattern), tables)
         }
         Expr::Value(_) => Ok(()),
         Expr::Compare { left, right, .. }

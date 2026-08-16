@@ -15,6 +15,8 @@ pub enum RestError {
     BadRequest(String),
     #[error("resource not found")]
     NotFound,
+    #[error(transparent)]
+    Filter(#[from] crate::FilterError),
 }
 
 pub type RestResult<T> = Result<T, RestError>;
@@ -23,6 +25,7 @@ impl IntoResponse for RestError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Filter(_) => StatusCode::BAD_REQUEST,
             Self::Json(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Orm(che_orm2::OrmError::QueryBuild(che_orm2::QueryBuildError::EmptyUpdate)) => {
                 StatusCode::BAD_REQUEST

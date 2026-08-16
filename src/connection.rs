@@ -195,6 +195,29 @@ impl Database {
             .map_err(OrmError::from)
     }
 
+    pub async fn count_query<M: Model + Send + 'static>(
+        &self,
+        query: SelectQuery<M>,
+    ) -> Result<usize, OrmError> {
+        let ast = query.into_select_ast().map_err(OrmError::QueryBuild)?;
+        let compiled = SqlCompiler::<SqliteDialect>::compile(&QueryAst::Select(ast));
+        let sql = format!("SELECT COUNT(*) FROM ({})", compiled.sql);
+        let pool = self.pool.clone();
+        pool.get()
+            .await?
+            .interact(move |connection| {
+                configure_connection(connection)?;
+                let params = sqlite_params(&compiled)?;
+                connection.query_row(&sql, rusqlite::params_from_iter(params), |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .await
+            .map_err(|error| OrmError::Interaction(error.to_string()))?
+            .map(|count| count as usize)
+            .map_err(OrmError::from)
+    }
+
     /// Starts a high-level insert builder.
     pub fn create<M: Model>(&self) -> CreateBuilder<'_, M> {
         CreateBuilder {
@@ -478,6 +501,10 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
         M: Send + 'static,
     {
         self.database.fetch_one(self.query).await
+    }
+
+    pub fn into_select_query(self) -> SelectQuery<M> {
+        self.query
     }
 }
 
