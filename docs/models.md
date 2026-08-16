@@ -202,6 +202,36 @@ let users = database
 Они возвращают `WithOne` и `WithMany`. Serializer получает эти
 материализованные значения и не имеет доступа к базе.
 
+Несколько `belongs_to` relations можно загружать chainable API одним SQL
+запросом. Каждая relation получает alias из имени FK (`author_id` -> `author`):
+
+```rust
+let posts = database
+    .query::<Post>()
+    .select_related(Post::AUTHOR)
+    .select_related(Post::EDITOR)
+    .all()
+    .await?;
+```
+
+Для двух FK в одну таблицу generated relation markers различаются, поэтому
+`author` и `editor` нельзя перепутать на этапе компиляции.
+
+После `select_related` поля joined model доступны через relation descriptor:
+
+```rust
+let posts = database
+    .query::<Post>()
+    .select_related(Post::USER)
+    .filter(Post::USER.related_field(User::NAME).eq("Alice"))
+    .order_by(Post::USER.related_field(User::NAME).asc())
+    .all()
+    .await?;
+```
+
+До `select_related` такой вызов не используется: alias joined table появляется
+только в materializing query.
+
 Serializer описывает JSON-поля отдельно от ORM-модели:
 
 ```rust

@@ -585,6 +585,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         });
         if let Some(target) = &field_attributes.foreign_key {
             let relation_name = column.strip_suffix("_id").unwrap_or(&column).to_uppercase();
+            let alias = column
+                .strip_suffix("_id")
+                .unwrap_or(&column)
+                .to_ascii_lowercase();
             let relation_constant = Ident::new(&relation_name, field_name.span());
             let marker_name = Ident::new(
                 &format!(
@@ -610,6 +614,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                         #table,
                         #column,
                         |model: &Self| model.#field_name,
+                        #alias,
                         #reverse_name,
                     );
             });

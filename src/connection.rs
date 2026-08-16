@@ -491,6 +491,12 @@ pub struct LoadedMany<R, Relation = ()> {
     pub(crate) _relation: std::marker::PhantomData<Relation>,
 }
 
+#[derive(Debug)]
+pub struct LoadedOne<R, Relation = ()> {
+    pub related: R,
+    pub(crate) _relation: std::marker::PhantomData<Relation>,
+}
+
 /// Query which materializes a model together with one related model.
 pub struct SelectRelatedQuery<'db, M, R, Relation = (), Key = i64> {
     database: &'db Database,
@@ -498,11 +504,39 @@ pub struct SelectRelatedQuery<'db, M, R, Relation = (), Key = i64> {
     relation: BelongsTo<M, R, Relation, Key>,
 }
 
-impl<M, R, Relation> SelectRelatedQuery<'_, M, R, Relation, i64>
+impl<'db, M, R, Relation> SelectRelatedQuery<'db, M, R, Relation, i64>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.filter(expr),
+            relation: self.relation,
+        }
+    }
+
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.order_by(order),
+            relation: self.relation,
+        }
+    }
+
+    pub fn select_related<R2, Relation2>(
+        self,
+        relation: BelongsTo<M, R2, Relation2, i64>,
+    ) -> MultiSelectRelatedQuery<'db, M, R, Relation, R2, Relation2> {
+        MultiSelectRelatedQuery {
+            database: self.database,
+            query: self.query,
+            first: self.relation,
+            second: relation,
+        }
+    }
+
     pub async fn all(self) -> Result<Vec<WithOne<M, R, Relation>>, OrmError>
     where
         Relation: Send + 'static,
@@ -525,11 +559,104 @@ where
     }
 }
 
+pub struct MultiSelectRelatedQuery<'db, M, R1, Relation1, R2, Relation2> {
+    database: &'db Database,
+    query: SelectQuery<M>,
+    first: BelongsTo<M, R1, Relation1, i64>,
+    second: BelongsTo<M, R2, Relation2, i64>,
+}
+
+impl<M, R1, Relation1, R2, Relation2> MultiSelectRelatedQuery<'_, M, R1, Relation1, R2, Relation2>
+where
+    M: Model + Send + 'static,
+    R1: Model + Send + 'static,
+    R2: Model + Send + 'static,
+    Relation1: Send + 'static,
+    Relation2: Send + 'static,
+{
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.filter(expr),
+            first: self.first,
+            second: self.second,
+        }
+    }
+
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.order_by(order),
+            first: self.first,
+            second: self.second,
+        }
+    }
+
+    pub async fn all(
+        self,
+    ) -> Result<Vec<Loaded<M, (LoadedOne<R1, Relation1>, LoadedOne<R2, Relation2>)>>, OrmError>
+    {
+        let first = self.first;
+        let second = self.second;
+        let mut ast = self
+            .query
+            .into_joined_ast(first)
+            .map_err(OrmError::QueryBuild)?;
+        if let QueryAst::Select(select) = &mut ast {
+            select.columns.extend(
+                R2::columns()
+                    .iter()
+                    .map(|column| crate::ColumnRef::new(second.alias(), column)),
+            );
+            select.joins.push(crate::JoinAst {
+                table: crate::TableRef::new(R2::table_name()),
+                alias: second.alias(),
+                kind: crate::JoinType::Inner,
+                on: crate::Expr::Compare {
+                    left: Box::new(crate::Expr::Column(second.field())),
+                    op: crate::CompareOp::Eq,
+                    right: Box::new(crate::Expr::Column(crate::ColumnRef::new(
+                        second.alias(),
+                        R2::primary_key().column().name,
+                    ))),
+                },
+            });
+        }
+        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
+        let pool = self.database.pool.clone();
+        pool.get()
+            .await?
+            .interact(move |connection| {
+                configure_connection(connection)?;
+                load_multi_joined_models::<M, R1, Relation1, R2, Relation2>(connection, &compiled)
+            })
+            .await
+            .map_err(|error| OrmError::Interaction(error.to_string()))?
+            .map_err(OrmError::from)
+    }
+}
+
 impl<M, R, Relation> SelectRelatedQuery<'_, M, R, Relation, Option<i64>>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.filter(expr),
+            relation: self.relation,
+        }
+    }
+
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            database: self.database,
+            query: self.query.order_by(order),
+            relation: self.relation,
+        }
+    }
+
     pub async fn all(self) -> Result<Vec<WithOptionalOne<M, R, Relation>>, OrmError>
     where
         Relation: Send + 'static,
@@ -901,6 +1028,32 @@ fn load_optional_joined_models<M: Model, R: Model, Relation>(
                 .map(|_| R::from_row_at(row, offset))
                 .transpose()?,
             _relation: std::marker::PhantomData,
+        })
+    })?;
+    rows.collect()
+}
+
+fn load_multi_joined_models<M: Model, R1: Model, Relation1, R2: Model, Relation2>(
+    connection: &rusqlite::Connection,
+    compiled: &CompiledQuery,
+) -> rusqlite::Result<Vec<Loaded<M, (LoadedOne<R1, Relation1>, LoadedOne<R2, Relation2>)>>> {
+    let mut statement = connection.prepare(&compiled.sql)?;
+    let params = sqlite_params(compiled)?;
+    let first_offset = M::columns().len();
+    let second_offset = first_offset + R1::columns().len();
+    let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok(Loaded {
+            model: M::from_row_at(row, 0)?,
+            relations: (
+                LoadedOne {
+                    related: R1::from_row_at(row, first_offset)?,
+                    _relation: std::marker::PhantomData,
+                },
+                LoadedOne {
+                    related: R2::from_row_at(row, second_offset)?,
+                    _relation: std::marker::PhantomData,
+                },
+            ),
         })
     })?;
     rows.collect()

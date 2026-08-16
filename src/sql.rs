@@ -234,6 +234,8 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 JoinType::Left => "LEFT JOIN ",
             });
             self.push_identifier(join.table.name);
+            self.sql.push_str(" AS ");
+            self.push_identifier(join.alias);
             self.sql.push_str(" ON ");
             self.compile_expr(&join.on);
         }

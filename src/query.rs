@@ -18,6 +18,96 @@ pub struct OrderBy {
     pub direction: OrderDirection,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct JoinedField<T> {
+    column: ColumnRef,
+    _marker: PhantomData<T>,
+}
+
+impl<T> JoinedField<T> {
+    pub const fn new(column: ColumnRef) -> Self {
+        Self {
+            column,
+            _marker: PhantomData,
+        }
+    }
+
+    fn comparison<V>(self, op: CompareOp, value: V) -> Expr
+    where
+        V: QueryValue<T>,
+    {
+        Expr::Compare {
+            left: Box::new(Expr::Column(self.column)),
+            op,
+            right: Box::new(Expr::Value(value.into_query_value())),
+        }
+    }
+
+    pub fn eq<V>(self, value: V) -> Expr
+    where
+        V: QueryValue<T>,
+    {
+        self.comparison(CompareOp::Eq, value)
+    }
+
+    pub fn ne<V>(self, value: V) -> Expr
+    where
+        V: QueryValue<T>,
+    {
+        self.comparison(CompareOp::Ne, value)
+    }
+
+    pub fn gt<V>(self, value: V) -> Expr
+    where
+        V: QueryValue<T>,
+    {
+        self.comparison(CompareOp::Gt, value)
+    }
+
+    pub fn gte<V>(self, value: V) -> Expr
+    where
+        V: QueryValue<T>,
+    {
+        self.comparison(CompareOp::Gte, value)
+    }
+
+    pub fn lt<V>(self, value: V) -> Expr
+    where
+        V: QueryValue<T>,
+    {
+        self.comparison(CompareOp::Lt, value)
+    }
+
+    pub fn lte<V>(self, value: V) -> Expr
+    where
+        V: QueryValue<T>,
+    {
+        self.comparison(CompareOp::Lte, value)
+    }
+
+    pub fn is_null(self) -> Expr {
+        Expr::IsNull(Box::new(Expr::Column(self.column)))
+    }
+
+    pub fn is_not_null(self) -> Expr {
+        Expr::IsNotNull(Box::new(Expr::Column(self.column)))
+    }
+
+    pub const fn asc(self) -> OrderBy {
+        OrderBy {
+            column: self.column,
+            direction: OrderDirection::Asc,
+        }
+    }
+
+    pub const fn desc(self) -> OrderBy {
+        OrderBy {
+            column: self.column,
+            direction: OrderDirection::Desc,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectAst {
     pub table: TableRef,
@@ -32,6 +122,7 @@ pub struct SelectAst {
 #[derive(Debug, Clone)]
 pub struct JoinAst {
     pub table: TableRef,
+    pub alias: &'static str,
     pub kind: JoinType,
     pub on: Expr,
 }
@@ -211,6 +302,7 @@ pub trait ModelSerializer: serde::Serialize + Sized {
 pub struct BelongsTo<From, To, Relation = (), Key = i64> {
     field: ColumnRef,
     getter: fn(&From) -> Key,
+    alias: &'static str,
     related_name: &'static str,
     _marker: PhantomData<fn() -> (From, To, Relation, Key)>,
 }
@@ -220,11 +312,13 @@ impl<From, To, Relation, Key> BelongsTo<From, To, Relation, Key> {
         table: &'static str,
         column: &'static str,
         getter: fn(&From) -> Key,
+        alias: &'static str,
         related_name: &'static str,
     ) -> Self {
         Self {
             field: ColumnRef::new(table, column),
             getter,
+            alias,
             related_name,
             _marker: PhantomData,
         }
@@ -232,6 +326,14 @@ impl<From, To, Relation, Key> BelongsTo<From, To, Relation, Key> {
 
     pub const fn field(&self) -> ColumnRef {
         self.field
+    }
+
+    pub const fn alias(&self) -> &'static str {
+        self.alias
+    }
+
+    pub const fn related_field<T>(&self, field: ModelField<To, T>) -> JoinedField<T> {
+        JoinedField::new(ColumnRef::new(self.alias, field.column().name))
     }
 
     pub fn foreign_key(&self, model: &From) -> Key {
@@ -318,7 +420,10 @@ impl<M: Model> SelectQuery<M> {
     }
     pub fn into_ast(self) -> Result<QueryAst, QueryBuildError> {
         let mut tables = vec![self.ast.table.name];
-        tables.extend(self.ast.joins.iter().map(|join| join.table.name));
+        for join in &self.ast.joins {
+            tables.push(join.table.name);
+            tables.push(join.alias);
+        }
         validate_expr_tables(self.ast.filter.as_ref(), &tables)?;
         for join in &self.ast.joins {
             validate_expr_tables(Some(&join.on), &tables)?;
@@ -348,15 +453,19 @@ impl<M: Model> SelectQuery<M> {
         self.ast.columns.extend(
             R::columns()
                 .iter()
-                .map(|column| ColumnRef::new(R::table_name(), column)),
+                .map(|column| ColumnRef::new(relation.alias(), column)),
         );
         self.ast.joins.push(JoinAst {
             table: TableRef::new(R::table_name()),
+            alias: relation.alias(),
             kind,
             on: Expr::Compare {
                 left: Box::new(Expr::Column(relation.field())),
                 op: CompareOp::Eq,
-                right: Box::new(Expr::Column(R::primary_key().column())),
+                right: Box::new(Expr::Column(ColumnRef::new(
+                    relation.alias(),
+                    R::primary_key().column().name,
+                ))),
             },
         });
         self.into_ast()

@@ -42,6 +42,19 @@ struct Comment {
 }
 
 #[cfg(feature = "sqlite")]
+#[derive(Debug, Model)]
+#[orm(table = "dual_posts")]
+struct DualPost {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = User)]
+    author_id: i64,
+    #[orm(foreign_key = User)]
+    editor_id: i64,
+    title: String,
+}
+
+#[cfg(feature = "sqlite")]
 #[derive(ModelSerializer)]
 #[serializer(model = OptionalPost)]
 struct OptionalPostResponse {
@@ -284,7 +297,7 @@ fn compiles_select_related_as_one_join() {
     let compiled = SqlCompiler::<SqliteDialect>::compile(&query);
     assert_eq!(
         compiled.sql,
-        "SELECT posts.id, posts.user_id, posts.title, users.id, users.email, users.name, users.is_active, users.created_at, users.updated_at FROM posts INNER JOIN users ON (posts.user_id = users.id)"
+        "SELECT posts.id, posts.user_id, posts.title, user.id, user.email, user.name, user.is_active, user.created_at, user.updated_at FROM posts INNER JOIN users AS user ON (posts.user_id = user.id)"
     );
 
     let optional_query = OptionalPost::query()
@@ -292,6 +305,60 @@ fn compiles_select_related_as_one_join() {
         .unwrap();
     let optional_compiled = SqlCompiler::<SqliteDialect>::compile(&optional_query);
     assert!(optional_compiled.sql.contains("LEFT JOIN users"));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_select_related_chains_multiple_aliases() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<User>().await.unwrap();
+    database.create_table::<DualPost>().await.unwrap();
+    let author = database
+        .create::<User>()
+        .set(User::EMAIL, "author@example.test")
+        .set(User::NAME, "Author")
+        .set(User::IS_ACTIVE, true)
+        .execute()
+        .await
+        .unwrap();
+    let editor = database
+        .create::<User>()
+        .set(User::EMAIL, "editor@example.test")
+        .set(User::NAME, "Editor")
+        .set(User::IS_ACTIVE, true)
+        .execute()
+        .await
+        .unwrap();
+    database
+        .insert(&DualPost {
+            id: 0,
+            author_id: author.id,
+            editor_id: editor.id,
+            title: "Aliased".into(),
+        })
+        .await
+        .unwrap();
+
+    let rows = database
+        .query::<DualPost>()
+        .select_related(DualPost::AUTHOR)
+        .select_related(DualPost::EDITOR)
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].relations.0.related.id, author.id);
+    assert_eq!(rows[0].relations.1.related.id, editor.id);
+
+    let filtered = database
+        .query::<DualPost>()
+        .select_related(DualPost::AUTHOR)
+        .filter(DualPost::AUTHOR.related_field(User::NAME).eq("Author"))
+        .order_by(DualPost::AUTHOR.related_field(User::NAME).asc())
+        .all()
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
 }
 
 #[test]
