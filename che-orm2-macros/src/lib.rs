@@ -40,6 +40,11 @@ pub fn derive_model_serializer(input: TokenStream) -> TokenStream {
 fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let orm = orm_path()?;
     let model = parse_serializer_model(&input.attrs)?;
+    let validator = parse_serializer_validator(&input.attrs)?;
+    let validator_call = validator.map_or_else(
+        proc_macro2::TokenStream::new,
+        |path| quote! { #path(&data, mode)?; },
+    );
     let serializer = input.ident.clone();
     let fields = match input.data {
         Data::Struct(data) => match data.fields {
@@ -194,7 +199,20 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                 }
             }
         } else {
-            quote! {}
+            quote! {
+                impl #orm::ModelSerializer for #serializer {
+                    type Model = #model;
+                    type Input = #wrapper;
+
+                    fn from_input(value: Self::Input) -> Self {
+                        <Self as ::core::convert::From<#wrapper>>::from(value)
+                    }
+
+                    fn fields() -> &'static [#orm::SerializerField] {
+                        #serializer_fields
+                    }
+                }
+            }
         };
         quote! {
             impl ::core::convert::From<#wrapper> for #serializer {
@@ -377,73 +395,41 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             #(#[serde(default)] pub #input_names: #orm::PatchField<#input_types>,)*
         }
 
-        #[cfg(feature = "sqlite")]
-        impl #serializer {
-            pub async fn create(
-                database: &#orm::Database,
-                input: #create_name,
-            ) -> ::core::result::Result<#model, #orm::OrmError>
-            where
-                #model: Send + 'static,
-            {
-                let builder = database.create::<#model>();
-                #(#create_sets)*
-                builder.execute().await
-            }
-
-            pub async fn update(
-                database: &#orm::Database,
-                id: i64,
-                input: #update_name,
-            ) -> ::core::result::Result<Option<#model>, #orm::OrmError>
-            where
-                #model: Send + 'static,
-            {
-                let builder = database.update::<#model>(id);
-                #(#update_sets)*
-                builder.execute().await
-            }
-
-            pub async fn patch(
-                database: &#orm::Database,
-                id: i64,
-                input: #patch_name,
-            ) -> ::core::result::Result<Option<#model>, #orm::OrmError>
-            where
-                #model: Send + 'static,
-            {
-                if #patch_empty {
-                    return Err(#orm::OrmError::QueryBuild(#orm::QueryBuildError::EmptyUpdate));
-                }
-                let builder = database.update::<#model>(id);
-                #(#patch_sets)*
-                builder.execute().await
-            }
-        }
-
-        #[cfg(feature = "sqlite")]
         impl #orm::ModelWriteSerializer for #serializer {
             type Model = #model;
-            type CreateInput = #create_name;
-            type UpdateInput = #update_name;
-            type PatchInput = #patch_name;
 
-            fn create<'a>(database: &'a #orm::Database, input: Self::CreateInput)
-                -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::core::result::Result<Self::Model, #orm::OrmError>> + Send + 'a>>
-            {
-                Box::pin(Self::create(database, input))
-            }
-
-            fn update<'a>(database: &'a #orm::Database, id: i64, input: Self::UpdateInput)
-                -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::core::result::Result<Option<Self::Model>, #orm::OrmError>> + Send + 'a>>
-            {
-                Box::pin(Self::update(database, id, input))
-            }
-
-            fn patch<'a>(database: &'a #orm::Database, id: i64, input: Self::PatchInput)
-                -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::core::result::Result<Option<Self::Model>, #orm::OrmError>> + Send + 'a>>
-            {
-                Box::pin(Self::patch(database, id, input))
+            fn is_valid(
+                data: #orm::serde_json::Value,
+                mode: #orm::WriteMode,
+            ) -> ::core::result::Result<#orm::ValidatedWrite<#model>, #orm::ValidationErrors> {
+                #validator_call
+                match mode {
+                    #orm::WriteMode::Create => {
+                        let input: #create_name = #orm::serde_json::from_value(data)?;
+                        let builder = <#model as #orm::Model>::insert();
+                        #(#create_sets)*
+                        Ok(#orm::ValidatedWrite::Create(builder))
+                    }
+                    #orm::WriteMode::Update { id } => {
+                        let input: #update_name = #orm::serde_json::from_value(data)?;
+                        let builder = <#model as #orm::Model>::update()
+                            .filter(<#model as #orm::Model>::primary_key().eq(id));
+                        #(#update_sets)*
+                        Ok(#orm::ValidatedWrite::Update(builder))
+                    }
+                    #orm::WriteMode::Patch { id } => {
+                        let input: #patch_name = #orm::serde_json::from_value(data)?;
+                        if #patch_empty {
+                            return Err(#orm::ValidationErrors {
+                                detail: "patch must contain at least one field".into(),
+                            });
+                        }
+                        let builder = <#model as #orm::Model>::update()
+                            .filter(<#model as #orm::Model>::primary_key().eq(id));
+                        #(#patch_sets)*
+                        Ok(#orm::ValidatedWrite::Update(builder))
+                    }
+                }
             }
         }
 
@@ -483,6 +469,9 @@ fn parse_serializer_model(attributes: &[syn::Attribute]) -> syn::Result<Path> {
                 }
                 model = Some(meta.value()?.parse()?);
                 Ok(())
+            } else if meta.path.is_ident("validate") {
+                let _: Path = meta.value()?.parse()?;
+                Ok(())
             } else {
                 Err(meta.error("expected `model = Model`"))
             }
@@ -494,6 +483,30 @@ fn parse_serializer_model(attributes: &[syn::Attribute]) -> syn::Result<Path> {
             "serializer requires `#[serializer(model = Model)]`",
         )
     })
+}
+
+fn parse_serializer_validator(attributes: &[syn::Attribute]) -> syn::Result<Option<Path>> {
+    let mut validator = None;
+    for attribute in attributes {
+        if !attribute.path().is_ident("serializer") {
+            continue;
+        }
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("validate") {
+                if validator.is_some() {
+                    return Err(meta.error("serializer validator is declared more than once"));
+                }
+                validator = Some(meta.value()?.parse()?);
+                Ok(())
+            } else if meta.path.is_ident("model") {
+                let _: Path = meta.value()?.parse()?;
+                Ok(())
+            } else {
+                Err(meta.error("expected `model = Model` or `validate = path`"))
+            }
+        })?;
+    }
+    Ok(validator)
 }
 
 fn relation_marker(path: &Path) -> syn::Result<Ident> {

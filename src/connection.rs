@@ -1,13 +1,11 @@
-use std::collections::{HashMap, HashSet};
-use std::{future::Future, pin::Pin};
-
 use deadpool_sqlite::{Config, Pool, Runtime};
 use rusqlite::{OptionalExtension, types::Value};
+use std::collections::{HashMap, HashSet};
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
     BelongsTo, CompiledQuery, DatabaseValue, Expr, HasMany, Model, ModelField, QueryAst,
-    QueryBuildError, QueryValue, SelectQuery, SqlCompiler, SqliteDialect,
+    QueryBuildError, QueryValue, SelectQuery, SqlCompiler, SqliteDialect, ValidatedWrite,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -21,31 +19,6 @@ pub enum OrmError {
     Sqlite(#[from] rusqlite::Error),
     #[error("query build error: {0:?}")]
     QueryBuild(QueryBuildError),
-}
-
-/// Bridge implemented by generated serializers for generic HTTP adapters.
-pub trait ModelWriteSerializer {
-    type Model: crate::Model;
-    type CreateInput: serde::de::DeserializeOwned + Send;
-    type UpdateInput: serde::de::DeserializeOwned + Send;
-    type PatchInput: serde::de::DeserializeOwned + Send;
-
-    fn create<'a>(
-        database: &'a Database,
-        input: Self::CreateInput,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Model, OrmError>> + Send + 'a>>;
-
-    fn update<'a>(
-        database: &'a Database,
-        id: i64,
-        input: Self::UpdateInput,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Self::Model>, OrmError>> + Send + 'a>>;
-
-    fn patch<'a>(
-        database: &'a Database,
-        id: i64,
-        input: Self::PatchInput,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Self::Model>, OrmError>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,11 +221,8 @@ impl Database {
     }
 
     /// Starts a high-level typed select builder bound to this database.
-    pub fn query<M: Model>(&self) -> DatabaseQuery<'_, M> {
-        DatabaseQuery {
-            database: self,
-            query: M::query(),
-        }
+    pub fn query<M: Model>(&self) -> DatabaseQuery<M> {
+        DatabaseQuery { query: M::query() }
     }
 
     /// Fetches related rows by a typed model field.
@@ -371,6 +341,22 @@ impl Database {
     }
 }
 
+impl<M: Model + Send + 'static> ValidatedWrite<M> {
+    pub async fn save(self, database: &Database) -> Result<Option<M>, OrmError> {
+        let ast = match self {
+            Self::Create(query) => query
+                .returning_all()
+                .into_ast()
+                .map_err(OrmError::QueryBuild)?,
+            Self::Update(query) => query
+                .returning_all()
+                .into_ast()
+                .map_err(OrmError::QueryBuild)?,
+        };
+        database.execute_returning(ast).await
+    }
+}
+
 /// High-level insert builder. The executed result is the complete inserted model.
 pub struct CreateBuilder<'db, M> {
     database: &'db Database,
@@ -435,36 +421,35 @@ impl<M: Model> UpdateBuilder<'_, M> {
 }
 
 /// High-level typed select builder bound to a database.
-pub struct DatabaseQuery<'db, M> {
-    database: &'db Database,
+pub struct DatabaseQuery<M> {
     query: SelectQuery<M>,
 }
 
-impl<'db, M: Model> DatabaseQuery<'db, M> {
+impl<M: Model> DatabaseQuery<M> {
+    pub fn new(query: SelectQuery<M>) -> Self {
+        Self { query }
+    }
+
     pub fn filter(self, expr: Expr) -> Self {
         Self {
-            database: self.database,
             query: self.query.filter(expr),
         }
     }
 
     pub fn order_by(self, order: crate::OrderBy) -> Self {
         Self {
-            database: self.database,
             query: self.query.order_by(order),
         }
     }
 
     pub fn limit(self, limit: u64) -> Self {
         Self {
-            database: self.database,
             query: self.query.limit(limit),
         }
     }
 
     pub fn offset(self, offset: u64) -> Self {
         Self {
-            database: self.database,
             query: self.query.offset(offset),
         }
     }
@@ -473,34 +458,40 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
     pub fn select_related<R, Relation, Key>(
         self,
         relation: BelongsTo<M, R, Relation, Key>,
-    ) -> SelectRelatedQuery<'db, M, R, Relation, Key> {
+    ) -> SelectRelatedQuery<M, R, Relation, Key> {
         SelectRelatedQuery {
-            database: self.database,
             query: self.query,
             relation,
         }
     }
 
     /// Loads a reverse foreign-key relation with one batched query.
-    pub fn prefetch_related<P>(self, plan: P) -> P::Query<'db>
+    pub fn prefetch_related<P>(self, plan: P) -> P::Query
     where
         P: PrefetchRelation<M>,
     {
-        plan.into_query(self.database, self.query)
+        plan.into_query(self.query)
     }
 
-    pub async fn all(self) -> Result<Vec<M>, OrmError>
+    pub async fn all(self, database: &Database) -> Result<Vec<M>, OrmError>
     where
         M: Send + 'static,
     {
-        self.database.fetch_all(self.query).await
+        database.fetch_all(self.query).await
     }
 
-    pub async fn first(self) -> Result<Option<M>, OrmError>
+    pub async fn first(self, database: &Database) -> Result<Option<M>, OrmError>
     where
         M: Send + 'static,
     {
-        self.database.fetch_one(self.query).await
+        database.fetch_one(self.query).await
+    }
+
+    pub async fn count(self, database: &Database) -> Result<usize, OrmError>
+    where
+        M: Send + 'static,
+    {
+        database.count_query(self.query).await
     }
 
     pub fn into_select_query(self) -> SelectQuery<M> {
@@ -509,17 +500,9 @@ impl<'db, M: Model> DatabaseQuery<'db, M> {
 }
 
 pub trait PrefetchRelation<Owner: Model> {
-    type Query<'db>
-    where
-        Owner: 'db;
+    type Query;
 
-    fn into_query<'db>(
-        self,
-        database: &'db Database,
-        query: SelectQuery<Owner>,
-    ) -> Self::Query<'db>
-    where
-        Owner: 'db;
+    fn into_query(self, query: SelectQuery<Owner>) -> Self::Query;
 }
 
 /// A model and its eagerly loaded `belongs_to` relation.
@@ -568,20 +551,18 @@ pub struct LoadedOne<R, Relation = ()> {
 }
 
 /// Query which materializes a model together with one related model.
-pub struct SelectRelatedQuery<'db, M, R, Relation = (), Key = i64> {
-    database: &'db Database,
+pub struct SelectRelatedQuery<M, R, Relation = (), Key = i64> {
     query: SelectQuery<M>,
     relation: BelongsTo<M, R, Relation, Key>,
 }
 
-impl<'db, M, R, Relation> SelectRelatedQuery<'db, M, R, Relation, i64>
+impl<M, R, Relation> SelectRelatedQuery<M, R, Relation, i64>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
     pub fn filter(self, expr: Expr) -> Self {
         Self {
-            database: self.database,
             query: self.query.filter(expr),
             relation: self.relation,
         }
@@ -589,8 +570,21 @@ where
 
     pub fn order_by(self, order: crate::OrderBy) -> Self {
         Self {
-            database: self.database,
             query: self.query.order_by(order),
+            relation: self.relation,
+        }
+    }
+
+    pub fn limit(self, limit: u64) -> Self {
+        Self {
+            query: self.query.limit(limit),
+            relation: self.relation,
+        }
+    }
+
+    pub fn offset(self, offset: u64) -> Self {
+        Self {
+            query: self.query.offset(offset),
             relation: self.relation,
         }
     }
@@ -598,16 +592,15 @@ where
     pub fn select_related<R2, Relation2>(
         self,
         relation: BelongsTo<M, R2, Relation2, i64>,
-    ) -> MultiSelectRelatedQuery<'db, M, R, Relation, R2, Relation2> {
+    ) -> MultiSelectRelatedQuery<M, R, Relation, R2, Relation2> {
         MultiSelectRelatedQuery {
-            database: self.database,
             query: self.query,
             first: self.relation,
             second: relation,
         }
     }
 
-    pub async fn all(self) -> Result<Vec<WithOne<M, R, Relation>>, OrmError>
+    pub async fn all(self, database: &Database) -> Result<Vec<WithOne<M, R, Relation>>, OrmError>
     where
         Relation: Send + 'static,
     {
@@ -616,7 +609,7 @@ where
             .into_joined_ast(self.relation)
             .map_err(OrmError::QueryBuild)?;
         let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = self.database.pool.clone();
+        let pool = database.pool.clone();
         pool.get()
             .await?
             .interact(move |connection| {
@@ -627,16 +620,19 @@ where
             .map_err(|error| OrmError::Interaction(error.to_string()))?
             .map_err(OrmError::from)
     }
+
+    pub async fn count(self, database: &Database) -> Result<usize, OrmError> {
+        database.count_query(self.query).await
+    }
 }
 
-pub struct MultiSelectRelatedQuery<'db, M, R1, Relation1, R2, Relation2> {
-    database: &'db Database,
+pub struct MultiSelectRelatedQuery<M, R1, Relation1, R2, Relation2> {
     query: SelectQuery<M>,
     first: BelongsTo<M, R1, Relation1, i64>,
     second: BelongsTo<M, R2, Relation2, i64>,
 }
 
-impl<M, R1, Relation1, R2, Relation2> MultiSelectRelatedQuery<'_, M, R1, Relation1, R2, Relation2>
+impl<M, R1, Relation1, R2, Relation2> MultiSelectRelatedQuery<M, R1, Relation1, R2, Relation2>
 where
     M: Model + Send + 'static,
     R1: Model + Send + 'static,
@@ -646,7 +642,6 @@ where
 {
     pub fn filter(self, expr: Expr) -> Self {
         Self {
-            database: self.database,
             query: self.query.filter(expr),
             first: self.first,
             second: self.second,
@@ -655,7 +650,6 @@ where
 
     pub fn order_by(self, order: crate::OrderBy) -> Self {
         Self {
-            database: self.database,
             query: self.query.order_by(order),
             first: self.first,
             second: self.second,
@@ -664,6 +658,7 @@ where
 
     pub async fn all(
         self,
+        database: &Database,
     ) -> Result<Vec<Loaded<M, (LoadedOne<R1, Relation1>, LoadedOne<R2, Relation2>)>>, OrmError>
     {
         let first = self.first;
@@ -693,7 +688,7 @@ where
             });
         }
         let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = self.database.pool.clone();
+        let pool = database.pool.clone();
         pool.get()
             .await?
             .interact(move |connection| {
@@ -706,14 +701,13 @@ where
     }
 }
 
-impl<M, R, Relation> SelectRelatedQuery<'_, M, R, Relation, Option<i64>>
+impl<M, R, Relation> SelectRelatedQuery<M, R, Relation, Option<i64>>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
     pub fn filter(self, expr: Expr) -> Self {
         Self {
-            database: self.database,
             query: self.query.filter(expr),
             relation: self.relation,
         }
@@ -721,13 +715,29 @@ where
 
     pub fn order_by(self, order: crate::OrderBy) -> Self {
         Self {
-            database: self.database,
             query: self.query.order_by(order),
             relation: self.relation,
         }
     }
 
-    pub async fn all(self) -> Result<Vec<WithOptionalOne<M, R, Relation>>, OrmError>
+    pub fn limit(self, limit: u64) -> Self {
+        Self {
+            query: self.query.limit(limit),
+            relation: self.relation,
+        }
+    }
+
+    pub fn offset(self, offset: u64) -> Self {
+        Self {
+            query: self.query.offset(offset),
+            relation: self.relation,
+        }
+    }
+
+    pub async fn all(
+        self,
+        database: &Database,
+    ) -> Result<Vec<WithOptionalOne<M, R, Relation>>, OrmError>
     where
         Relation: Send + 'static,
     {
@@ -736,7 +746,7 @@ where
             .into_optional_joined_ast(self.relation)
             .map_err(OrmError::QueryBuild)?;
         let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = self.database.pool.clone();
+        let pool = database.pool.clone();
         pool.get()
             .await?
             .interact(move |connection| {
@@ -747,27 +757,23 @@ where
             .map_err(|error| OrmError::Interaction(error.to_string()))?
             .map_err(OrmError::from)
     }
+
+    pub async fn count(self, database: &Database) -> Result<usize, OrmError> {
+        database.count_query(self.query).await
+    }
 }
 
 /// Query which materializes a model together with its reverse relation.
-pub struct PrefetchRelatedQuery<'db, M, R, Relation = (), Key = i64> {
-    database: &'db Database,
+pub struct PrefetchRelatedQuery<M, R, Relation = (), Key = i64> {
     query: SelectQuery<M>,
     relation: HasMany<M, R, Relation, Key>,
 }
 
 impl<M: Model, R, Relation> PrefetchRelation<M> for HasMany<M, R, Relation, i64> {
-    type Query<'db>
-        = PrefetchRelatedQuery<'db, M, R, Relation, i64>
-    where
-        M: 'db;
+    type Query = PrefetchRelatedQuery<M, R, Relation, i64>;
 
-    fn into_query<'db>(self, database: &'db Database, query: SelectQuery<M>) -> Self::Query<'db>
-    where
-        M: 'db,
-    {
+    fn into_query(self, query: SelectQuery<M>) -> Self::Query {
         PrefetchRelatedQuery {
-            database,
             query,
             relation: self,
         }
@@ -791,17 +797,10 @@ impl<M, R, Relation> HasMany<M, R, Relation, i64> {
 impl<M: Model, R, Relation, C, ChildRelation> PrefetchRelation<M>
     for NestedPrefetchPlan<M, R, Relation, C, ChildRelation>
 {
-    type Query<'db>
-        = NestedPrefetchQuery<'db, M, R, Relation, C, ChildRelation>
-    where
-        M: 'db;
+    type Query = NestedPrefetchQuery<M, R, Relation, C, ChildRelation>;
 
-    fn into_query<'db>(self, database: &'db Database, query: SelectQuery<M>) -> Self::Query<'db>
-    where
-        M: 'db,
-    {
+    fn into_query(self, query: SelectQuery<M>) -> Self::Query {
         NestedPrefetchQuery {
-            database,
             query,
             outer: self.outer,
             inner: self.inner,
@@ -809,38 +808,67 @@ impl<M: Model, R, Relation, C, ChildRelation> PrefetchRelation<M>
     }
 }
 
-pub struct NestedPrefetchQuery<'db, M, R, Relation, C, ChildRelation> {
-    database: &'db Database,
+pub struct NestedPrefetchQuery<M, R, Relation, C, ChildRelation> {
     query: SelectQuery<M>,
     outer: HasMany<M, R, Relation, i64>,
     inner: HasMany<R, C, ChildRelation, i64>,
 }
 
-impl<'db, M, R, Relation> PrefetchRelatedQuery<'db, M, R, Relation, i64>
+impl<M, R, Relation> PrefetchRelatedQuery<M, R, Relation, i64>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            query: self.query.filter(expr),
+            relation: self.relation,
+        }
+    }
+
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            query: self.query.order_by(order),
+            relation: self.relation,
+        }
+    }
+
+    pub fn limit(self, limit: u64) -> Self {
+        Self {
+            query: self.query.limit(limit),
+            relation: self.relation,
+        }
+    }
+
+    pub fn offset(self, offset: u64) -> Self {
+        Self {
+            query: self.query.offset(offset),
+            relation: self.relation,
+        }
+    }
+
     pub fn prefetch_related<R2, Relation2>(
         self,
         relation: HasMany<M, R2, Relation2>,
-    ) -> MultiPrefetchRelatedQuery<'db, M, R, Relation, R2, Relation2> {
+    ) -> MultiPrefetchRelatedQuery<M, R, Relation, R2, Relation2> {
         MultiPrefetchRelatedQuery {
-            database: self.database,
             query: self.query,
             first: self.relation,
             second: relation,
         }
     }
 
-    pub async fn all(self) -> Result<Vec<Loaded<M, (LoadedMany<R, Relation>,)>>, OrmError>
+    pub async fn all(
+        self,
+        database: &Database,
+    ) -> Result<Vec<Loaded<M, (LoadedMany<R, Relation>,)>>, OrmError>
     where
         Relation: Send + 'static,
     {
         let parent_ast = self.query.into_ast().map_err(OrmError::QueryBuild)?;
         let parent_compiled = SqlCompiler::<SqliteDialect>::compile(&parent_ast);
         let relation = self.relation;
-        let pool = self.database.pool.clone();
+        let pool = database.pool.clone();
         pool.get()
             .await?
             .interact(move |connection| {
@@ -897,17 +925,20 @@ where
             .map_err(|error| OrmError::Interaction(error.to_string()))?
             .map_err(OrmError::from)
     }
+
+    pub async fn count(self, database: &Database) -> Result<usize, OrmError> {
+        database.count_query(self.query).await
+    }
 }
 
 /// Query which materializes two reverse relations in one typed result.
-pub struct MultiPrefetchRelatedQuery<'db, M, R1, Relation1, R2, Relation2> {
-    database: &'db Database,
+pub struct MultiPrefetchRelatedQuery<M, R1, Relation1, R2, Relation2> {
     query: SelectQuery<M>,
     first: HasMany<M, R1, Relation1>,
     second: HasMany<M, R2, Relation2>,
 }
 
-impl<M, R, Relation, C, ChildRelation> NestedPrefetchQuery<'_, M, R, Relation, C, ChildRelation>
+impl<M, R, Relation, C, ChildRelation> NestedPrefetchQuery<M, R, Relation, C, ChildRelation>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
@@ -917,11 +948,12 @@ where
 {
     pub async fn all(
         self,
+        database: &Database,
     ) -> Result<
         Vec<Loaded<M, (LoadedMany<Loaded<R, (LoadedMany<C, ChildRelation>,)>, Relation>,)>>,
         OrmError,
     > {
-        let parents = self.database.fetch_all(self.query).await?;
+        let parents = database.fetch_all(self.query).await?;
         let parent_ids = parents
             .iter()
             .map(Model::primary_key_value)
@@ -929,8 +961,7 @@ where
             .into_iter()
             .collect::<Vec<_>>();
         let outer_field = self.outer.field();
-        let children = self
-            .database
+        let children = database
             .fetch_by_many(
                 ModelField::<R, i64>::new(outer_field.table, outer_field.name),
                 parent_ids,
@@ -943,8 +974,7 @@ where
             .into_iter()
             .collect::<Vec<_>>();
         let inner_field = self.inner.field();
-        let grandchildren = self
-            .database
+        let grandchildren = database
             .fetch_by_many(
                 ModelField::<C, i64>::new(inner_field.table, inner_field.name),
                 child_ids,
@@ -993,7 +1023,7 @@ where
     }
 }
 
-impl<M, R1, Relation1, R2, Relation2> MultiPrefetchRelatedQuery<'_, M, R1, Relation1, R2, Relation2>
+impl<M, R1, Relation1, R2, Relation2> MultiPrefetchRelatedQuery<M, R1, Relation1, R2, Relation2>
 where
     M: Model + Send + 'static,
     R1: Model + Send + 'static,
@@ -1003,9 +1033,10 @@ where
 {
     pub async fn all(
         self,
+        database: &Database,
     ) -> Result<Vec<Loaded<M, (LoadedMany<R1, Relation1>, LoadedMany<R2, Relation2>)>>, OrmError>
     {
-        let parents = self.database.fetch_all(self.query).await?;
+        let parents = database.fetch_all(self.query).await?;
         let parent_ids = parents
             .iter()
             .map(Model::primary_key_value)
@@ -1014,15 +1045,13 @@ where
             .collect::<Vec<_>>();
         let first_field = self.first.field();
         let second_field = self.second.field();
-        let first = self
-            .database
+        let first = database
             .fetch_by_many(
                 ModelField::<R1, i64>::new(first_field.table, first_field.name),
                 parent_ids.clone(),
             )
             .await?;
-        let second = self
-            .database
+        let second = database
             .fetch_by_many(
                 ModelField::<R2, i64>::new(second_field.table, second_field.name),
                 parent_ids,

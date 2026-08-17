@@ -58,6 +58,52 @@ pub use schema::*;
 pub use sql::*;
 pub use types::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    Create,
+    Update { id: i64 },
+    Patch { id: i64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationErrors {
+    pub detail: String,
+}
+
+impl From<serde_json::Error> for ValidationErrors {
+    fn from(error: serde_json::Error) -> Self {
+        Self {
+            detail: error.to_string(),
+        }
+    }
+}
+
+pub enum ValidatedWrite<M: Model> {
+    Create(InsertQuery<M>),
+    Update(UpdateQuery<M>),
+}
+
+impl<M: Model> ValidatedWrite<M> {
+    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
+    where
+        V: QueryValue<T>,
+    {
+        match self {
+            Self::Create(query) => Self::Create(query.set(field, value)),
+            Self::Update(query) => Self::Update(query.set(field, value)),
+        }
+    }
+}
+
+pub trait ModelWriteSerializer {
+    type Model: Model;
+
+    fn is_valid(
+        data: serde_json::Value,
+        mode: WriteMode,
+    ) -> Result<ValidatedWrite<Self::Model>, ValidationErrors>;
+}
+
 /// A JSON patch value. `Missing` means that the property was not sent;
 /// `Value(None)` represents an explicit JSON null.
 #[derive(Debug, Clone, PartialEq, Eq)]

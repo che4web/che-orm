@@ -4,8 +4,8 @@ use crate::apps::content::PostUserRelation;
 use crate::models::Post;
 use crate::models::User;
 use crate::{
-    ColumnRef, DatabaseValue, Model, ModelSerializer, PostgresDialect, QueryBuildError,
-    SqlCompiler, SqliteDialect,
+    ColumnRef, DatabaseValue, Model, ModelSerializer, ModelWriteSerializer, PostgresDialect,
+    QueryBuildError, SqlCompiler, SqliteDialect,
 };
 
 #[cfg(feature = "sqlite")]
@@ -76,7 +76,7 @@ struct UserResponse {
 }
 
 #[derive(ModelSerializer)]
-#[serializer(model = User)]
+#[serializer(model = User, validate = validate_user_write)]
 #[allow(dead_code)]
 struct UserWriteSerializer {
     #[serializer(read_only)]
@@ -89,6 +89,18 @@ struct UserWriteSerializer {
     created_at: time::OffsetDateTime,
     #[serializer(read_only)]
     updated_at: time::OffsetDateTime,
+}
+
+fn validate_user_write(
+    data: &crate::serde_json::Value,
+    _mode: crate::WriteMode,
+) -> Result<(), crate::ValidationErrors> {
+    if data.get("name").and_then(crate::serde_json::Value::as_str) == Some("") {
+        return Err(crate::ValidationErrors {
+            detail: "name must not be empty".into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]
@@ -204,6 +216,19 @@ fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
         r#"{"email":"a","name":"A","is_active":true,"id":1}"#,
     );
     assert!(unknown.is_err());
+
+    let invalid = UserWriteSerializer::is_valid(
+        crate::serde_json::json!({
+            "email": "a@example.test",
+            "name": "",
+            "is_active": true,
+        }),
+        crate::WriteMode::Create,
+    );
+    match invalid {
+        Err(error) => assert_eq!(error.detail, "name must not be empty"),
+        Ok(_) => panic!("invalid serializer input was accepted"),
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -211,22 +236,61 @@ fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
 async fn generated_serializer_rejects_empty_patch_before_database_update() {
     let database = crate::Database::connect_in_memory().unwrap();
     database.create_table::<User>().await.unwrap();
-    let result = UserWriteSerializer::patch(
-        &database,
-        1,
-        UserWriteSerializerPatchInput {
-            email: crate::PatchField::Missing,
-            name: crate::PatchField::Missing,
-            is_active: crate::PatchField::Missing,
-        },
+    let result = UserWriteSerializer::is_valid(
+        crate::serde_json::json!({}),
+        crate::WriteMode::Patch { id: 1 },
+    );
+    assert!(matches!(result, Err(crate::ValidationErrors { .. })));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn generated_serializer_executes_create_update_and_patch() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<User>().await.unwrap();
+
+    let user = UserWriteSerializer::is_valid(
+        crate::serde_json::json!({
+            "email": "alice@example.test",
+            "name": "Alice",
+            "is_active": true,
+        }),
+        crate::WriteMode::Create,
     )
-    .await;
-    assert!(matches!(
-        result,
-        Err(crate::OrmError::QueryBuild(
-            crate::QueryBuildError::EmptyUpdate
-        ))
-    ));
+    .unwrap()
+    .save(&database)
+    .await
+    .unwrap();
+    let user = user.unwrap();
+    assert_eq!(user.name, "Alice");
+
+    let updated = UserWriteSerializer::is_valid(
+        crate::serde_json::json!({
+            "email": "alice@example.test",
+            "name": "Alice Updated",
+            "is_active": false,
+        }),
+        crate::WriteMode::Update { id: user.id },
+    )
+    .unwrap()
+    .save(&database)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(updated.name, "Alice Updated");
+    assert!(!updated.is_active);
+
+    let patched = UserWriteSerializer::is_valid(
+        crate::serde_json::json!({"name": "Patched"}),
+        crate::WriteMode::Patch { id: user.id },
+    )
+    .unwrap()
+    .save(&database)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(patched.name, "Patched");
+    assert!(!patched.is_active);
 }
 
 #[cfg(feature = "sqlite")]
@@ -414,7 +478,7 @@ async fn sqlite_select_related_chains_multiple_aliases() {
         .query::<DualPost>()
         .select_related(DualPost::AUTHOR)
         .select_related(DualPost::EDITOR)
-        .all()
+        .all(&database)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -426,7 +490,7 @@ async fn sqlite_select_related_chains_multiple_aliases() {
         .select_related(DualPost::AUTHOR)
         .filter(DualPost::AUTHOR.related_field(User::NAME).eq("Author"))
         .order_by(DualPost::AUTHOR.related_field(User::NAME).asc())
-        .all()
+        .all(&database)
         .await
         .unwrap();
     assert_eq!(filtered.len(), 1);
@@ -585,7 +649,7 @@ async fn sqlite_facade_supports_crud_and_typed_queries() {
     let users = database
         .query::<User>()
         .filter(User::IS_ACTIVE.eq(true))
-        .all()
+        .all(&database)
         .await
         .unwrap();
     assert_eq!(users.len(), 1);
@@ -753,7 +817,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let post_with_user = database
         .query::<Post>()
         .select_related(Post::USER)
-        .all()
+        .all(&database)
         .await
         .unwrap();
     assert_eq!(post_with_user.len(), 1);
@@ -785,7 +849,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let posts_with_users = database
         .query::<Post>()
         .select_related(Post::USER)
-        .all()
+        .all(&database)
         .await
         .unwrap();
     assert_eq!(posts_with_users.len(), 2);
@@ -795,7 +859,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
         .query::<User>()
         .prefetch_related(Post::USER.reverse())
         .prefetch_related(Audit::USER.reverse())
-        .all()
+        .all(&database)
         .await
         .unwrap();
     let alice = users_with_two_relations
@@ -809,7 +873,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let nested_users = database
         .query::<User>()
         .prefetch_related(Post::USER.reverse().prefetch(Comment::POST.reverse()))
-        .all()
+        .all(&database)
         .await
         .unwrap();
     let nested_user = nested_users
@@ -840,7 +904,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let users_with_posts = database
         .query::<User>()
         .prefetch_related(Post::USER.reverse())
-        .all()
+        .all(&database)
         .await
         .unwrap();
     let alice = users_with_posts
@@ -927,7 +991,7 @@ async fn sqlite_optional_foreign_key_uses_left_join_and_set_null() {
     let rows = database
         .query::<OptionalPost>()
         .select_related(OptionalPost::USER)
-        .all()
+        .all(&database)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);

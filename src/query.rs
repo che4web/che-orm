@@ -296,6 +296,10 @@ pub trait ModelSerializer: serde::Serialize + Sized {
 
     fn from_input(input: Self::Input) -> Self;
 
+    fn to_json(input: Self::Input) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(Self::from_input(input))
+    }
+
     fn fields() -> &'static [SerializerField] {
         &[]
     }

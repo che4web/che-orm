@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["che-orm2-macros", "che-orm2-examples", "che-orm2-rest"]
+members = ["che-orm2-macros", "che-orm2-examples"]
 
 [features]
 default = ["sqlite"]

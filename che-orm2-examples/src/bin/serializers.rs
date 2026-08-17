@@ -27,7 +27,7 @@ async fn main() -> Result<(), orm::OrmError> {
     let users = database
         .query::<ExampleUser>()
         .prefetch_related(ExamplePost::USER.reverse())
-        .all()
+        .all(&database)
         .await?;
     let users_json = ExampleUserWithPostsSerializer::many(users);
     println!(
@@ -39,7 +39,7 @@ async fn main() -> Result<(), orm::OrmError> {
     let posts = database
         .query::<ExamplePost>()
         .select_related(ExamplePost::USER)
-        .all()
+        .all(&database)
         .await?;
     let posts_json = ExamplePostWithUserSerializer::many(posts);
     println!(
