@@ -70,6 +70,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     let mut serializer_fields = Vec::new();
     for field in fields {
         let name = field.ident.expect("named fields always have identifiers");
+        let field_type = field.ty.clone();
         let json_name = name.to_string();
         let mut read_only = false;
         let mut write_only = false;
@@ -114,13 +115,6 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         if write_only {
             serialize_fields.pop();
         }
-        serializer_fields.push(quote! {
-            #orm::SerializerField {
-                name: #json_name,
-                read_only: #read_only,
-                write_only: #write_only,
-            }
-        });
         if let Some((many, related_model)) = nested_relation {
             let relation_path = relation_path.ok_or_else(|| {
                 Error::new_spanned(
@@ -131,8 +125,28 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             let marker = relation_marker(&relation_path)?;
             let optional = !many && is_option_type(&field.ty);
             let serializer_type = nested_serializer_type(&field.ty, many, optional)?;
-            nested.push((name, many, related_model, marker, optional, serializer_type));
+            nested.push((name, many, related_model.clone(), marker, optional, serializer_type));
+            serializer_fields.push(quote! {
+                #orm::SerializerField {
+                    name: #json_name,
+                    read_only: #read_only,
+                    write_only: #write_only,
+                    rust_type: ::core::stringify!(#field_type),
+                    related_model: Some(::core::stringify!(#related_model)),
+                    many: #many,
+                }
+            });
         } else {
+            serializer_fields.push(quote! {
+                #orm::SerializerField {
+                    name: #json_name,
+                    read_only: #read_only,
+                    write_only: #write_only,
+                    rust_type: ::core::stringify!(#field_type),
+                    related_model: None,
+                    many: false,
+                }
+            });
             if !read_only {
                 let constant = Ident::new(&name.to_string().to_uppercase(), name.span());
                 input_fields.push((name.clone(), field.ty.clone(), constant));

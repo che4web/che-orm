@@ -310,6 +310,9 @@ pub struct SerializerField {
     pub name: &'static str,
     pub read_only: bool,
     pub write_only: bool,
+    pub rust_type: &'static str,
+    pub related_model: Option<&'static str>,
+    pub many: bool,
 }
 
 /// A typed forward foreign-key relation from one model to another.
