@@ -117,6 +117,19 @@ ATLAS_BIN=/opt/atlas/atlas cargo run --bin manage -- migrate diff add_posts
 `manage` не интерполирует аргументы через shell и возвращает ненулевой exit code
 Atlas как ошибку процесса.
 
+## Required enum columns
+
+Adding a required `DbEnum` field to a table that already has rows needs a data backfill. Review
+the generated Atlas migration and set a valid enum value while copying the old rows, for example:
+
+```sql
+INSERT INTO new_tasks_task (id, name, status)
+SELECT id, name, 'draft' FROM tasks_task;
+```
+
+The replacement table must keep the enum `CHECK` constraint. Test the migration against a copy of
+an existing database before deployment.
+
 ## Production workflow
 
 1. Изменить Rust-модель.

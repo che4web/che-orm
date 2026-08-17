@@ -88,6 +88,34 @@ async fn main() -> Result<(), che_orm2::OrmError> {
 Managed timestamp-поля не передаются в `INSERT`: их значения создаёт SQLite.
 `updated_at` автоматически добавляется ORM в каждый update-запрос.
 
+## Enum choices
+
+Для фиксированного набора строк используйте `DbEnum`. Одно значение variant используется в JSON,
+SQLite, schema metadata, generated TypeScript и admin forms:
+
+```rust
+use che_orm2::{DbEnum, Model};
+
+#[derive(Debug, Clone, Copy, DbEnum)]
+enum TaskStatus {
+    Draft,
+    #[db_enum(rename = "in_progress")]
+    InProgress,
+    Done,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "tasks")]
+struct Task {
+    #[orm(primary_key)]
+    id: i64,
+    status: TaskStatus,
+}
+```
+
+`DbEnum` generates `Serialize` and `Deserialize`; do not derive the serde traits separately. It
+stores values as `TEXT` and emits a `CHECK` constraint for the declared choices.
+
 ## Пул
 
 По умолчанию создаётся пул размером 4:
