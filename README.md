@@ -19,8 +19,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 - `OffsetDateTime` и managed-поля `auto_now_add` / `auto_now`.
 - Защита от пустых mutation-запросов и случайных массовых update/delete.
 
-Проект находится в разработке. Automatic relations, joins и PostgreSQL
-executor пока не реализованы.
+Проект находится в разработке. PostgreSQL executor пока не реализован.
 
 ## Быстрый старт
 
@@ -76,7 +75,7 @@ async fn main() -> Result<(), che_orm2::OrmError> {
     let users = database
         .query::<User>()
         .filter(User::NAME.eq("Alice"))
-        .all()
+        .all(&database)
         .await?;
     let loaded = database.get::<User>(user.id).await?;
     println!("{users:?}");
@@ -91,7 +90,7 @@ Managed timestamp-поля не передаются в `INSERT`: их знач�
 ## Enum choices
 
 Для фиксированного набора строк используйте `DbEnum`. Одно значение variant используется в JSON,
-SQLite, schema metadata, generated TypeScript и admin forms:
+SQLite и schema metadata:
 
 ```rust
 use che_orm2::{DbEnum, Model};
@@ -239,12 +238,13 @@ queryset:
 let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all()
+    .all(&database)
     .await?;
 ```
 
-Результат `WithMany<User, Post>` можно передать в `ModelSerializer`; serializer
-получает только материализованные данные и не имеет доступа к `Database`.
+Результат `prefetch_related` содержит `Loaded<User, (LoadedMany<Post, _>,)>` и
+можно передать в `ModelSerializer`; serializer получает только
+материализованные данные и не имеет доступа к `Database`.
 
 ## Примеры
 
@@ -326,4 +326,5 @@ cargo doc --workspace --no-deps
 ```
 
 Подробности находятся в [`docs/models.md`](docs/models.md) и
-[`docs/sqlite.md`](docs/sqlite.md).
+[`docs/sqlite.md`](docs/sqlite.md). Пошаговый путь от первой модели до
+migrations: [`docs/tutorial.md`](docs/tutorial.md).

@@ -189,18 +189,19 @@ let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
 let posts = database
     .query::<Post>()
     .select_related(Post::USER)
-    .all()
+    .all(&database)
     .await?;
 
 let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all()
+    .all(&database)
     .await?;
 ```
 
-Они возвращают `WithOne` и `WithMany`. Serializer получает эти
-материализованные значения и не имеет доступа к базе.
+`select_related` возвращает `WithOne`, а `prefetch_related` возвращает
+`Loaded` с `LoadedMany`. Serializer получает эти материализованные значения и
+не имеет доступа к базе.
 
 Несколько `belongs_to` relations можно загружать chainable API одним SQL
 запросом. Каждая relation получает alias из имени FK (`author_id` -> `author`):
@@ -210,7 +211,7 @@ let posts = database
     .query::<Post>()
     .select_related(Post::AUTHOR)
     .select_related(Post::EDITOR)
-    .all()
+    .all(&database)
     .await?;
 ```
 
@@ -225,7 +226,7 @@ let posts = database
     .select_related(Post::USER)
     .filter(Post::USER.related_field(User::NAME).eq("Alice"))
     .order_by(Post::USER.related_field(User::NAME).asc())
-    .all()
+    .all(&database)
     .await?;
 ```
 
@@ -251,9 +252,10 @@ struct UserSerializer {
 из модуля модели. Это намеренная compile-time привязка serializer к конкретной
 foreign key relation.
 
-`UserSerializer` с nested-полем принимает только `WithMany<User, Post>`, то
-есть queryset обязан заранее вызвать `prefetch_related`. Serializer не
-принимает `Database`, не выполняет запросы и не может создать N+1.
+`UserSerializer` с nested-полем `many` принимает результат
+`prefetch_related`: `Loaded<User, (LoadedMany<Post, PostUserRelation>,)>`.
+Queryset обязан заранее вызвать `prefetch_related`. Serializer не принимает
+`Database`, не выполняет запросы и не может создать N+1.
 Несколько reverse relations загружаются цепочкой и сериализуются как typed
 tuple:
 
@@ -262,7 +264,7 @@ let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
     .prefetch_related(Audit::USER.reverse())
-    .all()
+    .all(&database)
     .await?;
 
 let response = UserWithPostsAndAuditsSerializer::many(users);
@@ -276,8 +278,8 @@ let response = UserWithPostsAndAuditsSerializer::many(users);
 let response = UserSerializer::many(users);
 ```
 
-Для nested serializer `many` принимает `WithMany`/`WithOne`, поэтому
-непредзагруженная relation не может попасть в вызов случайно.
+Для nested serializer `many` принимает `Loaded` с соответствующим `LoadedMany`,
+поэтому непредзагруженная relation не может попасть в вызов случайно.
 Полный runnable-пример находится в `che-orm2-examples`:
 
 ```bash

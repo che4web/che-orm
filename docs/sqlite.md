@@ -31,8 +31,7 @@ database.create_table::<User>().await?;
 Операция выполняет:
 
 1. `CREATE TABLE`;
-2. все `CREATE INDEX` из `#[orm(index(...))]`;
-3. все generated indexes.
+2. все `CREATE INDEX`, описанные в metadata модели.
 
 Для просмотра SQL без подключения:
 
@@ -62,7 +61,7 @@ let users = database
     .filter(User::IS_ACTIVE.eq(true))
     .order_by(User::NAME.asc())
     .limit(20)
-    .all()
+    .all(&database)
     .await?;
 
 let updated = database
@@ -120,13 +119,13 @@ let users = database
     .filter(User::IS_ACTIVE.eq(true))
     .order_by(User::NAME.asc())
     .limit(20)
-    .all()
+    .all(&database)
     .await?;
 
 let first = database
     .query::<User>()
     .filter(User::EMAIL.eq("alice@example.test"))
-    .first()
+    .first(&database)
     .await?;
 ```
 
@@ -210,12 +209,13 @@ let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
 let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all()
+    .all(&database)
     .await?;
 ```
 
-Результат содержит `WithOne<Post, User>` или `WithMany<User, Post>` и может
-быть передан в serializer. Serializer не получает `Database` и не выполняет
+`select_related` возвращает `WithOne<Post, User>`, а `prefetch_related` -
+`Loaded<User, (LoadedMany<Post, _>,)>`. Оба результата можно передать в
+подходящий serializer. Serializer не получает `Database` и не выполняет
 дополнительные запросы.
 
 Nullable foreign key поддерживает `LEFT JOIN`:
@@ -255,5 +255,4 @@ commit.
 Текущий runtime не содержит:
 
 - автоматического diff схемы;
-- automatic relations и joins на уровне ORM-моделей;
 - PostgreSQL connection pool;

@@ -7,7 +7,8 @@
 Workspace members:
 
 - `che-orm2`: core ORM library, SQLite runtime, SQL AST, schema compiler, and `manage` binary.
-- `che-orm2-macros`: procedural macros, currently `#[derive(Model)]`.
+- `che-orm2-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
+  and `#[derive(ModelSerializer)]`.
 - `che-orm2-examples`: downstream examples using the public API.
 
 ## Architecture

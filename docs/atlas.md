@@ -6,7 +6,6 @@ CLI миграций является частью приложения и за�
 ```bash
 cargo run --bin manage -- schema
 cargo run --bin manage -- makemigrations
-cargo run --bin manage -- migrate diff initial_schema
 cargo run --bin manage -- migrate
 cargo run --bin manage -- migrate status
 cargo run --bin manage -- migrate lint
@@ -14,7 +13,7 @@ cargo run --bin manage -- migrate lint
 
 ## Временная schema-файл
 
-Команда `migrate diff` не оставляет сгенерированный desired schema в рабочем
+Команда `makemigrations` не оставляет сгенерированный desired schema в рабочем
 дереве:
 
 1. `manage` собирает `SchemaSet` из моделей приложения.
@@ -25,16 +24,7 @@ cargo run --bin manage -- migrate lint
 
 Это предотвращает рассинхронизацию постоянного `schema.sql` и Rust-моделей.
 
-Модели для Atlas регистрируются в `src/bin/manage.rs`:
-
-```rust
-let schema = SchemaSet::new()
-    .model::<User>()
-    .model::<Post>()
-    .to_sql::<SqliteDialect>();
-```
-
-Вместо плоского списка можно регистрировать приложения:
+Модели для Atlas регистрируются в `src/apps/mod.rs`:
 
 ```rust
 pub fn registry() -> AppRegistry {
@@ -111,7 +101,7 @@ cargo run --bin manage -- migrate lint
 указать через `ATLAS_BIN`:
 
 ```bash
-ATLAS_BIN=/opt/atlas/atlas cargo run --bin manage -- migrate diff add_posts
+ATLAS_BIN=/opt/atlas/atlas cargo run --bin manage -- makemigrations add_posts
 ```
 
 `manage` не интерполирует аргументы через shell и возвращает ненулевой exit code
@@ -133,7 +123,7 @@ an existing database before deployment.
 ## Production workflow
 
 1. Изменить Rust-модель.
-2. Запустить `migrate diff`.
+2. Запустить `makemigrations`.
 3. Проверить сгенерированный SQL.
 4. Запустить `migrate lint` в CI.
 5. Закоммитить migration files и `atlas.sum`.
