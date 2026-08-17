@@ -2,7 +2,14 @@
 name = "che-orm2-macros"
 version = "0.1.0"
 edition = "2024"
-publish = false
+description = "Procedural macros for che-orm2"
+license = "MIT"
+repository = "https://github.com/che4web/che-orm2"
+homepage = "https://github.com/che4web/che-orm2"
+documentation = "https://docs.rs/che-orm2-macros"
+rust-version = "1.85"
+keywords = ["orm", "sqlite", "database"]
+categories = ["database"]
 
 [lib]
 proc-macro = true

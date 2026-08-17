@@ -48,6 +48,8 @@
 //! Do not derive `serde::Serialize` or `serde::Deserialize` for a `DbEnum`;
 //! the derive generates both implementations.
 
+#![allow(clippy::type_complexity, clippy::new_without_default)]
+
 extern crate self as che_orm2;
 
 pub use che_orm2_macros::{DbEnum, Model, ModelSerializer};
@@ -122,16 +124,11 @@ pub trait ModelWriteSerializer {
 
 /// A JSON patch value. `Missing` means that the property was not sent;
 /// `Value(None)` represents an explicit JSON null.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PatchField<T> {
+    #[default]
     Missing,
     Value(T),
-}
-
-impl<T> Default for PatchField<T> {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 impl<T> PatchField<T> {

@@ -321,7 +321,7 @@ fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
     assert_eq!(patch.email, crate::PatchField::Missing);
     assert_eq!(patch.name, crate::PatchField::Value("Updated".to_string()));
     assert_eq!(patch.is_active, crate::PatchField::Value(false));
-    assert_eq!(UserWriteSerializer::fields()[1].write_only, true);
+    assert!(UserWriteSerializer::fields()[1].write_only);
 
     let unknown = crate::serde_json::from_str::<UserWriteSerializerCreateInput>(
         r#"{"email":"a","name":"A","is_active":true,"id":1}"#,

@@ -2,6 +2,14 @@
 name = "che-orm2"
 version = "0.1.0"
 edition = "2024"
+description = "Typed SQLite ORM primitives for che-rest applications"
+license = "MIT"
+repository = "https://github.com/che4web/che-orm2"
+homepage = "https://github.com/che4web/che-orm2"
+documentation = "https://docs.rs/che-orm2"
+rust-version = "1.85"
+keywords = ["orm", "sqlite", "database"]
+categories = ["database"]
 
 [workspace]
 members = ["che-orm2-macros", "che-orm2-examples"]
@@ -12,7 +20,7 @@ postgres = []
 sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
 
 [dependencies]
-che-orm2-macros = { path = "che-orm2-macros" }
+che-orm2-macros = { version = "0.1.0", path = "che-orm2-macros" }
 deadpool-sqlite = { version = "0.12", optional = true }
 rusqlite = { version = "0.37", features = ["bundled", "time"] }
 serde = { version = "1", features = ["derive"] }
