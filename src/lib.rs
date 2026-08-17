@@ -31,10 +31,26 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Fixed string choices use [`DbEnum`]. It owns the JSON and database value,
+//! so a variant has one canonical representation everywhere:
+//!
+//! ```ignore
+//! # use che_orm2::DbEnum;
+//! #[derive(Debug, Clone, Copy, DbEnum)]
+//! enum TaskStatus {
+//!     Draft,
+//!     #[db_enum(rename = "in_progress")]
+//!     InProgress,
+//! }
+//! ```
+//!
+//! Do not derive `serde::Serialize` or `serde::Deserialize` for a `DbEnum`;
+//! the derive generates both implementations.
 
 extern crate self as che_orm2;
 
-pub use che_orm2_macros::{Model, ModelSerializer};
+pub use che_orm2_macros::{DbEnum, Model, ModelSerializer};
 
 pub use rusqlite;
 pub use serde;

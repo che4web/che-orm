@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use time::OffsetDateTime;
 
-use crate::{OrderBy, OrderDirection};
+use crate::{DbEnum, OrderBy, OrderDirection};
 
 #[derive(Debug, Clone, PartialEq)]
 /// Values bound to SQL placeholders.
@@ -45,6 +45,12 @@ impl QueryValue<bool> for bool {
 impl QueryValue<OffsetDateTime> for OffsetDateTime {
     fn into_query_value(self) -> DatabaseValue {
         DatabaseValue::DateTime(self)
+    }
+}
+
+impl<T: DbEnum> QueryValue<T> for T {
+    fn into_query_value(self) -> DatabaseValue {
+        DatabaseValue::Text(self.as_str().to_owned())
     }
 }
 

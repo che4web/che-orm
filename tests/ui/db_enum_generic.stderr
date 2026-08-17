@@ -1,0 +1,5 @@
+error: DbEnum does not support generic enums
+ --> tests/ui/db_enum_generic.rs:4:12
+  |
+4 | enum Status<T> {
+  |            ^^^

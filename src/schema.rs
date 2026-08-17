@@ -15,6 +15,9 @@ pub trait ColumnTypeOf {
     fn nullable() -> bool {
         false
     }
+    fn choices() -> Option<Vec<&'static str>> {
+        None
+    }
 }
 
 impl ColumnTypeOf for i64 {
@@ -47,6 +50,27 @@ impl<T: ColumnTypeOf> ColumnTypeOf for Option<T> {
     }
     fn nullable() -> bool {
         true
+    }
+    fn choices() -> Option<Vec<&'static str>> {
+        T::choices()
+    }
+}
+
+/// A string-backed enum that can be stored in a database column.
+pub trait DbEnum: Sized {
+    const VALUES: &'static [&'static str];
+
+    fn as_str(&self) -> &'static str;
+    fn from_str(value: &str) -> Option<Self>;
+}
+
+impl<T: DbEnum> ColumnTypeOf for T {
+    fn column_type() -> ColumnType {
+        ColumnType::Text
+    }
+
+    fn choices() -> Option<Vec<&'static str>> {
+        Some(T::VALUES.to_vec())
     }
 }
 
@@ -84,6 +108,7 @@ pub struct ColumnSchema {
     pub unique: bool,
     pub default: Option<&'static str>,
     pub check: Option<&'static str>,
+    pub choices: Option<Vec<&'static str>>,
     pub references: Option<ForeignKey>,
     pub auto_now_add: bool,
     pub auto_now: bool,
@@ -99,6 +124,7 @@ impl ColumnSchema {
             unique: false,
             default: None,
             check: None,
+            choices: None,
             references: None,
             auto_now_add: false,
             auto_now: false,

@@ -305,9 +305,15 @@ pub trait ModelSerializer: serde::Serialize + Sized {
     }
 }
 
+/// Identifies the actual foreign-key column behind a serializer relation.
+pub trait RelationSource {
+    const SOURCE: &'static str;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SerializerField {
     pub name: &'static str,
+    pub source: &'static str,
     pub read_only: bool,
     pub write_only: bool,
     pub rust_type: &'static str,

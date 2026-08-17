@@ -1,0 +1,5 @@
+error: expected `rename = "value"`
+ --> tests/ui/db_enum_invalid_attribute.rs:5:15
+  |
+5 |     #[db_enum(value = "draft")]
+  |               ^^^^^

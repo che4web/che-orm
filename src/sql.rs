@@ -361,6 +361,20 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 self.sql.push_str(check);
                 self.sql.push(')');
             }
+            if let Some(choices) = &column.choices {
+                self.sql.push_str(" CHECK (");
+                self.push_identifier(column.name);
+                self.sql.push_str(" IN (");
+                for (choice_index, choice) in choices.iter().enumerate() {
+                    if choice_index != 0 {
+                        self.sql.push_str(", ");
+                    }
+                    self.sql.push('\'');
+                    self.sql.push_str(&choice.replace('\'', "''"));
+                    self.sql.push('\'');
+                }
+                self.sql.push_str("))");
+            }
             if let Some(reference) = &column.references {
                 self.sql.push_str(" REFERENCES ");
                 self.sql.push_str(reference.target());

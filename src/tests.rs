@@ -4,9 +4,48 @@ use crate::apps::content::PostUserRelation;
 use crate::models::Post;
 use crate::models::User;
 use crate::{
-    ColumnRef, DatabaseValue, Model, ModelSerializer, ModelWriteSerializer, PostgresDialect,
-    QueryBuildError, SqlCompiler, SqliteDialect,
+    ColumnRef, DatabaseValue, DbEnum, Model, ModelSerializer, ModelWriteSerializer,
+    PostgresDialect, QueryBuildError, QueryValue, SqlCompiler, SqliteDialect,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, DbEnum)]
+enum TestStatus {
+    Draft,
+    InProgress,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "enum_items")]
+struct EnumItem {
+    #[orm(primary_key)]
+    id: i64,
+    status: TestStatus,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "nullable_enum_items")]
+struct NullableEnumItem {
+    #[orm(primary_key)]
+    id: i64,
+    status: Option<TestStatus>,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "renamed_relation_items")]
+struct RenamedRelationItem {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = User)]
+    created_by_id: i64,
+}
+
+#[derive(ModelSerializer)]
+#[serializer(model = RenamedRelationItem)]
+struct RenamedRelationResponse {
+    id: i64,
+    #[serializer(one = User, relation = RenamedRelationItemCreated_byRelation)]
+    author: UserResponse,
+}
 
 #[cfg(feature = "sqlite")]
 #[derive(Debug, Model)]
@@ -183,6 +222,78 @@ fn derive_model_defines_consistent_metadata() {
     );
     assert_eq!(User::NAME.column(), ColumnRef::new("users", "name"));
     assert_eq!(User::primary_key().column(), ColumnRef::new("users", "id"));
+}
+
+#[test]
+fn db_enum_provides_schema_choices_and_string_values() {
+    assert_eq!(TestStatus::Draft.as_str(), "draft");
+    assert_eq!(
+        TestStatus::from_str("in_progress"),
+        Some(TestStatus::InProgress)
+    );
+    assert_eq!(TestStatus::from_str("unknown"), None);
+    assert_eq!(
+        EnumItem::schema().columns[1].choices,
+        Some(vec!["draft", "in_progress"])
+    );
+
+    let sql = SqlCompiler::<SqliteDialect>::compile(&EnumItem::create_table().into_ast());
+    assert!(
+        sql.sql
+            .contains("status TEXT NOT NULL CHECK (status IN ('draft', 'in_progress'))")
+    );
+    assert_eq!(
+        <TestStatus as QueryValue<TestStatus>>::into_query_value(TestStatus::Draft),
+        DatabaseValue::Text("draft".into())
+    );
+    assert_eq!(
+        NullableEnumItem::schema().columns[1].choices,
+        Some(vec!["draft", "in_progress"])
+    );
+    assert!(NullableEnumItem::schema().columns[1].nullable);
+}
+
+#[test]
+fn db_enum_uses_the_same_json_and_database_values() {
+    assert_eq!(
+        crate::serde_json::to_string(&TestStatus::InProgress).unwrap(),
+        "\"in_progress\""
+    );
+    assert_eq!(
+        crate::serde_json::from_str::<TestStatus>("\"draft\"").unwrap(),
+        TestStatus::Draft
+    );
+    assert!(crate::serde_json::from_str::<TestStatus>("\"unknown\"").is_err());
+
+    let connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE TABLE enum_values (status TEXT NOT NULL); INSERT INTO enum_values VALUES ('draft');")
+        .unwrap();
+    let value = connection
+        .query_row("SELECT status FROM enum_values", [], |row| {
+            row.get::<_, TestStatus>(0)
+        })
+        .unwrap();
+    assert_eq!(value, TestStatus::Draft);
+
+    connection
+        .execute("UPDATE enum_values SET status = 'unknown'", [])
+        .unwrap();
+    assert!(
+        connection
+            .query_row("SELECT status FROM enum_values", [], |row| row
+                .get::<_, TestStatus>(0))
+            .is_err()
+    );
+}
+
+#[test]
+fn nested_serializer_uses_actual_relation_column() {
+    let field = RenamedRelationResponse::fields()
+        .iter()
+        .find(|field| field.name == "author")
+        .expect("nested relation field");
+    assert_eq!(field.source, "created_by_id");
 }
 
 #[test]

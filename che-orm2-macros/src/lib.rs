@@ -29,6 +29,134 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro_derive(DbEnum, attributes(db_enum))]
+pub fn derive_db_enum(input: TokenStream) -> TokenStream {
+    match derive_db_enum_impl(parse_macro_input!(input as DeriveInput)) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+fn derive_db_enum_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let orm = orm_path()?;
+    if !input.generics.params.is_empty() {
+        return Err(Error::new_spanned(
+            &input.generics,
+            "DbEnum does not support generic enums",
+        ));
+    }
+    let name = input.ident;
+    let variants = match input.data {
+        Data::Enum(data) => data.variants,
+        _ => {
+            return Err(Error::new_spanned(
+                name,
+                "DbEnum can only be derived for enums",
+            ));
+        }
+    };
+    let mut as_str_arms = Vec::new();
+    let mut from_str_arms = Vec::new();
+    let mut values = Vec::new();
+    for variant in variants {
+        if !variant.fields.is_empty() {
+            return Err(Error::new_spanned(
+                variant,
+                "DbEnum variants must be unit variants",
+            ));
+        }
+        let ident = variant.ident;
+        let mut value = None;
+        for attribute in &variant.attrs {
+            if !attribute.path().is_ident("db_enum") {
+                continue;
+            }
+            attribute.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    if value.is_some() {
+                        return Err(meta.error("db_enum rename is declared more than once"));
+                    }
+                    value = Some(meta.value()?.parse::<LitStr>()?);
+                    Ok(())
+                } else {
+                    Err(meta.error("expected `rename = \"value\"`"))
+                }
+            })?;
+        }
+        let value =
+            value.unwrap_or_else(|| LitStr::new(&snake_case(&ident.to_string()), ident.span()));
+        if values
+            .iter()
+            .any(|existing: &LitStr| existing.value() == value.value())
+        {
+            return Err(Error::new_spanned(
+                &ident,
+                format!("duplicate DbEnum value `{}`", value.value()),
+            ));
+        }
+        values.push(value.clone());
+        as_str_arms.push(quote! { Self::#ident => #value });
+        from_str_arms.push(quote! { #value => Some(Self::#ident) });
+    }
+    if values.is_empty() {
+        return Err(Error::new_spanned(
+            name,
+            "DbEnum requires at least one variant",
+        ));
+    }
+    Ok(quote! {
+        impl #orm::DbEnum for #name {
+            const VALUES: &'static [&'static str] = &[#(#values),*];
+            fn as_str(&self) -> &'static str {
+                match self { #(#as_str_arms),* }
+            }
+            fn from_str(value: &str) -> Option<Self> {
+                match value { #(#from_str_arms,)* _ => None }
+            }
+        }
+
+        impl #orm::serde::Serialize for #name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where S: #orm::serde::Serializer {
+                serializer.serialize_str(<Self as #orm::DbEnum>::as_str(self))
+            }
+        }
+
+        impl<'de> #orm::serde::Deserialize<'de> for #name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where D: #orm::serde::Deserializer<'de> {
+                let value = <String as #orm::serde::Deserialize>::deserialize(deserializer)?;
+                <Self as #orm::DbEnum>::from_str(&value).ok_or_else(|| #orm::serde::de::Error::custom(
+                    format!("invalid {} value: {}", stringify!(#name), value)
+                ))
+            }
+        }
+
+        impl #orm::rusqlite::types::FromSql for #name {
+            fn column_result(value: #orm::rusqlite::types::ValueRef<'_>)
+                -> #orm::rusqlite::types::FromSqlResult<Self>
+            {
+                let value = value.as_str()?;
+                <Self as #orm::DbEnum>::from_str(value)
+                    .ok_or(#orm::rusqlite::types::FromSqlError::InvalidType)
+            }
+        }
+    })
+}
+
+fn snake_case(value: &str) -> String {
+    value
+        .chars()
+        .enumerate()
+        .fold(String::new(), |mut output, (index, ch)| {
+            if ch.is_uppercase() && index != 0 {
+                output.push('_');
+            }
+            output.extend(ch.to_lowercase());
+            output
+        })
+}
+
 #[proc_macro_derive(ModelSerializer, attributes(serializer))]
 pub fn derive_model_serializer(input: TokenStream) -> TokenStream {
     match derive_model_serializer_impl(parse_macro_input!(input as DeriveInput)) {
@@ -125,10 +253,18 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             let marker = relation_marker(&relation_path)?;
             let optional = !many && is_option_type(&field.ty);
             let serializer_type = nested_serializer_type(&field.ty, many, optional)?;
-            nested.push((name, many, related_model.clone(), marker, optional, serializer_type));
+            nested.push((
+                name,
+                many,
+                related_model.clone(),
+                marker.clone(),
+                optional,
+                serializer_type,
+            ));
             serializer_fields.push(quote! {
                 #orm::SerializerField {
                     name: #json_name,
+                    source: <#marker as #orm::RelationSource>::SOURCE,
                     read_only: #read_only,
                     write_only: #write_only,
                     rust_type: ::core::stringify!(#field_type),
@@ -140,6 +276,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             serializer_fields.push(quote! {
                 #orm::SerializerField {
                     name: #json_name,
+                    source: #json_name,
                     read_only: #read_only,
                     write_only: #write_only,
                     rust_type: ::core::stringify!(#field_type),
@@ -807,7 +944,13 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                         #reverse_name,
                     );
             });
-            relation_markers.push(quote! { pub struct #marker_name; });
+            relation_markers.push(quote! {
+                #[allow(non_camel_case_types)]
+                pub struct #marker_name;
+                impl #orm::RelationSource for #marker_name {
+                    const SOURCE: &'static str = #column;
+                }
+            });
         }
 
         schema_columns.push(quote! {
@@ -820,8 +963,9 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             column.unique = #unique;
             column.auto_now_add = #auto_now_add;
             column.auto_now = #auto_now;
+            column.choices = <#field_type as #orm::ColumnTypeOf>::choices();
             #default
-            #check
+                #check
             #references
             #foreign_key
             columns.push(column);
