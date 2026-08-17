@@ -211,6 +211,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         });
         let mut nested_relation = None;
         let mut relation_path = None;
+        let mut scalar_relation = None;
         for attribute in &field.attrs {
             if !attribute.path().is_ident("serializer") {
                 continue;
@@ -233,15 +234,24 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                     } else if meta.path.is_ident("relation") {
                         relation_path = Some(meta.value()?.parse::<Path>()?);
                         Ok(())
+                    } else if meta.path.is_ident("foreign_key") {
+                        scalar_relation = Some(meta.value()?.parse::<Path>()?);
+                        Ok(())
                     } else {
                         Err(meta.error(
-                            "unsupported serializer field attribute; expected read_only, many = Model, one = Model or relation = Model::RELATION",
+                            "unsupported serializer field attribute; expected read_only, write_only, foreign_key = Model, many = Model, one = Model or relation = Model::RELATION",
                         ))
                     }
                 })?;
         }
         if write_only {
             serialize_fields.pop();
+        }
+        if nested_relation.is_some() && scalar_relation.is_some() {
+            return Err(Error::new_spanned(
+                &name,
+                "a serializer field cannot use both nested and scalar relation metadata",
+            ));
         }
         if let Some((many, related_model)) = nested_relation {
             let relation_path = relation_path.ok_or_else(|| {
@@ -273,14 +283,30 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                 }
             });
         } else {
+            let related_model = scalar_relation
+                .as_ref()
+                .map(|model| quote! { Some(::core::stringify!(#model)) })
+                .unwrap_or_else(|| quote! { None });
+            let relation_source = if scalar_relation.is_some() {
+                let relation_path = relation_path.as_ref().ok_or_else(|| {
+                    Error::new_spanned(
+                        &name,
+                        "scalar relation fields require `relation = RelationMarker`",
+                    )
+                })?;
+                let marker = relation_marker(relation_path)?;
+                quote! { <#marker as #orm::RelationSource>::SOURCE }
+            } else {
+                quote! { #json_name }
+            };
             serializer_fields.push(quote! {
                 #orm::SerializerField {
                     name: #json_name,
-                    source: #json_name,
+                    source: #relation_source,
                     read_only: #read_only,
                     write_only: #write_only,
                     rust_type: ::core::stringify!(#field_type),
-                    related_model: None,
+                    related_model: #related_model,
                     many: false,
                 }
             });

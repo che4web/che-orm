@@ -69,6 +69,7 @@ result to a serializer. Nested fields use `#[serializer(many = Post, relation =
 PostUserRelation)]` or `#[serializer(one = User, relation = PostUserRelation)]` and accept
 only the matching `WithMany`/`WithOne`/`LoadedMany` relation marker. Optional
 relations use `WithOptionalOne`.
+Scalar writable foreign-key serializer fields use `#[serializer(foreign_key = User, relation = TaskAssigneeRelation)]`; this exposes the FK id as write metadata without requiring a nested queryset relation.
 
 ## Migrations
 
