@@ -1,0 +1,5 @@
+error: duplicate DbEnum value `open`
+ --> tests/ui/db_enum_duplicate_value.rs:8:5
+  |
+8 |     Published,
+  |     ^^^^^^^^^

@@ -1,0 +1,5 @@
+error: serializer model is declared more than once
+  --> tests/ui/duplicate_serializer_model.rs:12:14
+   |
+12 | #[serializer(model = User)]
+   |              ^^^^^

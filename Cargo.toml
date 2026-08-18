@@ -1,37 +1,33 @@
-[workspace]
-members = [
-    "crates/che-orm",
-    "crates/che-orm-cli",
-    "crates/che-orm-examples",
-    "crates/che-orm-macros",
-    "crates/che-orm-benchmarks", "che-orm2",
-]
-resolver = "3"
-
-[workspace.package]
+[package]
+name = "che-orm2"
 version = "0.1.0"
 edition = "2024"
+description = "Typed SQLite ORM primitives for che-rest applications"
 license = "MIT"
-repository = "https://github.com/che4web/che-orm"
-homepage = "https://github.com/che4web/che-orm"
+repository = "https://github.com/che4web/che-orm2"
+homepage = "https://github.com/che4web/che-orm2"
+documentation = "https://docs.rs/che-orm2"
 rust-version = "1.85"
+keywords = ["orm", "sqlite", "database"]
+categories = ["database"]
 
-[workspace.dependencies]
-che-orm = { path = "crates/che-orm", version = "0.1.0", default-features = false }
-che-orm-macros = { path = "crates/che-orm-macros", version = "0.1.0" }
-chrono = { version = "0.4", features = ["serde"] }
-cap-std = "3"
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
-clap = { version = "4", features = ["derive"] }
-proc-macro2 = "1"
-quote = "1"
+[workspace]
+members = ["che-orm2-macros", "che-orm2-examples"]
+
+[features]
+default = ["sqlite"]
+postgres = []
+sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
+
+[dependencies]
+che-orm2-macros = { version = "0.1.0", path = "che-orm2-macros" }
+deadpool-sqlite = { version = "0.12", optional = true }
+rusqlite = { version = "0.37", features = ["bundled", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
-sqlx = { version = "0.8", default-features = false, features = ["chrono", "migrate", "runtime-tokio"] }
-syn = { version = "2", features = ["full"] }
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tokio-rusqlite = "0.6"
-toml = "0.8"
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", optional = true, features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
 trybuild = "1"

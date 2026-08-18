@@ -1,0 +1,5 @@
+error: on_delete = "set null" requires an Option<i64> foreign_key field
+  --> tests/ui/set_null_non_nullable.rs:16:14
+   |
+16 |     user_id: i64,
+   |              ^^^

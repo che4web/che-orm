@@ -1,59 +1,21 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
 
 jobs:
-  sqlite:
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
-      - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace --locked
-      - run: cargo test -p che-orm --test backend_compile --locked
-      - run: cargo doc -p che-orm --no-deps --locked
-      # Dependent crates can be package-verified only after their internal
-      # dependencies are available in crates.io. List their release artifacts here.
-      - run: cargo package -p che-orm-macros
-      - run: cargo package -p che-orm --list
-      - run: cargo package -p che-orm-cli --list
-      - run: cargo run -p che-orm-examples --bin schema_snapshot
-      - run: cargo run -p che-orm-cli -- makemigrations --schema che_orm_schema.json --name ci
-      - run: cargo run -p che-orm-cli -- migrate --database-url 'sqlite://ci.sqlite?mode=rwc'
-      - run: cargo run -p che-orm-cli -- status --database-url 'sqlite://ci.sqlite?mode=rwc'
-      - run: cargo tree -p che-orm --no-default-features --features sqlite -i sqlx-postgres --locked
-
-  postgres:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: che_orm
-        options: >-
-          --health-cmd "pg_isready -U postgres -d che_orm"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
-      - run: cargo clippy -p che-orm --no-default-features --features postgres --lib
-      - run: cargo doc -p che-orm --no-default-features --features postgres --no-deps --locked
-      - run: cargo test -p che-orm --no-default-features --features postgres --test backend_compile --locked
-      - run: cargo test -p che-orm --no-default-features --features postgres --test postgres_query --locked
-        env:
-          CHE_ORM_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/che_orm
-      - run: cargo test -p che-orm --no-default-features --features postgres --test migrations postgres_manual_migrations_are_supported_when_configured --locked
-        env:
-          CHE_ORM_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/che_orm
-      - run: cargo test -p che-orm --no-default-features --features postgres --test migrations postgres_model_manager_supports_create_get_and_all_when_configured --locked
-        env:
-          CHE_ORM_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/che_orm
-      - run: cargo tree -p che-orm --no-default-features --features postgres -i sqlx-sqlite --locked
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Package macros
+        run: cargo package --manifest-path che-orm2-macros/Cargo.toml

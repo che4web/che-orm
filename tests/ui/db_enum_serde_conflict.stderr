@@ -1,0 +1,9 @@
+error[E0119]: conflicting implementations of trait `Serialize` for type `Status`
+ --> tests/ui/db_enum_serde_conflict.rs:3:38
+  |
+3 | #[derive(che_orm2::serde::Serialize, DbEnum)]
+  |          --------------------------  ^^^^^^ conflicting implementation for `Status`
+  |          |
+  |          first implementation here
+  |
+  = note: this error originates in the derive macro `DbEnum` (in Nightly builds, run with -Z macro-backtrace for more info)

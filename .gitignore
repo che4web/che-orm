@@ -1,7 +1,1 @@
-/target
-/che_orm_schema.json
-/example.sqlite
-/app.sqlite
-*.db
-*.sqlite
-*.sqlite3
+/target/

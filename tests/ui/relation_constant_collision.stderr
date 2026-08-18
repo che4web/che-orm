@@ -1,0 +1,5 @@
+error: generated relation constant USER conflicts with a model field
+  --> tests/ui/relation_constant_collision.rs:17:5
+   |
+17 |     user_id: i64,
+   |     ^^^^^^^
