@@ -734,7 +734,7 @@ fn compiles_postgres_identity_create_table_from_model() {
 #[tokio::test]
 async fn sqlite_facade_supports_crud_and_typed_queries() {
     let path = std::env::temp_dir().join(format!(
-        "che_orm2_facade_test_{}_{}.db",
+        "che_orm_facade_test_{}_{}.db",
         std::process::id(),
         1
     ));
@@ -793,7 +793,7 @@ async fn sqlite_facade_supports_crud_and_typed_queries() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_pool_persists_and_loads_models() {
-    let path = std::env::temp_dir().join(format!("che_orm2_test_{}_{}.db", std::process::id(), 1));
+    let path = std::env::temp_dir().join(format!("che_orm_test_{}_{}.db", std::process::id(), 1));
     let _ = std::fs::remove_file(&path);
 
     let database =
@@ -869,7 +869,7 @@ async fn sqlite_pool_persists_and_loads_models() {
 async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     assert_eq!(Post::USER.reverse().related_name(), "post_set");
     let path = std::env::temp_dir().join(format!(
-        "che_orm2_relation_test_{}_{}.db",
+        "che_orm_relation_test_{}_{}.db",
         std::process::id(),
         1
     ));

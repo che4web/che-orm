@@ -1,4 +1,4 @@
-use che_orm2::{Model, ModelSerializer};
+use che_orm::{Model, ModelSerializer};
 
 #[derive(Model)]
 #[orm(table = "users")]

@@ -1,4 +1,4 @@
-use che_orm2::{Compiler, Model, models::User};
+use che_orm::{Compiler, Model, models::User};
 
 fn main() {
     let u = User::new("test".into());

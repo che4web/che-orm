@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-`che-orm2` is an experimental Rust ORM workspace.
+`che-orm` is an experimental Rust ORM workspace.
 
 Workspace members:
 
-- `che-orm2`: core ORM library, SQLite runtime, SQL AST, schema compiler, and `manage` binary.
-- `che-orm2-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
+- `che-orm`: core ORM library, SQLite runtime, SQL AST, schema compiler, and `manage` binary.
+- `che-orm-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
   and `#[derive(ModelSerializer)]`.
-- `che-orm2-examples`: downstream examples using the public API.
+- `che-orm-examples`: downstream examples using the public API.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ Workspace members:
 - `src/apps/`: application modules and their model ownership.
 - `src/settings.rs`: application database path shared by runtime and `manage`.
 - `src/bin/manage.rs`: Atlas migration CLI owned by the application.
-- `che-orm2-macros/src/lib.rs`: `Model` derive implementation.
+- `che-orm-macros/src/lib.rs`: `Model` derive implementation.
 - `migrations/`: Atlas versioned migration files and `atlas.sum`.
 
 ## Application Modules
@@ -34,11 +34,11 @@ Each application should expose an `App` type implementing `AppConfig`:
 ```rust
 pub struct App;
 
-impl che_orm2::AppConfig for App {
+impl che_orm::AppConfig for App {
     fn name() -> &'static str { "accounts" }
 
-    fn schema() -> che_orm2::SchemaSet {
-        che_orm2::SchemaSet::new().model::<User>()
+    fn schema() -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new().model::<User>()
     }
 }
 ```
@@ -127,16 +127,16 @@ cargo run --bin manage -- schema
 For the PostgreSQL SQL compiler without the SQLite runtime:
 
 ```bash
-cargo test -p che-orm2 --no-default-features --features postgres
+cargo test -p che-orm --no-default-features --features postgres
 ```
 
 Run examples after applying the configured migration:
 
 ```bash
 cargo run --bin manage -- migrate
-cargo run -p che-orm2-examples --bin schema
-cargo run -p che-orm2-examples --bin sqlite_crud
-cargo run -p che-orm2-examples --bin transactions
+cargo run -p che-orm-examples --bin schema
+cargo run -p che-orm-examples --bin sqlite_crud
+cargo run -p che-orm-examples --bin transactions
 ```
 
 ## Editing Rules

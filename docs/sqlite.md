@@ -3,20 +3,20 @@
 ## Подключение
 
 ```rust
-let database = che_orm2::Database::connect("app.db")?;
+let database = che_orm::Database::connect("app.db")?;
 ```
 
 `Database` содержит `deadpool-sqlite::Pool`. По умолчанию pool size равен 4.
 Для настройки:
 
 ```rust
-let database = che_orm2::Database::connect_with_pool_size("app.db", 8)?;
+let database = che_orm::Database::connect_with_pool_size("app.db", 8)?;
 ```
 
 Для тестов:
 
 ```rust
-let database = che_orm2::Database::connect_in_memory()?;
+let database = che_orm::Database::connect_in_memory()?;
 ```
 
 In-memory database должна использовать pool size 1, иначе каждое соединение
@@ -36,7 +36,7 @@ database.create_table::<User>().await?;
 Для просмотра SQL без подключения:
 
 ```rust
-let compiled = che_orm2::SqlCompiler::<che_orm2::SqliteDialect>
+let compiled = che_orm::SqlCompiler::<che_orm::SqliteDialect>
     ::compile(&User::create_table().into_ast());
 println!("{}", compiled.sql);
 ```
@@ -112,7 +112,7 @@ println!("{:?}", result.last_insert_rowid);
 ## Typed select facade
 
 ```rust
-use che_orm2::Model;
+use che_orm::Model;
 
 let users = database
     .query::<User>()
@@ -164,7 +164,7 @@ let query = User::update()
 Опишите дочернюю модель с foreign key:
 
 ```rust
-#[derive(Debug, che_orm2::Model)]
+#[derive(Debug, che_orm::Model)]
 #[orm(table = "posts")]
 struct Post {
     #[orm(primary_key)]

@@ -122,11 +122,11 @@ PostgreSQL connection/executor пока не входит в runtime.
 ```rust
 pub struct AccountsApp;
 
-impl che_orm2::AppConfig for AccountsApp {
+impl che_orm::AppConfig for AccountsApp {
     fn name() -> &'static str { "accounts" }
 
-    fn schema() -> che_orm2::SchemaSet {
-        che_orm2::SchemaSet::new().model::<User>()
+    fn schema() -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new().model::<User>()
     }
 }
 ```
@@ -134,7 +134,7 @@ impl che_orm2::AppConfig for AccountsApp {
 Затем приложения объединяются через `AppRegistry`:
 
 ```rust
-let registry = che_orm2::AppRegistry::new()
+let registry = che_orm::AppRegistry::new()
     .register::<AccountsApp>()
     .register::<ContentApp>();
 ```
@@ -236,7 +236,7 @@ let posts = database
 Serializer описывает JSON-поля отдельно от ORM-модели:
 
 ```rust
-#[derive(che_orm2::ModelSerializer)]
+#[derive(che_orm::ModelSerializer)]
 #[serializer(model = User)]
 struct UserSerializer {
     #[serializer(read_only)]
@@ -280,8 +280,8 @@ let response = UserSerializer::many(users);
 
 Для nested serializer `many` принимает `Loaded` с соответствующим `LoadedMany`,
 поэтому непредзагруженная relation не может попасть в вызов случайно.
-Полный runnable-пример находится в `che-orm2-examples`:
+Полный runnable-пример находится в `che-orm-examples`:
 
 ```bash
-cargo run -p che-orm2-examples --bin serializers
+cargo run -p che-orm-examples --bin serializers
 ```

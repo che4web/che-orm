@@ -1,6 +1,6 @@
-use che_orm2::DbEnum;
+use che_orm::DbEnum;
 
-#[derive(che_orm2::serde::Serialize, DbEnum)]
+#[derive(che_orm::serde::Serialize, DbEnum)]
 enum Status {
     Draft,
 }

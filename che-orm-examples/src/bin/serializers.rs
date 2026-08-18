@@ -1,4 +1,4 @@
-use che_orm2_examples::{
+use che_orm_examples::{
     ExamplePost, ExamplePostWithUserSerializer, ExampleUser, ExampleUserWithPostsSerializer,
 };
 use orm::Database;

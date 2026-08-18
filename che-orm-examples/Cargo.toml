@@ -1,5 +1,5 @@
 [package]
-name = "che-orm2-examples"
+name = "che-orm-examples"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -9,7 +9,7 @@ default = ["sqlite"]
 sqlite = []
 
 [dependencies]
-orm = { package = "che-orm2", path = ".." }
+orm = { package = "che-orm", path = ".." }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 serde_json = "1"

@@ -8,7 +8,7 @@ use syn::{
 };
 
 fn orm_path() -> syn::Result<proc_macro2::TokenStream> {
-    match crate_name("che-orm2") {
+    match crate_name("che-orm") {
         Ok(FoundCrate::Itself) => Ok(quote!(crate)),
         Ok(FoundCrate::Name(name)) => {
             let ident = Ident::new(&name, proc_macro2::Span::call_site());
@@ -16,7 +16,7 @@ fn orm_path() -> syn::Result<proc_macro2::TokenStream> {
         }
         Err(error) => Err(Error::new(
             proc_macro2::Span::call_site(),
-            format!("could not resolve che-orm2 dependency: {error}"),
+            format!("could not resolve che-orm dependency: {error}"),
         )),
     }
 }

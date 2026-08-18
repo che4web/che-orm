@@ -1,4 +1,4 @@
-# che-orm2
+# che-orm
 
 Экспериментальная типизированная ORM для Rust. Сейчас рабочий runtime-backend —
 SQLite через `deadpool-sqlite`, а строки декодируются обратно в модели,
@@ -27,7 +27,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 
 ```toml
 [dependencies]
-che-orm2 = { path = "../che-orm2" }
+che-orm = { path = "../che-orm" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```
@@ -35,7 +35,7 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 Опишите модель:
 
 ```rust
-use che_orm2::Model;
+use che_orm::Model;
 use time::OffsetDateTime;
 
 #[derive(Debug, Model)]
@@ -57,10 +57,10 @@ struct User {
 Используйте модель через async SQLite database:
 
 ```rust
-use che_orm2::Database;
+use che_orm::Database;
 
 #[tokio::main]
-async fn main() -> Result<(), che_orm2::OrmError> {
+async fn main() -> Result<(), che_orm::OrmError> {
     let database = Database::connect("app.db")?;
     database.create_table::<User>().await?;
 
@@ -93,7 +93,7 @@ Managed timestamp-поля не передаются в `INSERT`: их знач�
 SQLite и schema metadata:
 
 ```rust
-use che_orm2::{DbEnum, Model};
+use che_orm::{DbEnum, Model};
 
 #[derive(Debug, Clone, Copy, DbEnum)]
 enum TaskStatus {
@@ -248,14 +248,14 @@ let users = database
 
 ## Примеры
 
-В workspace есть crate `che-orm2-examples`:
+В workspace есть crate `che-orm-examples`:
 
 ```bash
-cargo run -p che-orm2-examples --bin schema
+cargo run -p che-orm-examples --bin schema
 cargo run --bin manage -- migrate
-cargo run -p che-orm2-examples --bin sqlite_crud
-cargo run -p che-orm2-examples --bin transactions
-cargo run -p che-orm2-examples --bin serializers
+cargo run -p che-orm-examples --bin sqlite_crud
+cargo run -p che-orm-examples --bin transactions
+cargo run -p che-orm-examples --bin serializers
 ```
 
 ## Миграции
@@ -284,15 +284,15 @@ deploy, а не при старте приложения. Подробности
 ```rust
 pub struct AccountsApp;
 
-impl che_orm2::AppConfig for AccountsApp {
+impl che_orm::AppConfig for AccountsApp {
     fn name() -> &'static str { "accounts" }
 
-    fn schema() -> che_orm2::SchemaSet {
-        che_orm2::SchemaSet::new().model::<User>()
+    fn schema() -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new().model::<User>()
     }
 }
 
-let registry = che_orm2::AppRegistry::new()
+let registry = che_orm::AppRegistry::new()
     .register::<AccountsApp>()
     .register::<ContentApp>();
 ```
@@ -312,7 +312,7 @@ foreign keys.
 Для проверки PostgreSQL compiler без SQLite runtime:
 
 ```bash
-cargo test -p che-orm2 --no-default-features --features postgres
+cargo test -p che-orm --no-default-features --features postgres
 ```
 
 Features `sqlite` и `postgres` взаимоисключающие.

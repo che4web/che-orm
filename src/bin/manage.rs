@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use che_orm2::apps::registry;
-use che_orm2::{SqliteDialect, settings};
+use che_orm::apps::registry;
+use che_orm::{SqliteDialect, settings};
 
 const MIGRATIONS_DIR: &str = "migrations";
 
@@ -161,7 +161,7 @@ impl TemporarySchema {
             .map_err(|error| error.to_string())?
             .as_nanos();
         let path = env::temp_dir().join(format!(
-            "che_orm2_schema_{}_{}.sql",
+            "che_orm_schema_{}_{}.sql",
             std::process::id(),
             timestamp
         ));

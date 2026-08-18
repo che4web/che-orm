@@ -18,4 +18,4 @@ jobs:
       - name: Test
         run: cargo test
       - name: Package macros
-        run: cargo package --manifest-path che-orm2-macros/Cargo.toml
+        run: cargo package --manifest-path che-orm-macros/Cargo.toml

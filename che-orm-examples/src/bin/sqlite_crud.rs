@@ -1,4 +1,4 @@
-use che_orm2_examples::{ExamplePost, ExampleUser};
+use che_orm_examples::{ExamplePost, ExampleUser};
 use orm::Database;
 
 #[tokio::main]

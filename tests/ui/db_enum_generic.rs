@@ -1,4 +1,4 @@
-use che_orm2::DbEnum;
+use che_orm::DbEnum;
 
 #[derive(DbEnum)]
 enum Status<T> {

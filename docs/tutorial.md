@@ -11,12 +11,12 @@ relations и показывает переход к Atlas migrations. Для п�
 cargo new blog-app
 ```
 
-Добавьте локальную зависимость на `che-orm2` в `Cargo.toml`. Измените путь под
+Добавьте локальную зависимость на `che-orm` в `Cargo.toml`. Измените путь под
 расположение вашего приложения:
 
 ```toml
 [dependencies]
-che-orm2 = { path = "../che-orm2" }
+che-orm = { path = "../che-orm" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```
@@ -28,7 +28,7 @@ foreign key в DDL, `Post::USER` для `belongs_to` и
 `Post::USER.reverse()` для `has_many`.
 
 ```rust
-use che_orm2::{Database, Model};
+use che_orm::{Database, Model};
 use time::OffsetDateTime;
 
 #[derive(Debug, Model)]
@@ -56,7 +56,7 @@ struct Post {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), che_orm2::OrmError> {
+async fn main() -> Result<(), che_orm::OrmError> {
     let database = Database::connect_in_memory()?;
     database.create_table::<User>().await?;
     database.create_table::<Post>().await?;
@@ -189,17 +189,17 @@ assert!(deleted);
 ```rust
 pub struct AccountsApp;
 
-impl che_orm2::AppConfig for AccountsApp {
+impl che_orm::AppConfig for AccountsApp {
     fn name() -> &'static str {
         "accounts"
     }
 
-    fn schema() -> che_orm2::SchemaSet {
-        che_orm2::SchemaSet::new().model::<User>()
+    fn schema() -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new().model::<User>()
     }
 }
 
-let registry = che_orm2::AppRegistry::new()
+let registry = che_orm::AppRegistry::new()
     .register::<AccountsApp>()
     .register::<ContentApp>();
 ```
@@ -229,9 +229,9 @@ cargo run --bin manage -- migrate status
 
 ```bash
 cargo run --bin manage -- migrate
-cargo run -p che-orm2-examples --bin sqlite_crud
-cargo run -p che-orm2-examples --bin serializers
-cargo run -p che-orm2-examples --bin transactions
+cargo run -p che-orm-examples --bin sqlite_crud
+cargo run -p che-orm-examples --bin serializers
+cargo run -p che-orm-examples --bin transactions
 ```
 
 Следующие справочные материалы: [модели и схема](models.md),

@@ -1,4 +1,4 @@
-use che_orm2::Model;
+use che_orm::Model;
 
 #[derive(Model)]
 #[orm(table = "users")]

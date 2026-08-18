@@ -1,4 +1,4 @@
-//! `che-orm2` — экспериментальная типизированная ORM для Rust.
+//! `che-orm` — экспериментальная типизированная ORM для Rust.
 //!
 //! Runtime сейчас ориентирован на SQLite: [`Database`] предоставляет async
 //! pool и high-level CRUD/query facade, а [`Model`] derive генерирует metadata,
@@ -8,7 +8,7 @@
 //! Основной рабочий сценарий:
 //!
 //! ```ignore
-//! use che_orm2::{Database, Model};
+//! use che_orm::{Database, Model};
 //!
 //! # #[derive(Debug, Model)]
 //! # #[orm(table = "users")]
@@ -18,7 +18,7 @@
 //! #     name: String,
 //! # }
 //! # #[tokio::main]
-//! # async fn run() -> Result<(), che_orm2::OrmError> {
+//! # async fn run() -> Result<(), che_orm::OrmError> {
 //! let database = Database::connect_in_memory()?;
 //! database.create_table::<User>().await?;
 //! let user = database
@@ -36,7 +36,7 @@
 //! so a variant has one canonical representation everywhere:
 //!
 //! ```ignore
-//! # use che_orm2::DbEnum;
+//! # use che_orm::DbEnum;
 //! #[derive(Debug, Clone, Copy, DbEnum)]
 //! enum TaskStatus {
 //!     Draft,
@@ -50,9 +50,9 @@
 
 #![allow(clippy::type_complexity, clippy::new_without_default)]
 
-extern crate self as che_orm2;
+extern crate self as che_orm;
 
-pub use che_orm2_macros::{DbEnum, Model, ModelSerializer};
+pub use che_orm_macros::{DbEnum, Model, ModelSerializer};
 
 pub use rusqlite;
 pub use serde;
