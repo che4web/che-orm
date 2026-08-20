@@ -29,7 +29,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 
 ```toml
 [dependencies]
-che-orm = "0.1"
+che-orm = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```

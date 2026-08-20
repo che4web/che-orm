@@ -1,6 +1,6 @@
 [package]
 name = "che-orm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Typed SQLite ORM primitives for che-rest applications"
 license = "MIT"
@@ -20,7 +20,7 @@ postgres = []
 sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
 
 [dependencies]
-che-orm-macros = { version = "0.1.0", path = "che-orm-macros" }
+che-orm-macros = { version = "0.2.0", path = "che-orm-macros" }
 deadpool-sqlite = { version = "0.12", optional = true }
 rusqlite = { version = "0.37", features = ["bundled", "time"] }
 serde = { version = "1", features = ["derive"] }

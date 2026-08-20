@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "che-orm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "che-orm-macros",
  "deadpool-sqlite",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "che-orm-examples"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "che-orm",
  "serde",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "che-orm-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
