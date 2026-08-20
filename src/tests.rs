@@ -911,6 +911,25 @@ async fn sqlite_facade_supports_crud_and_typed_queries() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn sqlite_round_trips_binary_fields() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<BinaryItem>().await.unwrap();
+
+    let payload = vec![0, 1, 2, 127, 255];
+    let item = database
+        .create::<BinaryItem>()
+        .set(BinaryItem::PAYLOAD, payload.clone())
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(item.payload, payload);
+
+    let loaded = database.get::<BinaryItem>(item.id).await.unwrap().unwrap();
+    assert_eq!(loaded.payload, vec![0, 1, 2, 127, 255]);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn sqlite_pool_persists_and_loads_models() {
     let path = std::env::temp_dir().join(format!("che_orm_test_{}_{}.db", std::process::id(), 1));
     let _ = std::fs::remove_file(&path);
