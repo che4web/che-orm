@@ -1208,6 +1208,7 @@ fn database_value(value: &DatabaseValue) -> rusqlite::Result<Value> {
     match value {
         DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
         DatabaseValue::Text(value) => Ok(Value::Text(value.clone())),
+        DatabaseValue::Binary(value) => Ok(Value::Blob(value.clone())),
         DatabaseValue::Boolean(value) => Ok(Value::Integer(i64::from(*value))),
         DatabaseValue::DateTime(value) => value
             .format(&Rfc3339)

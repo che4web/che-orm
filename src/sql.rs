@@ -23,6 +23,7 @@ impl SqlDialect for PostgresDialect {
         output.push_str(match column_type {
             ColumnType::Integer => "BIGINT",
             ColumnType::Text => "TEXT",
+            ColumnType::Binary => "BYTEA",
             ColumnType::Boolean => "BOOLEAN",
             ColumnType::DateTime => "TIMESTAMPTZ",
         });
@@ -47,6 +48,7 @@ impl SqlDialect for SqliteDialect {
         output.push_str(match column_type {
             ColumnType::Integer => "INTEGER",
             ColumnType::Text => "TEXT",
+            ColumnType::Binary => "BLOB",
             ColumnType::Boolean => "INTEGER",
             ColumnType::DateTime => "TEXT",
         });

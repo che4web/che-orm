@@ -90,6 +90,14 @@ struct NullableEnumItem {
     status: Option<TestStatus>,
 }
 
+#[derive(Debug, Model)]
+#[orm(table = "binary_items")]
+struct BinaryItem {
+    #[orm(primary_key)]
+    id: i64,
+    payload: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Model)]
 #[orm(table = "cloneable_items")]
 struct CloneableItem {
@@ -345,6 +353,20 @@ fn db_enum_provides_schema_choices_and_string_values() {
         Some(vec!["draft", "in_progress"])
     );
     assert!(NullableEnumItem::schema().columns[1].nullable);
+}
+
+#[test]
+fn binary_fields_use_blob_schema_and_values() {
+    assert_eq!(
+        BinaryItem::schema().columns[1].column_type,
+        crate::ColumnType::Binary
+    );
+    let sql = SqlCompiler::<SqliteDialect>::compile(&BinaryItem::create_table().into_ast());
+    assert!(sql.sql.contains("payload BLOB NOT NULL"));
+    assert_eq!(
+        <Vec<u8> as QueryValue<Vec<u8>>>::into_query_value(vec![1, 2, 3]),
+        DatabaseValue::Binary(vec![1, 2, 3])
+    );
 }
 
 #[test]

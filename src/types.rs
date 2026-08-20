@@ -9,6 +9,7 @@ use crate::{DbEnum, OrderBy, OrderDirection};
 pub enum DatabaseValue {
     Integer(i64),
     Text(String),
+    Binary(Vec<u8>),
     Boolean(bool),
     DateTime(OffsetDateTime),
     Null,
@@ -33,6 +34,12 @@ impl QueryValue<String> for String {
 impl QueryValue<String> for &str {
     fn into_query_value(self) -> DatabaseValue {
         DatabaseValue::Text(self.to_owned())
+    }
+}
+
+impl QueryValue<Vec<u8>> for Vec<u8> {
+    fn into_query_value(self) -> DatabaseValue {
+        DatabaseValue::Binary(self)
     }
 }
 

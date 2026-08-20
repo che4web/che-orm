@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 pub enum ColumnType {
     Integer,
     Text,
+    Binary,
     Boolean,
     DateTime,
 }
@@ -29,6 +30,12 @@ impl ColumnTypeOf for i64 {
 impl ColumnTypeOf for String {
     fn column_type() -> ColumnType {
         ColumnType::Text
+    }
+}
+
+impl ColumnTypeOf for Vec<u8> {
+    fn column_type() -> ColumnType {
+        ColumnType::Binary
     }
 }
 
