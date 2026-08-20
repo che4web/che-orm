@@ -813,7 +813,6 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut row_fields = Vec::with_capacity(fields.len());
     let mut insert_values = Vec::with_capacity(fields.len());
     let mut managed_update_values = Vec::with_capacity(fields.len());
-    let mut clone_fields = Vec::with_capacity(fields.len());
     let mut relation_constants = Vec::new();
     let mut relation_markers = Vec::new();
     let mut primary_key_seen = false;
@@ -834,10 +833,6 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 format!("generated constant {constant} conflicts with another model field"),
             ));
         }
-
-        clone_fields.push(quote! {
-            #field_name: self.#field_name.clone(),
-        });
 
         if field_attributes.foreign_key.is_some()
             && !is_i64(&field_type)
@@ -1089,14 +1084,6 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
             fn managed_update_values() -> ::std::vec::Vec<#orm::Assignment> {
                 vec![#(#managed_update_values),*]
-            }
-        }
-
-        impl ::core::clone::Clone for #model {
-            fn clone(&self) -> Self {
-                Self {
-                    #(#clone_fields)*
-                }
             }
         }
 

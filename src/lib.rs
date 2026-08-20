@@ -67,10 +67,6 @@ mod types;
 #[cfg(feature = "sqlite")]
 mod connection;
 
-pub mod apps;
-pub mod models;
-pub mod settings;
-
 pub use query::*;
 pub use schema::*;
 pub use sql::*;

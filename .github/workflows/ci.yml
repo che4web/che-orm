@@ -14,8 +14,12 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
+      - name: Test PostgreSQL compiler
+        run: cargo test -p che-orm --no-default-features --features postgres
+      - name: Documentation
+        run: cargo doc --workspace --no-deps
       - name: Package macros
         run: cargo package --manifest-path che-orm-macros/Cargo.toml

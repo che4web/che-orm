@@ -1,5 +1,26 @@
 use orm::{Model, ModelSerializer};
+use std::path::Path;
 use time::OffsetDateTime;
+
+pub const DATABASE_PATH: &str = "app.db";
+
+pub const fn database_path() -> &'static str {
+    DATABASE_PATH
+}
+
+pub fn atlas_database_url() -> Result<String, String> {
+    let path = database_path();
+    if path.is_empty() {
+        return Err("database path must not be empty".into());
+    }
+    if path == ":memory:" {
+        return Err("in-memory SQLite cannot be used for Atlas migrations".into());
+    }
+    if Path::new(path).is_dir() {
+        return Err(format!("database path points to a directory: {path}"));
+    }
+    Ok(format!("sqlite://{path}"))
+}
 
 #[allow(dead_code)]
 #[derive(orm::Model)]
@@ -17,7 +38,9 @@ pub struct ExampleUser {
     pub id: i64,
     #[orm(unique)]
     pub email: String,
+    #[orm(check = "length(name) > 0")]
     pub name: String,
+    #[orm(default = "true")]
     pub is_active: bool,
     #[orm(auto_now_add)]
     pub created_at: OffsetDateTime,
@@ -46,6 +69,36 @@ pub struct ExamplePost {
     #[orm(foreign_key = ExampleUser, on_delete = "cascade")]
     pub user_id: i64,
     pub title: String,
+}
+
+pub struct AccountsApp;
+
+impl orm::AppConfig for AccountsApp {
+    fn name() -> &'static str {
+        "accounts"
+    }
+
+    fn schema() -> orm::SchemaSet {
+        orm::SchemaSet::new().model::<ExampleUser>()
+    }
+}
+
+pub struct ContentApp;
+
+impl orm::AppConfig for ContentApp {
+    fn name() -> &'static str {
+        "content"
+    }
+
+    fn schema() -> orm::SchemaSet {
+        orm::SchemaSet::new().model::<ExamplePost>()
+    }
+}
+
+pub fn registry() -> orm::AppRegistry {
+    orm::AppRegistry::new()
+        .register::<AccountsApp>()
+        .register::<ContentApp>()
 }
 
 #[derive(ModelSerializer)]

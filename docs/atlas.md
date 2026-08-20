@@ -1,14 +1,14 @@
 # Миграции через Atlas
 
-CLI миграций является частью приложения и запускается через бинарник
-`manage`:
+CLI миграций является частью example application и запускается из
+`che-orm-examples`:
 
 ```bash
-cargo run --bin manage -- schema
-cargo run --bin manage -- makemigrations
-cargo run --bin manage -- migrate
-cargo run --bin manage -- migrate status
-cargo run --bin manage -- migrate lint
+cargo run -p che-orm-examples --bin manage -- schema
+cargo run -p che-orm-examples --bin manage -- makemigrations
+cargo run -p che-orm-examples --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate status
+cargo run -p che-orm-examples --bin manage -- migrate lint
 ```
 
 ## Временная schema-файл
@@ -24,7 +24,7 @@ cargo run --bin manage -- migrate lint
 
 Это предотвращает рассинхронизацию постоянного `schema.sql` и Rust-моделей.
 
-Модели для Atlas регистрируются в `src/apps/mod.rs`:
+Модели для Atlas регистрируются в `che-orm-examples/src/lib.rs`:
 
 ```rust
 pub fn registry() -> AppRegistry {
@@ -37,15 +37,14 @@ pub fn registry() -> AppRegistry {
 Каждый `AppConfig` владеет собственным набором моделей. Порядок регистрации
 определяет порядок SQL DDL и должен учитывать foreign keys.
 
-Путь к базе находится в `src/settings.rs` и используется и runtime, и
-`manage`:
+Путь к базе находится в `che-orm-examples/src/lib.rs` и используется example
+runtime и `manage`:
 
 ```rust
 pub const DATABASE_PATH: &str = "app.db";
 ```
 
-В application code для этого пути можно использовать
-`Database::connect_configured()`.
+В application code передайте этот путь в `Database::connect(...)`.
 
 Порядок вызова `.model::<...>()` является порядком DDL. Сначала добавляйте
 таблицы-родители, затем таблицы с foreign keys.
@@ -57,7 +56,7 @@ pub const DATABASE_PATH: &str = "app.db";
 Печатает полный desired schema в stdout. Эта команда полезна для проверки:
 
 ```bash
-cargo run --bin manage -- schema > /tmp/schema.sql
+cargo run -p che-orm-examples --bin manage -- schema > /tmp/schema.sql
 ```
 
 ### `makemigrations`
@@ -66,11 +65,11 @@ cargo run --bin manage -- schema > /tmp/schema.sql
 в формате `auto_<unix_timestamp>`:
 
 ```bash
-cargo run --bin manage -- makemigrations
-cargo run --bin manage -- makemigrations add_user_status
+cargo run -p che-orm-examples --bin manage -- makemigrations
+cargo run -p che-orm-examples --bin manage -- makemigrations add_user_status
 ```
 
-Команда использует `migrations/` и SQLite dev database
+Команда использует `che-orm-examples/migrations/` и SQLite dev database
 `sqlite://dev?mode=memory`.
 
 ### `migrate`
@@ -78,7 +77,7 @@ cargo run --bin manage -- makemigrations add_user_status
 Применяет pending migrations к базе:
 
 ```bash
-cargo run --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate
 ```
 
 Приложение не применяет migrations автоматически при старте. Это делается
@@ -87,8 +86,8 @@ cargo run --bin manage -- migrate
 ### `migrate status` и `migrate lint`
 
 ```bash
-cargo run --bin manage -- migrate status
-cargo run --bin manage -- migrate lint
+cargo run -p che-orm-examples --bin manage -- migrate status
+cargo run -p che-orm-examples --bin manage -- migrate lint
 ```
 
 В старых и canary-версиях Atlas команда `migrate lint` может требовать
@@ -101,7 +100,7 @@ cargo run --bin manage -- migrate lint
 указать через `ATLAS_BIN`:
 
 ```bash
-ATLAS_BIN=/opt/atlas/atlas cargo run --bin manage -- makemigrations add_posts
+ATLAS_BIN=/opt/atlas/atlas cargo run -p che-orm-examples --bin manage -- makemigrations add_posts
 ```
 
 `manage` не интерполирует аргументы через shell и возвращает ненулевой exit code

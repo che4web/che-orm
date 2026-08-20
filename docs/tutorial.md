@@ -204,8 +204,8 @@ let registry = che_orm::AppRegistry::new()
     .register::<ContentApp>();
 ```
 
-В этом репозитории встроенный `manage` binary использует registry из `src/apps`
-и единый путь к базе из `src/settings.rs`:
+В этом репозитории example application хранит registry, путь к базе и migrations
+в `che-orm-examples`:
 
 ```rust
 pub const DATABASE_PATH: &str = "app.db";
@@ -214,21 +214,21 @@ pub const DATABASE_PATH: &str = "app.db";
 Atlas должен быть доступен в `PATH`. Выполните команды из корня репозитория:
 
 ```bash
-cargo run --bin manage -- schema
-cargo run --bin manage -- makemigrations initial_schema
-cargo run --bin manage -- migrate
-cargo run --bin manage -- migrate status
+cargo run -p che-orm-examples --bin manage -- schema
+cargo run -p che-orm-examples --bin manage -- makemigrations initial_schema
+cargo run -p che-orm-examples --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate status
 ```
 
 Проверьте SQL новой migration до применения и закоммитьте migration-файл вместе
-с `migrations/atlas.sum`. Подробности об Atlas: [atlas.md](atlas.md).
+с `che-orm-examples/migrations/atlas.sum`. Подробности об Atlas: [atlas.md](atlas.md).
 
 ## 7. Изучите runnable examples
 
 В этом репозитории готовы примеры с актуальным публичным API:
 
 ```bash
-cargo run --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin sqlite_crud
 cargo run -p che-orm-examples --bin serializers
 cargo run -p che-orm-examples --bin transactions

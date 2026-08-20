@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/che4web/che-orm"
 homepage = "https://github.com/che4web/che-orm"
 documentation = "https://docs.rs/che-orm-macros"
+readme = "README.md"
 rust-version = "1.85"
 keywords = ["orm", "sqlite", "database"]
 categories = ["database"]

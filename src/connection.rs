@@ -45,11 +45,6 @@ impl Database {
         Self::connect_with_pool_size(path, 4)
     }
 
-    /// Opens the database configured by [`crate::settings::database_path`].
-    pub fn connect_configured() -> Result<Self, OrmError> {
-        Self::connect(crate::settings::database_path())
-    }
-
     /// Opens a SQLite database with an explicit maximum pool size.
     pub fn connect_with_pool_size(
         path: impl Into<String>,
@@ -283,14 +278,22 @@ impl Database {
             .interact(move |connection| -> rusqlite::Result<T> {
                 configure_connection(connection)?;
                 connection.execute_batch("BEGIN")?;
-                match action(connection) {
-                    Ok(value) => {
-                        connection.execute_batch("COMMIT")?;
-                        Ok(value)
-                    }
-                    Err(error) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(connection)))
+                {
+                    Ok(Ok(value)) => match connection.execute_batch("COMMIT") {
+                        Ok(()) => Ok(value),
+                        Err(error) => {
+                            let _ = connection.execute_batch("ROLLBACK");
+                            Err(error)
+                        }
+                    },
+                    Ok(Err(error)) => {
                         let _ = connection.execute_batch("ROLLBACK");
                         Err(error)
+                    }
+                    Err(payload) => {
+                        let _ = connection.execute_batch("ROLLBACK");
+                        std::panic::resume_unwind(payload);
                     }
                 }
             })
@@ -1119,8 +1122,12 @@ fn load_optional_joined_models<M: Model, R: Model, Relation>(
     let mut statement = connection.prepare(&compiled.sql)?;
     let params = sqlite_params(compiled)?;
     let offset = M::columns().len();
+    let related_primary_key_offset = R::columns()
+        .iter()
+        .position(|column| *column == R::primary_key().column().name)
+        .expect("primary key must be one of the model columns");
     let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
-        let related_id: Option<i64> = row.get(offset)?;
+        let related_id: Option<i64> = row.get(offset + related_primary_key_offset)?;
         Ok(WithOptionalOne {
             model: M::from_row_at(row, 0)?,
             related: related_id

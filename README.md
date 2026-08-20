@@ -1,5 +1,7 @@
 # che-orm
 
+Documentation: [English](README.en.md) | **Русский**
+
 Экспериментальная типизированная ORM для Rust. Сейчас рабочий runtime-backend —
 SQLite через `deadpool-sqlite`, а строки декодируются обратно в модели,
 сгенерированные procedural macro.
@@ -27,7 +29,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 
 ```toml
 [dependencies]
-che-orm = { path = "../che-orm" }
+che-orm = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```
@@ -121,12 +123,6 @@ stores values as `TEXT` and emits a `CHECK` constraint for the declared choices.
 
 ```rust
 let database = Database::connect("app.db")?;
-```
-
-В application binary можно использовать единый путь из settings:
-
-```rust
-let database = Database::connect_configured()?;
 ```
 
 Размер можно задать явно:
@@ -252,7 +248,7 @@ let users = database
 
 ```bash
 cargo run -p che-orm-examples --bin schema
-cargo run --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin sqlite_crud
 cargo run -p che-orm-examples --bin transactions
 cargo run -p che-orm-examples --bin serializers
@@ -260,19 +256,19 @@ cargo run -p che-orm-examples --bin serializers
 
 ## Миграции
 
-CLI миграций является частью приложения:
+CLI миграций находится в `che-orm-examples`, а не в library crate:
 
 ```bash
-cargo run --bin manage -- schema
-cargo run --bin manage -- makemigrations
-cargo run --bin manage -- migrate
-cargo run --bin manage -- migrate status
-cargo run --bin manage -- migrate lint
+cargo run -p che-orm-examples --bin manage -- schema
+cargo run -p che-orm-examples --bin manage -- makemigrations
+cargo run -p che-orm-examples --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate status
+cargo run -p che-orm-examples --bin manage -- migrate lint
 ```
 
 `makemigrations` собирает schema из Rust-моделей, записывает её во временный
 файл, передаёт Atlas через `--to file://...` и удаляет файл после завершения.
-Миграции хранятся в `migrations/` и применяются только отдельной командой
+Миграции примера хранятся в `che-orm-examples/migrations/` и применяются только отдельной командой
 deploy, а не при старте приложения. Подробности: [`docs/atlas.md`](docs/atlas.md).
 В некоторых версиях Atlas `migrate lint` требует `atlas login`/Pro; это
 ограничение Atlas, а не приложения.
@@ -298,7 +294,7 @@ let registry = che_orm::AppRegistry::new()
 ```
 
 Каждое приложение хранит свои модели и возвращает свой `SchemaSet`. Общий
-registry используется `manage schema` и `makemigrations`. Регистрируйте
+registry используется application-owned migration CLI. Регистрируйте
 приложения в порядке зависимостей: сначала таблицы-родители, затем модели с
 foreign keys.
 
@@ -325,6 +321,6 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 ```
 
-Подробности находятся в [`docs/models.md`](docs/models.md) и
-[`docs/sqlite.md`](docs/sqlite.md). Пошаговый путь от первой модели до
-migrations: [`docs/tutorial.md`](docs/tutorial.md).
+Русская документация: [`docs/models.md`](docs/models.md),
+[`docs/sqlite.md`](docs/sqlite.md), [`docs/atlas.md`](docs/atlas.md) и
+[`docs/tutorial.md`](docs/tutorial.md). Английская версия: [`docs/en/`](docs/en/README.md).

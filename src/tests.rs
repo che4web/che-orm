@@ -1,12 +1,72 @@
-#[cfg(feature = "sqlite")]
-use crate::apps::content::PostUserRelation;
-#[cfg(feature = "sqlite")]
-use crate::models::Post;
-use crate::models::User;
 use crate::{
-    ColumnRef, DatabaseValue, DbEnum, Model, ModelSerializer, ModelWriteSerializer,
-    PostgresDialect, QueryBuildError, QueryValue, SqlCompiler, SqliteDialect,
+    AppConfig, AppRegistry, ColumnRef, DatabaseValue, DbEnum, Model, ModelSerializer,
+    ModelWriteSerializer, PostgresDialect, QueryBuildError, QueryValue, SqlCompiler, SqliteDialect,
 };
+use time::OffsetDateTime;
+
+#[derive(Debug, Model)]
+#[orm(table = "users", unique("email"), index("name"))]
+struct User {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(unique)]
+    email: String,
+    #[orm(check = "length(name) > 0")]
+    name: String,
+    #[orm(default = "true")]
+    is_active: bool,
+    #[orm(auto_now_add)]
+    created_at: OffsetDateTime,
+    #[orm(auto_now)]
+    updated_at: OffsetDateTime,
+}
+
+impl User {
+    fn new(name: String) -> Self {
+        Self {
+            id: 0,
+            email: String::new(),
+            name,
+            is_active: true,
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+        }
+    }
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "posts", index("user_id"))]
+struct Post {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = User, on_delete = "cascade")]
+    user_id: i64,
+    title: String,
+}
+
+struct AccountsApp;
+
+impl AppConfig for AccountsApp {
+    fn name() -> &'static str {
+        "accounts"
+    }
+
+    fn schema() -> crate::SchemaSet {
+        crate::SchemaSet::new().model::<User>()
+    }
+}
+
+struct ContentApp;
+
+impl AppConfig for ContentApp {
+    fn name() -> &'static str {
+        "content"
+    }
+
+    fn schema() -> crate::SchemaSet {
+        crate::SchemaSet::new().model::<Post>()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, DbEnum)]
 enum TestStatus {
@@ -30,6 +90,14 @@ struct NullableEnumItem {
     status: Option<TestStatus>,
 }
 
+#[derive(Debug, Clone, Model)]
+#[orm(table = "cloneable_items")]
+struct CloneableItem {
+    #[orm(primary_key)]
+    id: i64,
+}
+
+#[cfg(feature = "sqlite")]
 #[derive(Debug, Model)]
 #[orm(table = "renamed_relation_items")]
 struct RenamedRelationItem {
@@ -39,6 +107,7 @@ struct RenamedRelationItem {
     created_by_id: i64,
 }
 
+#[cfg(feature = "sqlite")]
 #[derive(ModelSerializer)]
 #[serializer(model = RenamedRelationItem)]
 struct RenamedRelationResponse {
@@ -56,6 +125,25 @@ struct OptionalPost {
     #[orm(foreign_key = User, on_delete = "set null")]
     user_id: Option<i64>,
     title: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Model)]
+#[orm(table = "users_with_late_primary_key")]
+struct UserWithLatePrimaryKey {
+    email: String,
+    #[orm(primary_key)]
+    id: i64,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Model)]
+#[orm(table = "optional_posts_with_late_primary_key")]
+struct OptionalPostWithLatePrimaryKey {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = UserWithLatePrimaryKey, on_delete = "set null")]
+    user_id: Option<i64>,
 }
 
 #[cfg(feature = "sqlite")]
@@ -128,6 +216,12 @@ struct UserWriteSerializer {
     created_at: time::OffsetDateTime,
     #[serializer(read_only)]
     updated_at: time::OffsetDateTime,
+}
+
+#[test]
+fn model_can_derive_clone() {
+    let item = CloneableItem { id: 1 };
+    assert_eq!(item.clone().id, 1);
 }
 
 fn validate_user_write(
@@ -287,6 +381,7 @@ fn db_enum_uses_the_same_json_and_database_values() {
     );
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn nested_serializer_uses_actual_relation_column() {
     let field = RenamedRelationResponse::fields()
@@ -434,7 +529,9 @@ fn nested_model_serializer_accepts_only_prefetched_result() {
 
 #[test]
 fn application_registry_preserves_app_and_dependency_order() {
-    let registry = crate::apps::registry();
+    let registry = AppRegistry::new()
+        .register::<AccountsApp>()
+        .register::<ContentApp>();
     assert_eq!(registry.apps(), ["accounts", "content"]);
 
     let sql = registry.to_sql::<SqliteDialect>();
@@ -695,7 +792,7 @@ fn compiles_sqlite_create_table_from_model() {
 
     assert_eq!(
         compiled.sql,
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL CHECK (length(name) > 0), is_active INTEGER NOT NULL DEFAULT true, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')), UNIQUE (email))"
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL CHECK (length(name) > 0), is_active INTEGER NOT NULL DEFAULT true, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE (email))"
     );
     assert_eq!(
         schema.indexes,
@@ -841,6 +938,19 @@ async fn sqlite_pool_persists_and_loads_models() {
     assert!(updated.updated_at > previous_updated_at);
     assert_eq!(updated.name, "Updated Alice");
 
+    let (created_at, updated_at): (String, String) = database
+        .transaction(|connection| {
+            connection.query_row(
+                "SELECT created_at, updated_at FROM users WHERE email = ?1",
+                ["alice@example.test"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert!(created_at.contains('T') && created_at.ends_with('Z'));
+    assert!(updated_at.contains('T') && updated_at.ends_with('Z'));
+
     let orm_updated_at = updated.updated_at;
     std::thread::sleep(std::time::Duration::from_millis(2));
     database
@@ -862,6 +972,32 @@ async fn sqlite_pool_persists_and_loads_models() {
     assert_eq!(raw_updated.updated_at, orm_updated_at);
 
     let _ = std::fs::remove_file(path);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_transaction_rolls_back_after_action_error() {
+    let database = crate::Database::connect_in_memory().unwrap();
+
+    let result: Result<(), crate::OrmError> = database
+        .transaction(|connection| {
+            connection.execute_batch("CREATE TABLE rolled_back_table (id INTEGER)")?;
+            Err(rusqlite::Error::InvalidQuery)
+        })
+        .await;
+    assert!(result.is_err());
+
+    let table_count: i64 = database
+        .transaction(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'rolled_back_table'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(table_count, 0);
 }
 
 #[cfg(feature = "sqlite")]
@@ -1120,4 +1256,51 @@ async fn sqlite_optional_foreign_key_uses_left_join_and_set_null() {
         .find(|post| post.title == "Attached")
         .unwrap();
     assert_eq!(detached.user_id, None);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_optional_join_uses_primary_key_metadata() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database
+        .create_table::<UserWithLatePrimaryKey>()
+        .await
+        .unwrap();
+    database
+        .create_table::<OptionalPostWithLatePrimaryKey>()
+        .await
+        .unwrap();
+
+    let user_id = database
+        .insert(&UserWithLatePrimaryKey {
+            email: "late-primary-key@example.test".into(),
+            id: 0,
+        })
+        .await
+        .unwrap()
+        .last_insert_rowid
+        .unwrap();
+    database
+        .insert(&OptionalPostWithLatePrimaryKey {
+            id: 0,
+            user_id: Some(user_id),
+        })
+        .await
+        .unwrap();
+    database
+        .insert(&OptionalPostWithLatePrimaryKey {
+            id: 0,
+            user_id: None,
+        })
+        .await
+        .unwrap();
+
+    let rows = database
+        .query::<OptionalPostWithLatePrimaryKey>()
+        .select_related(OptionalPostWithLatePrimaryKey::USER)
+        .all(&database)
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().filter(|row| row.related.is_some()).count(), 1);
+    assert_eq!(rows.iter().filter(|row| row.related.is_none()).count(), 1);
 }

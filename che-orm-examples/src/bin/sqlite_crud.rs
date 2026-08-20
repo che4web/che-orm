@@ -3,7 +3,7 @@ use orm::Database;
 
 #[tokio::main]
 async fn main() -> Result<(), orm::OrmError> {
-    let database = Database::connect_configured()?;
+    let database = Database::connect(che_orm_examples::database_path())?;
 
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

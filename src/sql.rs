@@ -55,7 +55,7 @@ impl SqlDialect for SqliteDialect {
     fn identity_primary_key(_output: &mut String) {}
 
     fn timestamp_default(output: &mut String) {
-        output.push_str("(strftime('%Y-%m-%d %H:%M:%f', 'now'))");
+        output.push_str("(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))");
     }
 }
 

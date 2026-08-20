@@ -6,10 +6,10 @@
 
 Workspace members:
 
-- `che-orm`: core ORM library, SQLite runtime, SQL AST, schema compiler, and `manage` binary.
+- `che-orm`: core ORM library, SQLite runtime, SQL AST, and schema compiler.
 - `che-orm-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
   and `#[derive(ModelSerializer)]`.
-- `che-orm-examples`: downstream examples using the public API.
+- `che-orm-examples`: downstream examples, sample application models, and the `manage` CLI.
 
 ## Architecture
 
@@ -18,16 +18,15 @@ Workspace members:
 - `src/schema.rs`: column metadata, `SchemaSet`, `AppConfig`, and `AppRegistry`.
 - `src/sql.rs`: SQLite/PostgreSQL dialects and SQL compilation.
 - `src/connection.rs`: async SQLite pool, CRUD execution, row decoding, and transactions.
-- `src/apps/`: application modules and their model ownership.
-- `src/settings.rs`: application database path shared by runtime and `manage`.
-- `src/bin/manage.rs`: Atlas migration CLI owned by the application.
 - `che-orm-macros/src/lib.rs`: `Model` derive implementation.
-- `migrations/`: Atlas versioned migration files and `atlas.sum`.
+- `che-orm-examples/src/lib.rs`: sample application models, registry, and database path.
+- `che-orm-examples/src/bin/manage.rs`: Atlas migration CLI for the sample application.
+- `che-orm-examples/migrations/`: sample Atlas migrations and `atlas.sum`.
 
 ## Application Modules
 
-Keep models grouped by application under `src/apps/<app>.rs` or
-`src/apps/<app>/mod.rs`.
+Keep application models, registry, settings, binaries, and migrations outside
+the core crate. The sample application uses `che-orm-examples`.
 
 Each application should expose an `App` type implementing `AppConfig`:
 
@@ -43,8 +42,8 @@ impl che_orm::AppConfig for App {
 }
 ```
 
-Register apps in `src/apps/mod.rs` with `AppRegistry`. Register parent tables
-before applications that define foreign keys to them.
+Register apps with `AppRegistry`. Register parent tables before applications
+that define foreign keys to them.
 
 ## Model Rules
 
@@ -77,7 +76,7 @@ Scalar writable foreign-key serializer fields use `#[serializer(foreign_key = Us
 Atlas is the source of applied schema changes. Do not use `Database::create_table`
 for production deployment; it is intended for tests and local setup.
 
-Application configuration lives in `src/settings.rs`:
+The sample application configuration lives in `che-orm-examples/src/lib.rs`:
 
 ```rust
 pub const DATABASE_PATH: &str = "app.db";
@@ -86,18 +85,18 @@ pub const DATABASE_PATH: &str = "app.db";
 Use the application CLI:
 
 ```bash
-cargo run --bin manage -- schema
-cargo run --bin manage -- makemigrations
-cargo run --bin manage -- migrate
-cargo run --bin manage -- migrate status
-cargo run --bin manage -- migrate lint
+cargo run -p che-orm-examples --bin manage -- schema
+cargo run -p che-orm-examples --bin manage -- makemigrations
+cargo run -p che-orm-examples --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate status
+cargo run -p che-orm-examples --bin manage -- migrate lint
 ```
 
 `makemigrations` writes the desired schema to a temporary file and invokes
 Atlas with `--to file://...`. The temporary file must not be committed.
 
-`migrate` and `migrate status` use `settings::DATABASE_PATH`; do not add a
-second database URL source to the CLI.
+`migrate` and `migrate status` use the sample application's `DATABASE_PATH`;
+do not add a second database URL source to the CLI.
 
 Atlas must be installed and available as `atlas` in `PATH`. Set `ATLAS_BIN`
 when a non-default executable path is needed. Some Atlas versions require
@@ -121,7 +120,7 @@ Run these commands after code changes:
 cargo fmt --check
 cargo test --workspace
 cargo doc --workspace --no-deps
-cargo run --bin manage -- schema
+cargo run -p che-orm-examples --bin manage -- schema
 ```
 
 For the PostgreSQL SQL compiler without the SQLite runtime:
@@ -133,10 +132,11 @@ cargo test -p che-orm --no-default-features --features postgres
 Run examples after applying the configured migration:
 
 ```bash
-cargo run --bin manage -- migrate
+cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin schema
 cargo run -p che-orm-examples --bin sqlite_crud
 cargo run -p che-orm-examples --bin transactions
+cargo run -p che-orm-examples --bin serializers
 ```
 
 ## Editing Rules
