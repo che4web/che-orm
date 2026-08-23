@@ -202,6 +202,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         let json_name = name.to_string();
         let mut read_only = false;
         let mut write_only = false;
+        let mut use_default_on_create = false;
         serialize_fields.push(quote! {
             #orm::serde::ser::SerializeStruct::serialize_field(
                 &mut state,
@@ -223,6 +224,9 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                     } else if meta.path.is_ident("write_only") {
                         write_only = true;
                         Ok(())
+                    } else if meta.path.is_ident("default") {
+                        use_default_on_create = true;
+                        Ok(())
                     } else if meta.path.is_ident("many") || meta.path.is_ident("one") {
                         let many = meta.path.is_ident("many");
                         let model: Path = meta.value()?.parse()?;
@@ -239,7 +243,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
                         Ok(())
                     } else {
                         Err(meta.error(
-                            "unsupported serializer field attribute; expected read_only, write_only, foreign_key = Model, many = Model, one = Model or relation = Model::RELATION",
+                            "unsupported serializer field attribute; expected read_only, write_only, default, foreign_key = Model, many = Model, one = Model or relation = Model::RELATION",
                         ))
                     }
                 })?;
@@ -312,7 +316,12 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
             });
             if !read_only {
                 let constant = Ident::new(&name.to_string().to_uppercase(), name.span());
-                input_fields.push((name.clone(), field.ty.clone(), constant));
+                input_fields.push((
+                    name.clone(),
+                    field.ty.clone(),
+                    constant,
+                    use_default_on_create,
+                ));
             }
             assignments.push(quote! { #name: model.#name });
         }
@@ -519,23 +528,41 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     let patch_name = Ident::new(&format!("{}PatchInput", serializer), serializer.span());
     let input_names = input_fields
         .iter()
-        .map(|(name, _, _)| name.clone())
+        .map(|(name, _, _, _)| name.clone())
         .collect::<Vec<_>>();
     let input_types = input_fields
         .iter()
-        .map(|(_, ty, _)| ty.clone())
+        .map(|(_, ty, _, _)| ty.clone())
         .collect::<Vec<_>>();
-    let create_sets = input_fields.iter().map(|(name, _, constant)| {
+    let create_fields = input_fields
+        .iter()
+        .map(|(name, ty, _, use_default_on_create)| {
+            if *use_default_on_create {
+                quote! { #[serde(default)] pub #name: ::core::option::Option<#ty>, }
+            } else {
+                quote! { pub #name: #ty, }
+            }
+        });
+    let create_sets = input_fields.iter().map(|(name, _, constant, use_default_on_create)| {
+        if *use_default_on_create {
+            quote! {
+                let builder = match input.#name {
+                    ::core::option::Option::Some(value) => builder.set(<#model>::#constant, value),
+                    ::core::option::Option::None => builder,
+                };
+            }
+        } else {
+            quote! {
+                let builder = builder.set(<#model>::#constant, input.#name);
+            }
+        }
+    });
+    let update_sets = input_fields.iter().map(|(name, _, constant, _)| {
         quote! {
             let builder = builder.set(<#model>::#constant, input.#name);
         }
     });
-    let update_sets = input_fields.iter().map(|(name, _, constant)| {
-        quote! {
-            let builder = builder.set(<#model>::#constant, input.#name);
-        }
-    });
-    let patch_sets = input_fields.iter().map(|(name, _, constant)| {
+    let patch_sets = input_fields.iter().map(|(name, _, constant, _)| {
         quote! {
             let builder = match input.#name {
                 #orm::PatchField::Missing => builder,
@@ -545,7 +572,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     });
     let patch_missing_checks = input_fields
         .iter()
-        .map(|(name, _, _)| quote! { input.#name.is_missing() })
+        .map(|(name, _, _, _)| quote! { input.#name.is_missing() })
         .collect::<Vec<_>>();
     let patch_empty = if patch_missing_checks.is_empty() {
         quote! { true }
@@ -557,7 +584,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         #[derive(Debug, #orm::serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         pub struct #create_name {
-            #(pub #input_names: #input_types,)*
+            #(#create_fields)*
         }
 
         #[derive(Debug, #orm::serde::Deserialize)]

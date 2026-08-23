@@ -219,6 +219,7 @@ struct UserWriteSerializer {
     #[serializer(write_only)]
     email: String,
     name: String,
+    #[serializer(default)]
     is_active: bool,
     #[serializer(read_only)]
     created_at: time::OffsetDateTime,
@@ -432,6 +433,11 @@ fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
     )
     .unwrap();
     assert_eq!(create.name, "Alice");
+    assert_eq!(create.is_active, Some(true));
+
+    let create_with_default: UserWriteSerializerCreateInput =
+        crate::serde_json::from_str(r#"{"email":"alice@example.test","name":"Alice"}"#).unwrap();
+    assert_eq!(create_with_default.is_active, None);
 
     let patch: UserWriteSerializerPatchInput =
         crate::serde_json::from_str(r#"{"name":"Updated","is_active":false}"#).unwrap();
@@ -491,6 +497,20 @@ async fn generated_serializer_executes_create_update_and_patch() {
     .unwrap();
     let user = user.unwrap();
     assert_eq!(user.name, "Alice");
+
+    let defaulted = UserWriteSerializer::is_valid(
+        crate::serde_json::json!({
+            "email": "default@example.test",
+            "name": "Defaulted",
+        }),
+        crate::WriteMode::Create,
+    )
+    .unwrap()
+    .save(&database)
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(defaulted.is_active);
 
     let updated = UserWriteSerializer::is_valid(
         crate::serde_json::json!({
