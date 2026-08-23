@@ -98,6 +98,24 @@ struct BinaryItem {
     payload: Vec<u8>,
 }
 
+#[derive(Debug, Model)]
+#[orm(table = "scheduled_items")]
+struct ScheduledItem {
+    #[orm(primary_key)]
+    id: i64,
+    title: String,
+    due_at: Option<OffsetDateTime>,
+}
+
+#[derive(ModelSerializer)]
+#[serializer(model = ScheduledItem)]
+struct ScheduledItemSerializer {
+    #[serializer(read_only)]
+    id: i64,
+    title: String,
+    due_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Clone, Model)]
 #[orm(table = "cloneable_items")]
 struct CloneableItem {
@@ -475,6 +493,35 @@ async fn generated_serializer_rejects_empty_patch_before_database_update() {
         crate::WriteMode::Patch { id: 1 },
     );
     assert!(matches!(result, Err(crate::ValidationErrors { .. })));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn generated_serializer_patch_persists_optional_datetime() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<ScheduledItem>().await.unwrap();
+    let item = ScheduledItemSerializer::is_valid(
+        crate::serde_json::json!({"title": "Scheduled", "due_at": null}),
+        crate::WriteMode::Create,
+    )
+    .unwrap()
+    .save(&database)
+    .await
+    .unwrap()
+    .unwrap();
+
+    let due_at = "2026-08-25T12:30:00Z";
+    let updated = ScheduledItemSerializer::is_valid(
+        crate::serde_json::json!({"due_at": due_at}),
+        crate::WriteMode::Patch { id: item.id },
+    )
+    .unwrap()
+    .save(&database)
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(updated.due_at.unwrap().unix_timestamp(), 1_787_661_000);
 }
 
 #[cfg(feature = "sqlite")]

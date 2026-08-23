@@ -145,6 +145,44 @@ where
     }
 }
 
+/// Deserializes an RFC 3339 timestamp sent by JSON API clients.
+pub fn deserialize_rfc3339<'de, D>(deserializer: D) -> Result<time::OffsetDateTime, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    time::serde::rfc3339::deserialize(deserializer)
+}
+
+/// Deserializes an optional RFC 3339 timestamp sent by JSON API clients.
+pub fn deserialize_optional_rfc3339<'de, D>(
+    deserializer: D,
+) -> Result<Option<time::OffsetDateTime>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    time::serde::rfc3339::option::deserialize(deserializer)
+}
+
+/// Deserializes an RFC 3339 timestamp while preserving patch-field presence.
+pub fn deserialize_patch_rfc3339<'de, D>(
+    deserializer: D,
+) -> Result<PatchField<time::OffsetDateTime>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_rfc3339(deserializer).map(PatchField::Value)
+}
+
+/// Deserializes an optional RFC 3339 timestamp while preserving patch-field presence.
+pub fn deserialize_patch_optional_rfc3339<'de, D>(
+    deserializer: D,
+) -> Result<PatchField<Option<time::OffsetDateTime>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_rfc3339(deserializer).map(PatchField::Value)
+}
+
 #[cfg(feature = "sqlite")]
 pub use connection::*;
 

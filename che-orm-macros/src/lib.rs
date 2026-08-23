@@ -526,23 +526,24 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     let create_name = Ident::new(&format!("{}CreateInput", serializer), serializer.span());
     let update_name = Ident::new(&format!("{}UpdateInput", serializer), serializer.span());
     let patch_name = Ident::new(&format!("{}PatchInput", serializer), serializer.span());
-    let input_names = input_fields
-        .iter()
-        .map(|(name, _, _, _)| name.clone())
-        .collect::<Vec<_>>();
-    let input_types = input_fields
-        .iter()
-        .map(|(_, ty, _, _)| ty.clone())
-        .collect::<Vec<_>>();
     let create_fields = input_fields
         .iter()
         .map(|(name, ty, _, use_default_on_create)| {
+            let deserialize = datetime_deserialize_attribute(ty, &orm, false);
             if *use_default_on_create {
-                quote! { #[serde(default)] pub #name: ::core::option::Option<#ty>, }
+                quote! { #[serde(default)] #deserialize pub #name: ::core::option::Option<#ty>, }
             } else {
-                quote! { pub #name: #ty, }
+                quote! { #deserialize pub #name: #ty, }
             }
         });
+    let update_fields = input_fields.iter().map(|(name, ty, _, _)| {
+        let deserialize = datetime_deserialize_attribute(ty, &orm, false);
+        quote! { #deserialize pub #name: #ty, }
+    });
+    let patch_fields = input_fields.iter().map(|(name, ty, _, _)| {
+        let deserialize = datetime_deserialize_attribute(ty, &orm, true);
+        quote! { #[serde(default)] #deserialize pub #name: #orm::PatchField<#ty>, }
+    });
     let create_sets = input_fields.iter().map(|(name, _, constant, use_default_on_create)| {
         if *use_default_on_create {
             quote! {
@@ -590,13 +591,13 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         #[derive(Debug, #orm::serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         pub struct #update_name {
-            #(pub #input_names: #input_types,)*
+            #(#update_fields)*
         }
 
         #[derive(Debug, #orm::serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         pub struct #patch_name {
-            #(#[serde(default)] pub #input_names: #orm::PatchField<#input_types>,)*
+            #(#patch_fields)*
         }
 
         impl #orm::ModelWriteSerializer for #serializer {
@@ -1267,6 +1268,47 @@ fn is_offset_date_time(ty: &syn::Type) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "OffsetDateTime")
+}
+
+fn is_option_offset_date_time(ty: &syn::Type) -> bool {
+    let syn::Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    arguments.args.iter().any(|argument| {
+        matches!(argument, syn::GenericArgument::Type(inner) if is_offset_date_time(inner))
+    })
+}
+
+fn datetime_deserialize_attribute(
+    ty: &syn::Type,
+    orm: &proc_macro2::TokenStream,
+    patch: bool,
+) -> proc_macro2::TokenStream {
+    let function = match (
+        patch,
+        is_offset_date_time(ty),
+        is_option_offset_date_time(ty),
+    ) {
+        (false, true, _) => "deserialize_rfc3339",
+        (false, false, true) => "deserialize_optional_rfc3339",
+        (true, true, _) => "deserialize_patch_rfc3339",
+        (true, false, true) => "deserialize_patch_optional_rfc3339",
+        _ => return quote! {},
+    };
+    let path = LitStr::new(
+        &format!("{}::{function}", orm).replace(' ', ""),
+        proc_macro2::Span::call_site(),
+    );
+    quote! { #[serde(deserialize_with = #path)] }
 }
 
 fn is_i64(ty: &syn::Type) -> bool {
