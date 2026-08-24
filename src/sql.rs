@@ -278,6 +278,11 @@ impl<D: SqlDialect> SqlCompiler<D> {
     fn compile_insert(&mut self, query: &InsertAst) {
         self.sql.push_str("INSERT INTO ");
         self.push_identifier(query.table.name);
+        if query.values.is_empty() {
+            self.sql.push_str(" DEFAULT VALUES");
+            self.compile_returning(&query.returning);
+            return;
+        }
         self.sql.push_str(" (");
         for (index, value) in query.values.iter().enumerate() {
             if index != 0 {

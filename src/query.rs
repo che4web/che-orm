@@ -205,9 +205,6 @@ impl QueryAst {
                 )
             }
             Self::Insert(query) => {
-                if query.values.is_empty() {
-                    return Err(QueryBuildError::EmptyInsert);
-                }
                 validate_unique_columns(query.values.iter().map(|value| &value.column))?;
                 validate_columns_table(
                     query.table.name,
@@ -538,9 +535,6 @@ impl<M: Model> InsertQuery<M> {
         self
     }
     pub fn into_ast(self) -> Result<QueryAst, QueryBuildError> {
-        if self.ast.values.is_empty() {
-            return Err(QueryBuildError::EmptyInsert);
-        }
         validate_unique_columns(self.ast.values.iter().map(|value| &value.column))?;
         Ok(QueryAst::Insert(self.ast))
     }

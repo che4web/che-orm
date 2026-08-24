@@ -628,7 +628,7 @@ fn application_registry_preserves_app_and_dependency_order() {
 }
 
 #[test]
-fn schema_and_ast_validation_reject_invalid_metadata() {
+fn schema_validation_rejects_invalid_metadata() {
     let invalid_schema = crate::TableSchema {
         name: "bad-table",
         columns: Vec::new(),
@@ -639,13 +639,6 @@ fn schema_and_ast_validation_reject_invalid_metadata() {
         invalid_schema.validate(),
         Err(crate::SchemaError::InvalidIdentifier(_))
     ));
-
-    let empty_insert = crate::QueryAst::Insert(crate::InsertAst {
-        table: crate::TableRef::new("users"),
-        values: Vec::new(),
-        returning: Vec::new(),
-    });
-    assert_eq!(empty_insert.validate(), Err(QueryBuildError::EmptyInsert));
 }
 
 #[test]
@@ -836,11 +829,26 @@ fn compiles_insert_with_postgres_parameters() {
 }
 
 #[test]
-fn rejects_invalid_mutating_queries() {
+fn compiles_empty_insert_with_defaults() {
+    let query = User::insert().returning_all().into_ast().unwrap();
+
+    let sqlite = SqlCompiler::<SqliteDialect>::compile(&query);
     assert_eq!(
-        User::insert().into_ast().unwrap_err(),
-        QueryBuildError::EmptyInsert
+        sqlite.sql,
+        "INSERT INTO users DEFAULT VALUES RETURNING id, email, name, is_active, created_at, updated_at"
     );
+    assert!(sqlite.params.is_empty());
+
+    let postgres = SqlCompiler::<PostgresDialect>::compile(&query);
+    assert_eq!(
+        postgres.sql,
+        "INSERT INTO users DEFAULT VALUES RETURNING id, email, name, is_active, created_at, updated_at"
+    );
+    assert!(postgres.params.is_empty());
+}
+
+#[test]
+fn rejects_invalid_mutating_queries() {
     assert_eq!(
         User::update().into_ast().unwrap_err(),
         QueryBuildError::MissingFilter
