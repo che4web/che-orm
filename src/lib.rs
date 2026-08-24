@@ -72,6 +72,30 @@ pub use schema::*;
 pub use sql::*;
 pub use types::*;
 
+/// Serializes a timestamp in the RFC 3339 format used by JSON API clients.
+pub struct Rfc3339Timestamp<'a>(pub &'a time::OffsetDateTime);
+
+impl serde::Serialize for Rfc3339Timestamp<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        time::serde::rfc3339::serialize(self.0, serializer)
+    }
+}
+
+/// Serializes an optional timestamp in RFC 3339 when it has a value.
+pub struct OptionalRfc3339Timestamp<'a>(pub &'a Option<time::OffsetDateTime>);
+
+impl serde::Serialize for OptionalRfc3339Timestamp<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        time::serde::rfc3339::option::serialize(self.0, serializer)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
     Create,

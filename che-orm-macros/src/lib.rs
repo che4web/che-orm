@@ -203,11 +203,18 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         let mut read_only = false;
         let mut write_only = false;
         let mut use_default_on_create = false;
+        let serialize_value = if is_offset_date_time(&field_type) {
+            quote! { &#orm::Rfc3339Timestamp(&self.#name) }
+        } else if is_option_offset_date_time(&field_type) {
+            quote! { &#orm::OptionalRfc3339Timestamp(&self.#name) }
+        } else {
+            quote! { &self.#name }
+        };
         serialize_fields.push(quote! {
             #orm::serde::ser::SerializeStruct::serialize_field(
                 &mut state,
                 #json_name,
-                &self.#name,
+                #serialize_value,
             )?;
         });
         let mut nested_relation = None;

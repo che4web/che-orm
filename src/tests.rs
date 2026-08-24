@@ -445,6 +445,30 @@ fn model_serializer_maps_materialized_models_without_database_access() {
 }
 
 #[test]
+fn model_serializer_serializes_timestamps_as_rfc3339() {
+    let timestamp = OffsetDateTime::from_unix_timestamp(0).unwrap();
+    let response = UserResponse::from_model(User {
+        id: 1,
+        email: "alice@example.test".into(),
+        name: "Alice".into(),
+        is_active: true,
+        created_at: timestamp,
+        updated_at: timestamp,
+    });
+    let json = crate::serde_json::to_value(response).unwrap();
+    assert_eq!(json["created_at"], "1970-01-01T00:00:00Z");
+    assert_eq!(json["updated_at"], "1970-01-01T00:00:00Z");
+
+    let optional = ScheduledItemSerializer::from_model(ScheduledItem {
+        id: 1,
+        title: "Scheduled".into(),
+        due_at: Some(timestamp),
+    });
+    let json = crate::serde_json::to_value(optional).unwrap();
+    assert_eq!(json["due_at"], "1970-01-01T00:00:00Z");
+}
+
+#[test]
 fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
     let create: UserWriteSerializerCreateInput = crate::serde_json::from_str(
         r#"{"email":"alice@example.test","name":"Alice","is_active":true}"#,
