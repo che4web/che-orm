@@ -1110,6 +1110,53 @@ async fn sqlite_transaction_rolls_back_after_action_error() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn typed_transaction_rolls_back_typed_writes_after_error() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<User>().await.unwrap();
+
+    let result: Result<(), crate::OrmError> = database
+        .typed_transaction(|transaction| {
+            let user = transaction
+                .create::<User>()
+                .set(User::EMAIL, "transaction@example.test")
+                .set(User::NAME, "Transaction")
+                .set(User::IS_ACTIVE, true)
+                .execute()?;
+            assert_eq!(
+                transaction
+                    .query::<User>()
+                    .filter(User::ID.eq(user.id))
+                    .first()?
+                    .unwrap()
+                    .name,
+                "Transaction"
+            );
+            transaction
+                .update::<User>(user.id)
+                .set(User::NAME, "Updated in transaction")
+                .execute()?;
+            transaction
+                .create::<User>()
+                .set(User::EMAIL, "transaction@example.test")
+                .set(User::NAME, "Duplicate")
+                .set(User::IS_ACTIVE, true)
+                .execute()?;
+            Ok(())
+        })
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        database
+            .fetch_one(User::query().filter(User::EMAIL.eq("transaction@example.test")))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     assert_eq!(Post::USER.reverse().related_name(), "post_set");
     let path = std::env::temp_dir().join(format!(

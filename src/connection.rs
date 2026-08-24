@@ -302,6 +302,44 @@ impl Database {
             .map_err(OrmError::from)
     }
 
+    /// Runs typed ORM operations on one SQLite transaction.
+    ///
+    /// Returning an error rolls back every mutation performed by `action`.
+    pub async fn typed_transaction<T, F>(&self, action: F) -> Result<T, OrmError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Transaction<'_>) -> Result<T, OrmError> + Send + 'static,
+    {
+        let pool = self.pool.clone();
+        pool.get()
+            .await?
+            .interact(move |connection| -> Result<T, OrmError> {
+                configure_connection(connection)?;
+                connection.execute_batch("BEGIN")?;
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    action(&Transaction { connection })
+                })) {
+                    Ok(Ok(value)) => match connection.execute_batch("COMMIT") {
+                        Ok(()) => Ok(value),
+                        Err(error) => {
+                            let _ = connection.execute_batch("ROLLBACK");
+                            Err(error.into())
+                        }
+                    },
+                    Ok(Err(error)) => {
+                        let _ = connection.execute_batch("ROLLBACK");
+                        Err(error)
+                    }
+                    Err(payload) => {
+                        let _ = connection.execute_batch("ROLLBACK");
+                        std::panic::resume_unwind(payload);
+                    }
+                }
+            })
+            .await
+            .map_err(|error| OrmError::Interaction(error.to_string()))?
+    }
+
     async fn execute_compiled(&self, compiled: CompiledQuery) -> Result<ExecuteResult, OrmError> {
         let pool = self.pool.clone();
         pool.get()
@@ -341,6 +379,187 @@ impl Database {
             .await
             .map_err(|error| OrmError::Interaction(error.to_string()))?
             .map_err(OrmError::from)
+    }
+}
+
+/// Typed ORM executor bound to one SQLite transaction.
+pub struct Transaction<'connection> {
+    connection: &'connection rusqlite::Connection,
+}
+
+impl Transaction<'_> {
+    /// Executes a validated ORM query AST.
+    pub fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
+        ast.validate().map_err(OrmError::QueryBuild)?;
+        execute_compiled(self.connection, SqlCompiler::<SqliteDialect>::compile(&ast))
+    }
+
+    /// Inserts a model, omitting its primary key and managed timestamps.
+    pub fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
+        self.execute(QueryAst::Insert(crate::InsertAst {
+            table: crate::TableRef::new(M::table_name()),
+            values: model.insert_values(),
+            returning: Vec::new(),
+        }))
+    }
+
+    /// Fetches all rows matching a typed select query.
+    pub fn fetch_all<M: Model>(&self, query: SelectQuery<M>) -> Result<Vec<M>, OrmError> {
+        let ast = query.into_ast().map_err(OrmError::QueryBuild)?;
+        load_models(
+            self.connection,
+            &SqlCompiler::<SqliteDialect>::compile(&ast),
+        )
+        .map_err(OrmError::from)
+    }
+
+    /// Fetches at most one row matching a typed select query.
+    pub fn fetch_one<M: Model>(&self, query: SelectQuery<M>) -> Result<Option<M>, OrmError> {
+        Ok(self.fetch_all(query.limit(1))?.pop())
+    }
+
+    /// Fetches a model by its generated integer primary key.
+    pub fn get<M: Model>(&self, id: i64) -> Result<Option<M>, OrmError> {
+        self.fetch_one(M::query().filter(M::primary_key().eq(id)))
+    }
+
+    /// Starts a typed insert builder bound to this transaction.
+    pub fn create<M: Model>(&self) -> TransactionCreateBuilder<'_, M> {
+        TransactionCreateBuilder {
+            connection: self.connection,
+            query: M::insert(),
+        }
+    }
+
+    /// Starts a typed update builder scoped to one primary key.
+    pub fn update<M: Model>(&self, id: i64) -> TransactionUpdateBuilder<'_, M> {
+        TransactionUpdateBuilder {
+            connection: self.connection,
+            query: M::update().filter(M::primary_key().eq(id)),
+        }
+    }
+
+    /// Returns the typed select-query facade for this transaction.
+    pub fn query<M: Model>(&self) -> TransactionQuery<'_, M> {
+        TransactionQuery {
+            connection: self.connection,
+            query: M::query(),
+        }
+    }
+
+    fn execute_returning<M: Model>(&self, ast: QueryAst) -> Result<Option<M>, OrmError> {
+        ast.validate().map_err(OrmError::QueryBuild)?;
+        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
+        let mut statement = self.connection.prepare(&compiled.sql)?;
+        let params = sqlite_params(&compiled)?;
+        statement
+            .query_row(rusqlite::params_from_iter(params), M::from_row)
+            .optional()
+            .map_err(OrmError::from)
+    }
+}
+
+/// Typed insert builder bound to a [`Transaction`].
+pub struct TransactionCreateBuilder<'transaction, M> {
+    connection: &'transaction rusqlite::Connection,
+    query: crate::InsertQuery<M>,
+}
+
+impl<M: Model> TransactionCreateBuilder<'_, M> {
+    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
+    where
+        V: QueryValue<T>,
+    {
+        Self {
+            connection: self.connection,
+            query: self.query.set(field, value),
+        }
+    }
+
+    pub fn execute(self) -> Result<M, OrmError> {
+        Transaction {
+            connection: self.connection,
+        }
+        .execute_returning(
+            self.query
+                .returning_all()
+                .into_ast()
+                .map_err(OrmError::QueryBuild)?,
+        )?
+        .ok_or_else(|| OrmError::Interaction("insert did not return a row".into()))
+    }
+}
+
+/// Typed update builder bound to a [`Transaction`].
+pub struct TransactionUpdateBuilder<'transaction, M> {
+    connection: &'transaction rusqlite::Connection,
+    query: crate::UpdateQuery<M>,
+}
+
+impl<M: Model> TransactionUpdateBuilder<'_, M> {
+    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
+    where
+        V: QueryValue<T>,
+    {
+        Self {
+            connection: self.connection,
+            query: self.query.set(field, value),
+        }
+    }
+
+    pub fn execute(self) -> Result<Option<M>, OrmError> {
+        Transaction {
+            connection: self.connection,
+        }
+        .execute_returning(
+            self.query
+                .returning_all()
+                .into_ast()
+                .map_err(OrmError::QueryBuild)?,
+        )
+    }
+}
+
+/// Typed select-query facade bound to a [`Transaction`].
+pub struct TransactionQuery<'transaction, M> {
+    connection: &'transaction rusqlite::Connection,
+    query: SelectQuery<M>,
+}
+
+impl<M: Model> TransactionQuery<'_, M> {
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            connection: self.connection,
+            query: self.query.filter(expr),
+        }
+    }
+
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            connection: self.connection,
+            query: self.query.order_by(order),
+        }
+    }
+
+    pub fn limit(self, limit: u64) -> Self {
+        Self {
+            connection: self.connection,
+            query: self.query.limit(limit),
+        }
+    }
+
+    pub fn all(self) -> Result<Vec<M>, OrmError> {
+        Transaction {
+            connection: self.connection,
+        }
+        .fetch_all(self.query)
+    }
+
+    pub fn first(self) -> Result<Option<M>, OrmError> {
+        Transaction {
+            connection: self.connection,
+        }
+        .fetch_one(self.query)
     }
 }
 
@@ -1198,6 +1417,18 @@ fn load_models_by_ids<M: Model>(
 
 fn configure_connection(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON")
+}
+
+fn execute_compiled(
+    connection: &rusqlite::Connection,
+    compiled: CompiledQuery,
+) -> Result<ExecuteResult, OrmError> {
+    let params = sqlite_params(&compiled)?;
+    let rows_affected = connection.execute(&compiled.sql, rusqlite::params_from_iter(params))?;
+    Ok(ExecuteResult {
+        rows_affected,
+        last_insert_rowid: Some(connection.last_insert_rowid()),
+    })
 }
 
 fn sqlite_params(compiled: &CompiledQuery) -> rusqlite::Result<Vec<Value>> {
