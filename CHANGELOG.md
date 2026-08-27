@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Add typed transaction execution and support inserts with only database defaults.
+- Encode model timestamps as RFC 3339 values in serializers.
+- Add binary column round-trip support.
+
 ## 0.2.0
 
 - Replace the legacy implementation with the typed SQLite ORM rewrite.
