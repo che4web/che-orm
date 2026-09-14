@@ -283,6 +283,11 @@ impl SchemaSet {
         Self::default()
     }
 
+    /// Returns registered tables in schema order.
+    pub fn tables(&self) -> &[TableSchema] {
+        &self.tables
+    }
+
     /// Adds a model schema in dependency order.
     pub fn model<M: crate::Model>(mut self) -> Self {
         self.tables.push(M::schema());
