@@ -275,6 +275,7 @@ fn validate_reference(reference: &str) -> Result<(), SchemaError> {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SchemaSet {
     tables: Vec<TableSchema>,
+    model_names: Vec<&'static str>,
 }
 
 impl SchemaSet {
@@ -288,15 +289,22 @@ impl SchemaSet {
         &self.tables
     }
 
+    /// Returns model names parallel to [`SchemaSet::tables`].
+    pub fn model_names(&self) -> &[&'static str] {
+        &self.model_names
+    }
+
     /// Adds a model schema in dependency order.
     pub fn model<M: crate::Model>(mut self) -> Self {
         self.tables.push(M::schema());
+        self.model_names.push(M::model_name());
         self
     }
 
     /// Merges another application schema after the current tables.
     pub fn merge(mut self, other: Self) -> Self {
         self.tables.extend(other.tables);
+        self.model_names.extend(other.model_names);
         self
     }
 
@@ -331,6 +339,7 @@ pub trait AppConfig {
 pub struct AppRegistry {
     apps: Vec<&'static str>,
     schema: SchemaSet,
+    app_schemas: Vec<(&'static str, SchemaSet)>,
 }
 
 impl AppRegistry {
@@ -342,7 +351,9 @@ impl AppRegistry {
     /// Registers one application and appends its models to the schema.
     pub fn register<A: AppConfig>(mut self) -> Self {
         self.apps.push(A::name());
-        self.schema = self.schema.merge(A::schema());
+        let schema = A::schema();
+        self.schema = self.schema.merge(schema.clone());
+        self.app_schemas.push((A::name(), schema));
         self
     }
 
@@ -354,6 +365,14 @@ impl AppRegistry {
     /// Returns the combined schema.
     pub fn schema(&self) -> &SchemaSet {
         &self.schema
+    }
+
+    /// Returns schemas by owning app, preserving registration order for
+    /// migration-state construction.
+    pub fn app_schemas(&self) -> impl Iterator<Item = (&'static str, &SchemaSet)> {
+        self.app_schemas
+            .iter()
+            .map(|(name, schema)| (*name, schema))
     }
 
     /// Exports all registered models as Atlas-compatible SQL.

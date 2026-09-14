@@ -249,6 +249,14 @@ impl QueryAst {
 
 /// Trait implemented by `#[derive(Model)]` for ORM models.
 pub trait Model: Sized {
+    /// Stable Rust model name used by migration state. It is deliberately
+    /// independent from `table_name()` so table renames keep model identity.
+    fn model_name() -> &'static str {
+        std::any::type_name::<Self>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("Model")
+    }
     fn table_name() -> &'static str;
     fn columns() -> &'static [&'static str];
     /// Returns the model's generated integer primary-key field.

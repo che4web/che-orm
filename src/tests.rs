@@ -1,6 +1,7 @@
 use crate::{
-    AppConfig, AppRegistry, ColumnRef, DatabaseValue, DbEnum, Model, ModelSerializer,
-    ModelWriteSerializer, PostgresDialect, QueryBuildError, QueryValue, SqlCompiler, SqliteDialect,
+    AppConfig, AppRegistry, ColumnRef, DatabaseValue, DbEnum, MigrationOperation, Model,
+    ModelSerializer, ModelWriteSerializer, PostgresDialect, QueryBuildError, QueryValue,
+    SqlCompiler, SqliteDialect,
 };
 use time::OffsetDateTime;
 
@@ -649,6 +650,30 @@ fn application_registry_preserves_app_and_dependency_order() {
 
     let sql = registry.to_sql::<SqliteDialect>();
     assert!(sql.find("CREATE TABLE users").unwrap() < sql.find("CREATE TABLE posts").unwrap());
+
+    let mut state = crate::ProjectState::from_app_schemas(registry.app_schemas()).unwrap();
+    assert_eq!(
+        state
+            .models()
+            .iter()
+            .map(|model| {
+                (
+                    model.key.app.as_str(),
+                    model.key.name.as_str(),
+                    model.table.name.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![("accounts", "User", "users"), ("content", "Post", "posts")]
+    );
+    MigrationOperation::RenameTable {
+        old_name: "users".into(),
+        new_name: "accounts_user".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    assert_eq!(state.models()[0].key.name, "User");
+    assert_eq!(state.models()[0].table.name, "accounts_user");
 }
 
 #[test]
