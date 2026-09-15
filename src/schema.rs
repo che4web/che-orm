@@ -108,6 +108,9 @@ impl ForeignKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Metadata for one table column.
 pub struct ColumnSchema {
+    /// Rust field name used to identify this column in migration state.
+    pub field_name: &'static str,
+    /// Physical column name used in SQL.
     pub name: &'static str,
     pub column_type: ColumnType,
     pub nullable: bool,
@@ -124,6 +127,7 @@ pub struct ColumnSchema {
 impl ColumnSchema {
     pub fn new(name: &'static str, column_type: ColumnType, nullable: bool) -> Self {
         Self {
+            field_name: name,
             name,
             column_type,
             nullable,
@@ -136,6 +140,12 @@ impl ColumnSchema {
             auto_now_add: false,
             auto_now: false,
         }
+    }
+
+    /// Associates a Rust field name with a physical SQL column name.
+    pub fn with_field_name(mut self, field_name: &'static str) -> Self {
+        self.field_name = field_name;
+        self
     }
 }
 

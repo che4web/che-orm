@@ -50,6 +50,11 @@ that define foreign keys to them.
 - Use `#[derive(Debug, Model)]` for application models.
 - Always specify `#[orm(table = "...")]`.
 - Mark generated integer keys with `#[orm(primary_key)]`.
+- Use `#[orm(db_column = "existing_name")]` when a Rust field must use a
+  different name from its physical SQL column. Queries, indexes and generated
+  schema use the physical name while Rust code keeps the field-based constant.
+  Historical migrations retain both names; changing only the Rust name creates
+  no schema operation when `db_column` remains unchanged.
 - Use `#[orm(foreign_key = User, on_delete = "cascade")]` for foreign keys to
   ORM models. This generates `Post::USER` and `Post::USER.reverse()`.
 - Use `#[orm(references = "table(column)")]` only for tables without an ORM

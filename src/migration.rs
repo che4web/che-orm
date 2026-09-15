@@ -16,6 +16,10 @@ pub struct ForeignKeyState {
 /// An owned column definition in a migration state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnState {
+    /// Rust field name. This is distinct from [`Self::name`] when a model
+    /// uses `#[orm(db_column = "...")]`.
+    pub field_name: String,
+    /// Physical SQL column name.
     pub name: String,
     pub column_type: ColumnType,
     pub nullable: bool,
@@ -53,8 +57,7 @@ pub struct ModelState {
 }
 
 /// A deterministic difference between historical and current model state.
-/// Field renames are intentionally represented as remove/add until the model
-/// metadata gains a stable field identity.
+/// Field renames keep their physical SQL column when `db_column` preserves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateChange {
     CreateModel(ModelState),
@@ -355,14 +358,13 @@ impl ProjectState {
                         table: new_table.name.clone(),
                         column: (*column).clone(),
                     }),
-                    Some(old_column) if *old_column != *column => {
-                        changes.push(StateChange::AlterColumn {
+                    Some(old_column) if !old_column.same_database_definition(column) => changes
+                        .push(StateChange::AlterColumn {
                             key: key.clone(),
                             table: new_table.name.clone(),
                             old_column: (*old_column).clone(),
                             new_column: (*column).clone(),
-                        })
-                    }
+                        }),
                     _ => {}
                 }
             }
@@ -449,6 +451,7 @@ impl From<&SchemaSet> for ProjectState {
 impl From<&ColumnSchema> for ColumnState {
     fn from(column: &ColumnSchema) -> Self {
         Self {
+            field_name: column.field_name.into(),
             name: column.name.into(),
             column_type: column.column_type,
             nullable: column.nullable,
@@ -464,6 +467,22 @@ impl From<&ColumnSchema> for ColumnState {
             auto_now_add: column.auto_now_add,
             auto_now: column.auto_now,
         }
+    }
+}
+
+impl ColumnState {
+    fn same_database_definition(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.column_type == other.column_type
+            && self.nullable == other.nullable
+            && self.primary_key == other.primary_key
+            && self.unique == other.unique
+            && self.default == other.default
+            && self.check == other.check
+            && self.choices == other.choices
+            && self.references == other.references
+            && self.auto_now_add == other.auto_now_add
+            && self.auto_now == other.auto_now
     }
 }
 
@@ -508,7 +527,7 @@ pub struct Migration {
     pub id: MigrationId,
     pub dependencies: Vec<MigrationId>,
     pub operations: Vec<MigrationOperation>,
-    /// A legacy user-supplied checksum or a `v1:` checksum calculated by
+    /// A legacy user-supplied checksum or a versioned checksum calculated by
     /// [`Migration::new`]. New migrations should use the constructor.
     pub checksum: String,
 }
@@ -535,9 +554,14 @@ impl Migration {
     /// and operations. The encoding preserves operation order and normalizes
     /// dependency order.
     pub fn calculated_checksum(&self) -> String {
+        let version = if self.has_distinct_field_names() {
+            "v2"
+        } else {
+            "v1"
+        };
         let mut bytes = Vec::new();
         encode_string(&mut bytes, "che-orm-migration");
-        encode_string(&mut bytes, "v1");
+        encode_string(&mut bytes, version);
         encode_migration_id(&mut bytes, &self.id);
         let mut dependencies = self.dependencies.clone();
         dependencies.sort();
@@ -547,13 +571,20 @@ impl Migration {
         }
         encode_usize(&mut bytes, self.operations.len());
         for operation in &self.operations {
-            encode_operation(&mut bytes, operation);
+            encode_operation(&mut bytes, operation, version == "v2");
         }
-        format!("v1:{:016x}", fnv1a64(&bytes))
+        format!("{version}:{:016x}", fnv1a64(&bytes))
     }
 
     fn validates_checksum(&self) -> bool {
-        !self.checksum.starts_with("v1:") || self.checksum == self.calculated_checksum()
+        !matches!(self.checksum.get(..3), Some("v1:") | Some("v2:"))
+            || self.checksum == self.calculated_checksum()
+    }
+
+    fn has_distinct_field_names(&self) -> bool {
+        self.operations
+            .iter()
+            .any(operation_has_distinct_field_names)
     }
 }
 
@@ -640,7 +671,8 @@ fn render_column(column: &ColumnState) -> String {
         None => "None".into(),
     };
     format!(
-        "ColumnState {{ name: {}, column_type: {}, nullable: {}, primary_key: {}, unique: {}, default: {}, check: {}, choices: {}, references: {}, auto_now_add: {}, auto_now: {} }}",
+        "ColumnState {{ field_name: {}, name: {}, column_type: {}, nullable: {}, primary_key: {}, unique: {}, default: {}, check: {}, choices: {}, references: {}, auto_now_add: {}, auto_now: {} }}",
+        render_string(&column.field_name),
         render_string(&column.name),
         render_column_type(column.column_type),
         column.nullable,
@@ -833,6 +865,39 @@ pub enum MigrationOperation {
     },
 }
 
+fn operation_has_distinct_field_names(operation: &MigrationOperation) -> bool {
+    match operation {
+        MigrationOperation::CreateModel { model } => model
+            .table
+            .columns
+            .iter()
+            .any(|column| column.field_name != column.name),
+        MigrationOperation::CreateTable { table } => table
+            .columns
+            .iter()
+            .any(|column| column.field_name != column.name),
+        MigrationOperation::AddColumn { column, .. } => column.field_name != column.name,
+        MigrationOperation::AlterColumn {
+            old_column,
+            new_column,
+            ..
+        } => old_column.field_name != old_column.name || new_column.field_name != new_column.name,
+        MigrationOperation::RunSql {
+            state_operations, ..
+        } => state_operations
+            .iter()
+            .any(operation_has_distinct_field_names),
+        MigrationOperation::DropTable { .. }
+        | MigrationOperation::RemoveColumn { .. }
+        | MigrationOperation::RenameTable { .. }
+        | MigrationOperation::RenameColumn { .. }
+        | MigrationOperation::AddIndex { .. }
+        | MigrationOperation::RemoveIndex { .. }
+        | MigrationOperation::AddUniqueConstraint { .. }
+        | MigrationOperation::RemoveUniqueConstraint { .. } => false,
+    }
+}
+
 fn encode_usize(bytes: &mut Vec<u8>, value: usize) {
     bytes.extend_from_slice(&(value as u64).to_be_bytes());
 }
@@ -861,7 +926,10 @@ fn encode_migration_id(bytes: &mut Vec<u8>, id: &MigrationId) {
     encode_string(bytes, &id.name);
 }
 
-fn encode_column(bytes: &mut Vec<u8>, column: &ColumnState) {
+fn encode_column(bytes: &mut Vec<u8>, column: &ColumnState, include_field_name: bool) {
+    if include_field_name {
+        encode_string(bytes, &column.field_name);
+    }
     encode_string(bytes, &column.name);
     bytes.push(match column.column_type {
         ColumnType::Integer => 0,
@@ -897,11 +965,11 @@ fn encode_column(bytes: &mut Vec<u8>, column: &ColumnState) {
     encode_bool(bytes, column.auto_now);
 }
 
-fn encode_table(bytes: &mut Vec<u8>, table: &TableState) {
+fn encode_table(bytes: &mut Vec<u8>, table: &TableState, include_field_name: bool) {
     encode_string(bytes, &table.name);
     encode_usize(bytes, table.columns.len());
     for column in &table.columns {
-        encode_column(bytes, column);
+        encode_column(bytes, column, include_field_name);
     }
     for constraints in [&table.unique_constraints, &table.indexes] {
         encode_usize(bytes, constraints.len());
@@ -914,17 +982,17 @@ fn encode_table(bytes: &mut Vec<u8>, table: &TableState) {
     }
 }
 
-fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation) {
+fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation, include_field_name: bool) {
     match operation {
         MigrationOperation::CreateModel { model } => {
             bytes.push(12);
             encode_string(bytes, &model.key.app);
             encode_string(bytes, &model.key.name);
-            encode_table(bytes, &model.table);
+            encode_table(bytes, &model.table, include_field_name);
         }
         MigrationOperation::CreateTable { table } => {
             bytes.push(0);
-            encode_table(bytes, table);
+            encode_table(bytes, table, include_field_name);
         }
         MigrationOperation::DropTable { name } => {
             bytes.push(1);
@@ -933,7 +1001,7 @@ fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation) {
         MigrationOperation::AddColumn { table, column } => {
             bytes.push(2);
             encode_string(bytes, table);
-            encode_column(bytes, column);
+            encode_column(bytes, column, include_field_name);
         }
         MigrationOperation::RemoveColumn { table, column } => {
             bytes.push(3);
@@ -965,7 +1033,7 @@ fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation) {
             encode_option_string(bytes, reverse);
             encode_usize(bytes, state_operations.len());
             for operation in state_operations {
-                encode_operation(bytes, operation);
+                encode_operation(bytes, operation, include_field_name);
             }
         }
         MigrationOperation::AlterColumn {
@@ -975,8 +1043,8 @@ fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation) {
         } => {
             bytes.push(7);
             encode_string(bytes, table);
-            encode_column(bytes, old_column);
-            encode_column(bytes, new_column);
+            encode_column(bytes, old_column, include_field_name);
+            encode_column(bytes, new_column, include_field_name);
         }
         MigrationOperation::AddIndex { table, columns } => {
             bytes.push(8);
@@ -2014,6 +2082,7 @@ mod tests {
 
     fn column(name: &str) -> ColumnState {
         ColumnState {
+            field_name: name.into(),
             name: name.into(),
             column_type: ColumnType::Integer,
             nullable: false,
@@ -2045,6 +2114,7 @@ mod tests {
                 operations: vec![MigrationOperation::AddColumn {
                     table: "posts".into(),
                     column: ColumnState {
+                        field_name: "title".into(),
                         name: "title".into(),
                         column_type: ColumnType::Text,
                         nullable: false,
@@ -2394,6 +2464,64 @@ mod tests {
         );
         let legacy = ProjectState::from_schema(&SchemaSet::new().model::<LegacyDiffModel>());
         assert!(legacy.diff(&after).is_err());
+    }
+
+    #[test]
+    fn diff_ignores_rust_field_rename_when_physical_column_is_preserved() {
+        let key = ModelKey {
+            app: "items".into(),
+            name: "Item".into(),
+        };
+        let mut before_column = column("display_title");
+        before_column.field_name = "title".into();
+        let mut after_column = before_column.clone();
+        after_column.field_name = "headline".into();
+        let state = |column| {
+            let mut state = ProjectState::default();
+            MigrationOperation::CreateModel {
+                model: ModelState {
+                    key: key.clone(),
+                    table: TableState {
+                        name: "items".into(),
+                        columns: vec![column],
+                        unique_constraints: vec![],
+                        indexes: vec![],
+                    },
+                },
+            }
+            .state_forwards(&mut state)
+            .unwrap();
+            state
+        };
+        assert!(
+            state(before_column)
+                .diff(&state(after_column))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn distinct_field_names_use_a_v2_checksum() {
+        let mut display_title = column("display_title");
+        display_title.field_name = "title".into();
+        let migration = Migration::new(
+            id("items", "0001_initial"),
+            vec![],
+            vec![MigrationOperation::AddColumn {
+                table: "items".into(),
+                column: display_title,
+            }],
+        );
+        assert!(migration.checksum.starts_with("v2:"));
+        assert!(migration.validates_checksum());
+        let mut changed = migration.clone();
+        let MigrationOperation::AddColumn { column, .. } = &mut changed.operations[0] else {
+            unreachable!();
+        };
+        column.field_name = "headline".into();
+        assert!(!changed.validates_checksum());
+        assert!(render_migration_rust(&migration).contains("field_name: \"title\".into()"));
     }
 
     #[test]

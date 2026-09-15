@@ -45,6 +45,15 @@ struct Post {
     title: String,
 }
 
+#[derive(Debug, Model)]
+#[orm(table = "db_column_items", unique("title"), index("title"))]
+struct DbColumnItem {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(db_column = "display_title")]
+    title: String,
+}
+
 struct AccountsApp;
 
 impl AppConfig for AccountsApp {
@@ -344,6 +353,22 @@ fn derive_model_defines_consistent_metadata() {
     );
     assert_eq!(User::NAME.column(), ColumnRef::new("users", "name"));
     assert_eq!(User::primary_key().column(), ColumnRef::new("users", "id"));
+}
+
+#[test]
+fn db_column_keeps_rust_field_api_and_uses_the_physical_sql_column() {
+    assert_eq!(DbColumnItem::TITLE.column().name, "display_title");
+    assert_eq!(DbColumnItem::columns(), &["id", "display_title"]);
+    let schema = DbColumnItem::schema();
+    assert_eq!(schema.columns[1].field_name, "title");
+    assert_eq!(schema.columns[1].name, "display_title");
+    assert_eq!(schema.unique_constraints, vec![vec!["display_title"]]);
+    assert_eq!(schema.indexes, vec![vec!["display_title"]]);
+    let sql = crate::SchemaSet::new()
+        .model::<DbColumnItem>()
+        .to_sql::<SqliteDialect>();
+    assert!(sql.contains("display_title TEXT NOT NULL"));
+    assert!(!sql.contains(", title TEXT NOT NULL"));
 }
 
 #[test]

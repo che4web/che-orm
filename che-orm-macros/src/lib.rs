@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use syn::{
     Data, DeriveInput, Error, Fields, Ident, LitStr, Path, Token, parse_macro_input,
     spanned::Spanned,
@@ -854,13 +854,20 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut primary_key_constant = None;
     let mut primary_key_field = None;
     let mut generated_constants = HashSet::new();
+    let mut field_columns = HashMap::new();
 
     for (index, field) in fields.into_iter().enumerate() {
         let field_name = field.ident.expect("named fields always have identifiers");
-        let column = field_name.to_string();
-        let constant = Ident::new(&column.to_uppercase(), field_name.span());
+        let field_column = field_name.to_string();
         let field_type = field.ty;
         let field_attributes = parse_field_attributes(&field.attrs)?;
+        let column = field_attributes
+            .db_column
+            .as_ref()
+            .map(LitStr::value)
+            .unwrap_or_else(|| field_column.clone());
+        let constant = Ident::new(&field_column.to_uppercase(), field_name.span());
+        field_columns.insert(field_column.clone(), column.clone());
 
         if !generated_constants.insert(constant.to_string()) {
             return Err(Error::new_spanned(
@@ -966,17 +973,20 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             }
         });
         if let Some(target) = &field_attributes.foreign_key {
-            let relation_name = column.strip_suffix("_id").unwrap_or(&column).to_uppercase();
-            let alias = column
+            let relation_name = field_column
                 .strip_suffix("_id")
-                .unwrap_or(&column)
+                .unwrap_or(&field_column)
+                .to_uppercase();
+            let alias = field_column
+                .strip_suffix("_id")
+                .unwrap_or(&field_column)
                 .to_ascii_lowercase();
             let relation_constant = Ident::new(&relation_name, field_name.span());
             let marker_name = Ident::new(
                 &format!(
                     "{}{}Relation",
                     model,
-                    pascal_case(column.strip_suffix("_id").unwrap_or(&column))
+                    pascal_case(field_column.strip_suffix("_id").unwrap_or(&field_column))
                 ),
                 field_name.span(),
             );
@@ -1014,7 +1024,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 #column,
                 <#field_type as #orm::ColumnTypeOf>::column_type(),
                 <#field_type as #orm::ColumnTypeOf>::nullable(),
-            );
+            ).with_field_name(stringify!(#field_name));
             column.primary_key = #primary_key;
             column.unique = #unique;
             column.auto_now_add = #auto_now_add;
@@ -1063,9 +1073,23 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let primary_key_field = primary_key_field.expect("primary key constant has a field");
 
     let unique_constraints = model_attributes.unique_constraints.iter().map(|columns| {
+        let columns = columns.iter().map(|column| {
+            let name = field_columns
+                .get(&column.value())
+                .cloned()
+                .unwrap_or_else(|| column.value());
+            LitStr::new(&name, column.span())
+        });
         quote! { vec![#(#columns),*] }
     });
     let indexes = model_attributes.indexes.iter().map(|columns| {
+        let columns = columns.iter().map(|column| {
+            let name = field_columns
+                .get(&column.value())
+                .cloned()
+                .unwrap_or_else(|| column.value());
+            LitStr::new(&name, column.span())
+        });
         quote! { vec![#(#columns),*] }
     });
 
@@ -1188,6 +1212,7 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
 }
 
 struct FieldAttributes {
+    db_column: Option<LitStr>,
     primary_key: bool,
     unique: bool,
     default: Option<LitStr>,
@@ -1201,6 +1226,7 @@ struct FieldAttributes {
 
 fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAttributes> {
     let mut result = FieldAttributes {
+        db_column: None,
         primary_key: false,
         unique: false,
         default: None,
@@ -1217,7 +1243,9 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
             continue;
         }
         attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("primary_key") {
+            if meta.path.is_ident("db_column") {
+                result.db_column = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("primary_key") {
                 result.primary_key = true;
             } else if meta.path.is_ident("unique") {
                 result.unique = true;
