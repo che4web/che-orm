@@ -13,6 +13,15 @@ pub struct ForeignKeyState {
     pub on_delete: Option<String>,
 }
 
+impl ForeignKeyState {
+    /// Returns the structured target stored in the migration snapshot.
+    /// A malformed legacy target returns `None` and is rejected by state
+    /// validation before a migration can be planned.
+    pub fn target_parts(&self) -> Option<(&str, &str)> {
+        parse_reference(&self.target)
+    }
+}
+
 /// An owned column definition in a migration state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnState {
@@ -2164,6 +2173,28 @@ mod tests {
     struct LegacyDiffModel {
         #[orm(primary_key)]
         id: i64,
+    }
+
+    #[derive(Debug, crate::Model)]
+    #[orm(table = "ordered_diff")]
+    struct OrderedDiffModel {
+        #[orm(primary_key)]
+        id: i64,
+    }
+
+    #[test]
+    fn app_schema_diff_ignores_registration_order_and_foreign_keys_expose_target_parts() {
+        let legacy = SchemaSet::new().model::<LegacyDiffModel>();
+        let ordered = SchemaSet::new().model::<OrderedDiffModel>();
+        let first = ProjectState::from_app_schemas([("z", &legacy), ("a", &ordered)]).unwrap();
+        let second = ProjectState::from_app_schemas([("a", &ordered), ("z", &legacy)]).unwrap();
+        assert!(first.diff(&second).unwrap().is_empty());
+        assert!(second.diff(&first).unwrap().is_empty());
+        let reference = ForeignKeyState {
+            target: "ordered_diff(id)".into(),
+            on_delete: Some("cascade".into()),
+        };
+        assert_eq!(reference.target_parts(), Some(("ordered_diff", "id")));
     }
 
     #[test]
