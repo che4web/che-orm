@@ -51,6 +51,26 @@ pub struct TableState {
     pub indexes: Vec<Vec<String>>,
 }
 
+/// A named SQLite object which belongs to the migration state but is not an
+/// ORM model. Triggers and views are kept structurally so a fresh database can
+/// be recreated without embedding a whole-schema SQL baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SchemaObjectKind {
+    Table,
+    Trigger,
+    View,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaObjectState {
+    /// Owning application, used to generate per-app migrations.
+    pub app: String,
+    pub kind: SchemaObjectKind,
+    pub name: String,
+    /// Complete reviewed SQLite CREATE statement.
+    pub sql: String,
+}
+
 /// Stable identity of a model independently from its SQL table name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModelKey {
@@ -112,6 +132,8 @@ pub enum StateChange {
         table: String,
         columns: Vec<String>,
     },
+    CreateSchemaObject(SchemaObjectState),
+    DeleteSchemaObject(SchemaObjectState),
 }
 
 impl StateChange {
@@ -127,6 +149,7 @@ impl StateChange {
             | Self::RemoveIndex { key, .. }
             | Self::AddUniqueConstraint { key, .. }
             | Self::RemoveUniqueConstraint { key, .. } => &key.app,
+            Self::CreateSchemaObject(object) | Self::DeleteSchemaObject(object) => &object.app,
         }
     }
 
@@ -171,6 +194,11 @@ impl StateChange {
             Self::RemoveUniqueConstraint { table, columns, .. } => {
                 MigrationOperation::RemoveUniqueConstraint { table, columns }
             }
+            Self::CreateSchemaObject(object) => MigrationOperation::CreateSchemaObject { object },
+            Self::DeleteSchemaObject(object) => MigrationOperation::DropSchemaObject {
+                kind: object.kind,
+                name: object.name,
+            },
         }
     }
 }
@@ -191,6 +219,7 @@ pub fn operations_from_changes(
 pub struct ProjectState {
     tables: Vec<TableState>,
     model_keys: BTreeMap<String, ModelKey>,
+    objects: Vec<SchemaObjectState>,
 }
 
 impl ProjectState {
@@ -199,6 +228,7 @@ impl ProjectState {
         Self {
             tables: schema.tables().iter().map(TableState::from).collect(),
             model_keys: BTreeMap::new(),
+            objects: Vec::new(),
         }
     }
 
@@ -220,7 +250,11 @@ impl ProjectState {
                 )
             })
             .collect();
-        Self { tables, model_keys }
+        Self {
+            tables,
+            model_keys,
+            objects: Vec::new(),
+        }
     }
 
     /// Combines schemas while retaining each application's model identity.
@@ -258,6 +292,16 @@ impl ProjectState {
         &self.tables
     }
 
+    /// Returns named non-model SQLite objects in migration order.
+    pub fn objects(&self) -> &[SchemaObjectState] {
+        &self.objects
+    }
+
+    /// Adds an application-owned SQLite object to this state.
+    pub fn add_schema_object(&mut self, object: SchemaObjectState) -> Result<(), MigrationError> {
+        MigrationOperation::CreateSchemaObject { object }.state_forwards(self)
+    }
+
     /// Checks structural invariants without consulting a live database.
     pub fn validate(&self) -> Result<(), MigrationError> {
         let mut names = BTreeSet::new();
@@ -284,6 +328,24 @@ impl ProjectState {
             }
             for constraint in table.indexes.iter().chain(&table.unique_constraints) {
                 validate_constraint_columns(table, constraint)?;
+            }
+        }
+        let mut objects = BTreeSet::new();
+        for object in &self.objects {
+            validate_schema_object(object)?;
+            if object.kind == SchemaObjectKind::Table
+                && self.tables.iter().any(|table| table.name == object.name)
+            {
+                return Err(MigrationError::InvalidState(format!(
+                    "schema table {} conflicts with a model table",
+                    object.name
+                )));
+            }
+            if !objects.insert((object.kind, &object.name)) {
+                return Err(MigrationError::InvalidState(format!(
+                    "duplicate {:?} {}",
+                    object.kind, object.name
+                )));
             }
         }
         Ok(())
@@ -321,21 +383,21 @@ impl ProjectState {
             .into_iter()
             .map(|model| (model.key.clone(), model))
             .collect();
-        let mut changes = Vec::new();
+        let mut model_changes = Vec::new();
         for (key, model) in &current {
             if !wanted.contains_key(key) {
-                changes.push(StateChange::DeleteModel(model.clone()));
+                model_changes.push(StateChange::DeleteModel(model.clone()));
             }
         }
         for (key, model) in &wanted {
             let Some(old) = current.get(key) else {
-                changes.push(StateChange::CreateModel(model.clone()));
+                model_changes.push(StateChange::CreateModel(model.clone()));
                 continue;
             };
             let old_table = &old.table;
             let new_table = &model.table;
             if old_table.name != new_table.name {
-                changes.push(StateChange::RenameTable {
+                model_changes.push(StateChange::RenameTable {
                     key: key.clone(),
                     old_name: old_table.name.clone(),
                     new_name: new_table.name.clone(),
@@ -353,7 +415,7 @@ impl ProjectState {
                 .collect();
             for (name, column) in &old_columns {
                 if !new_columns.contains_key(name) {
-                    changes.push(StateChange::RemoveColumn {
+                    model_changes.push(StateChange::RemoveColumn {
                         key: key.clone(),
                         table: new_table.name.clone(),
                         column: (*column).clone(),
@@ -362,23 +424,24 @@ impl ProjectState {
             }
             for (name, column) in &new_columns {
                 match old_columns.get(name) {
-                    None => changes.push(StateChange::AddColumn {
+                    None => model_changes.push(StateChange::AddColumn {
                         key: key.clone(),
                         table: new_table.name.clone(),
                         column: (*column).clone(),
                     }),
-                    Some(old_column) if !old_column.same_database_definition(column) => changes
-                        .push(StateChange::AlterColumn {
+                    Some(old_column) if !old_column.same_database_definition(column) => {
+                        model_changes.push(StateChange::AlterColumn {
                             key: key.clone(),
                             table: new_table.name.clone(),
                             old_column: (*old_column).clone(),
                             new_column: (*column).clone(),
-                        }),
+                        })
+                    }
                     _ => {}
                 }
             }
             diff_constraints(
-                &mut changes,
+                &mut model_changes,
                 key,
                 &new_table.name,
                 &old_table.indexes,
@@ -386,7 +449,7 @@ impl ProjectState {
                 true,
             );
             diff_constraints(
-                &mut changes,
+                &mut model_changes,
                 key,
                 &new_table.name,
                 &old_table.unique_constraints,
@@ -394,6 +457,48 @@ impl ProjectState {
                 false,
             );
         }
+        let current_objects: BTreeMap<_, _> = self
+            .objects
+            .iter()
+            .map(|object| ((object.kind, object.name.clone()), object))
+            .collect();
+        let wanted_objects: BTreeMap<_, _> = desired
+            .objects
+            .iter()
+            .map(|object| ((object.kind, object.name.clone()), object))
+            .collect();
+        let changed_tables = changed_tables(&model_changes);
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for (key, object) in &current_objects {
+            let changed = schema_object_depends_on(object, &changed_tables);
+            match wanted_objects.get(key) {
+                None => before.push(StateChange::DeleteSchemaObject((*object).clone())),
+                Some(_) if changed => {
+                    before.push(StateChange::DeleteSchemaObject((*object).clone()))
+                }
+                Some(wanted) if *wanted != *object => {
+                    before.push(StateChange::DeleteSchemaObject((*object).clone()))
+                }
+                _ => {}
+            }
+        }
+        for (key, object) in &wanted_objects {
+            let changed = schema_object_depends_on(object, &changed_tables);
+            match current_objects.get(key) {
+                None => after.push(StateChange::CreateSchemaObject((*object).clone())),
+                Some(_) if changed => {
+                    after.push(StateChange::CreateSchemaObject((*object).clone()))
+                }
+                Some(current) if *current != *object => {
+                    after.push(StateChange::CreateSchemaObject((*object).clone()))
+                }
+                _ => {}
+            }
+        }
+        let mut changes = before;
+        changes.extend(model_changes);
+        changes.extend(after);
         Ok(changes)
     }
 
@@ -405,6 +510,93 @@ impl ProjectState {
         }
         self.validate()
     }
+}
+
+fn changed_tables(changes: &[StateChange]) -> BTreeSet<String> {
+    changes
+        .iter()
+        .flat_map(|change| match change {
+            StateChange::CreateModel(model) | StateChange::DeleteModel(model) => {
+                vec![model.table.name.clone()]
+            }
+            StateChange::RenameTable {
+                old_name, new_name, ..
+            } => vec![old_name.clone(), new_name.clone()],
+            StateChange::AddColumn { table, .. }
+            | StateChange::RemoveColumn { table, .. }
+            | StateChange::AlterColumn { table, .. }
+            | StateChange::AddIndex { table, .. }
+            | StateChange::RemoveIndex { table, .. }
+            | StateChange::AddUniqueConstraint { table, .. }
+            | StateChange::RemoveUniqueConstraint { table, .. } => vec![table.clone()],
+            StateChange::CreateSchemaObject(_) | StateChange::DeleteSchemaObject(_) => vec![],
+        })
+        .collect()
+}
+
+fn validate_schema_object(object: &SchemaObjectState) -> Result<(), MigrationError> {
+    if object.app.trim().is_empty() || object.name.trim().is_empty() || object.sql.trim().is_empty()
+    {
+        return Err(MigrationError::InvalidState(
+            "schema object app, name, and SQL must not be empty".into(),
+        ));
+    }
+    let (kind, name) = parse_schema_object_header(&object.sql).ok_or_else(|| {
+        MigrationError::InvalidState(format!(
+            "schema object {:?} {} SQL must begin with CREATE {:?} {}",
+            object.kind, object.name, object.kind, object.name
+        ))
+    })?;
+    if kind != object.kind || name != object.name {
+        return Err(MigrationError::InvalidState(format!(
+            "schema object SQL creates {:?} {name}, expected {:?} {}",
+            kind, object.kind, object.name
+        )));
+    }
+    Ok(())
+}
+
+fn schema_object_depends_on(object: &SchemaObjectState, tables: &BTreeSet<String>) -> bool {
+    tables.iter().any(|table| {
+        object
+            .sql
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|identifier| identifier == table)
+    })
+}
+
+fn parse_schema_object_header(sql: &str) -> Option<(SchemaObjectKind, String)> {
+    let mut words = sql.trim_start().split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("CREATE") {
+        return None;
+    }
+    let mut word = words.next()?;
+    if word.eq_ignore_ascii_case("TEMP") || word.eq_ignore_ascii_case("TEMPORARY") {
+        word = words.next()?;
+    }
+    let kind = if word.eq_ignore_ascii_case("TABLE") {
+        SchemaObjectKind::Table
+    } else if word.eq_ignore_ascii_case("TRIGGER") {
+        SchemaObjectKind::Trigger
+    } else if word.eq_ignore_ascii_case("VIEW") {
+        SchemaObjectKind::View
+    } else {
+        return None;
+    };
+    let mut name = words.next()?;
+    if name.eq_ignore_ascii_case("IF") {
+        if !words.next()?.eq_ignore_ascii_case("NOT")
+            || !words.next()?.eq_ignore_ascii_case("EXISTS")
+        {
+            return None;
+        }
+        name = words.next()?;
+    }
+    Some((
+        kind,
+        name.trim_matches(|character| matches!(character, '"' | '`' | '[' | ']'))
+            .to_owned(),
+    ))
 }
 
 fn diff_constraints(
@@ -602,7 +794,7 @@ impl Migration {
 /// will be compiled and registered.
 pub fn render_migration_rust(migration: &Migration) -> String {
     let mut source = String::from(
-        "use che_orm::{ColumnState, ColumnType, ForeignKeyState, Migration, MigrationId, MigrationOperation, ModelKey, ModelState, TableState};\n\n",
+        "#[allow(unused_imports)]\nuse che_orm::{ColumnState, ColumnType, ForeignKeyState, Migration, MigrationId, MigrationOperation, ModelKey, ModelState, SchemaObjectKind, SchemaObjectState, TableState};\n\n",
     );
     source.push_str("pub fn migration() -> Migration {\n    Migration::new(\n");
     source.push_str(&format!(
@@ -731,6 +923,24 @@ fn render_model(model: &ModelState) -> String {
     )
 }
 
+fn render_schema_object_kind(kind: SchemaObjectKind) -> &'static str {
+    match kind {
+        SchemaObjectKind::Table => "SchemaObjectKind::Table",
+        SchemaObjectKind::Trigger => "SchemaObjectKind::Trigger",
+        SchemaObjectKind::View => "SchemaObjectKind::View",
+    }
+}
+
+fn render_schema_object(object: &SchemaObjectState) -> String {
+    format!(
+        "SchemaObjectState {{ app: {}, kind: {}, name: {}, sql: {} }}",
+        render_string(&object.app),
+        render_schema_object_kind(object.kind),
+        render_string(&object.name),
+        render_string(&object.sql),
+    )
+}
+
 fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
     match operation {
         MigrationOperation::CreateModel { model } => format!(
@@ -810,6 +1020,15 @@ fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
             render_string(column),
             render_string(value)
         ),
+        MigrationOperation::CreateSchemaObject { object } => format!(
+            "MigrationOperation::CreateSchemaObject {{ object: {} }}",
+            render_schema_object(object)
+        ),
+        MigrationOperation::DropSchemaObject { kind, name } => format!(
+            "MigrationOperation::DropSchemaObject {{ kind: {}, name: {} }}",
+            render_schema_object_kind(*kind),
+            render_string(name)
+        ),
         MigrationOperation::RunSql {
             forward,
             reverse,
@@ -885,6 +1104,13 @@ pub enum MigrationOperation {
         column: String,
         value: String,
     },
+    CreateSchemaObject {
+        object: SchemaObjectState,
+    },
+    DropSchemaObject {
+        kind: SchemaObjectKind,
+        name: String,
+    },
     RunSql {
         forward: String,
         reverse: Option<String>,
@@ -922,7 +1148,9 @@ fn operation_has_distinct_field_names(operation: &MigrationOperation) -> bool {
         | MigrationOperation::RemoveIndex { .. }
         | MigrationOperation::AddUniqueConstraint { .. }
         | MigrationOperation::RemoveUniqueConstraint { .. }
-        | MigrationOperation::BackfillColumn { .. } => false,
+        | MigrationOperation::BackfillColumn { .. }
+        | MigrationOperation::CreateSchemaObject { .. }
+        | MigrationOperation::DropSchemaObject { .. } => false,
     }
 }
 
@@ -1103,6 +1331,26 @@ fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation, include
             encode_string(bytes, table);
             encode_string(bytes, column);
             encode_string(bytes, value);
+        }
+        MigrationOperation::CreateSchemaObject { object } => {
+            bytes.push(14);
+            bytes.push(match object.kind {
+                SchemaObjectKind::Trigger => 0,
+                SchemaObjectKind::View => 1,
+                SchemaObjectKind::Table => 2,
+            });
+            encode_string(bytes, &object.app);
+            encode_string(bytes, &object.name);
+            encode_string(bytes, &object.sql);
+        }
+        MigrationOperation::DropSchemaObject { kind, name } => {
+            bytes.push(15);
+            bytes.push(match kind {
+                SchemaObjectKind::Trigger => 0,
+                SchemaObjectKind::View => 1,
+                SchemaObjectKind::Table => 2,
+            });
+            encode_string(bytes, name);
         }
     }
 }
@@ -1331,6 +1579,30 @@ impl MigrationOperation {
                 }
                 let table = table_mut(state, table)?;
                 column_index(table, column)?;
+            }
+            Self::CreateSchemaObject { object } => {
+                validate_schema_object(object)?;
+                if state
+                    .objects
+                    .iter()
+                    .any(|current| current.kind == object.kind && current.name == object.name)
+                {
+                    return Err(MigrationError::InvalidState(format!(
+                        "duplicate {:?} {}",
+                        object.kind, object.name
+                    )));
+                }
+                state.objects.push(object.clone());
+            }
+            Self::DropSchemaObject { kind, name } => {
+                let index = state
+                    .objects
+                    .iter()
+                    .position(|object| object.kind == *kind && object.name == *name)
+                    .ok_or_else(|| {
+                        MigrationError::InvalidState(format!("missing {kind:?} {name}"))
+                    })?;
+                state.objects.remove(index);
             }
             Self::RunSql {
                 state_operations, ..
@@ -1931,6 +2203,16 @@ impl SqliteSchemaEditor {
                 value,
                 quote_identifier(column),
             )],
+            MigrationOperation::CreateSchemaObject { object } => vec![object.sql.clone()],
+            MigrationOperation::DropSchemaObject { kind, name } => vec![format!(
+                "DROP {} {}",
+                match kind {
+                    SchemaObjectKind::Table => "TABLE",
+                    SchemaObjectKind::Trigger => "TRIGGER",
+                    SchemaObjectKind::View => "VIEW",
+                },
+                quote_identifier(name)
+            )],
             _ if Self::rebuild_table_name(operation).is_some() => rebuild_table_statements(
                 Self::rebuild_table_name(operation).expect("operation requires a rebuild"),
                 before,
@@ -2198,6 +2480,116 @@ mod tests {
     }
 
     #[test]
+    fn named_schema_objects_are_replayable_and_affect_checksums() {
+        let trigger = SchemaObjectState {
+            app: "items".into(),
+            kind: SchemaObjectKind::Trigger,
+            name: "items_assign_key".into(),
+            sql: "CREATE TRIGGER items_assign_key AFTER INSERT ON items BEGIN SELECT 1; END".into(),
+        };
+        let migration = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0001_trigger".into(),
+            },
+            vec![],
+            vec![MigrationOperation::CreateSchemaObject {
+                object: trigger.clone(),
+            }],
+        );
+        let graph = MigrationGraph::new(vec![migration.clone()]).unwrap();
+        assert_eq!(
+            graph.replay(Default::default()).unwrap().objects(),
+            &[trigger]
+        );
+        assert!(render_migration_rust(&migration).contains("CreateSchemaObject"));
+        let mut changed = migration;
+        let MigrationOperation::CreateSchemaObject { object } = &mut changed.operations[0] else {
+            unreachable!();
+        };
+        object.sql.push_str(" -- changed");
+        assert_ne!(changed.calculated_checksum(), changed.checksum);
+    }
+
+    #[test]
+    fn schema_object_diff_recreates_changed_trigger_in_its_app() {
+        let old = SchemaObjectState {
+            app: "items".into(),
+            kind: SchemaObjectKind::Trigger,
+            name: "items_guard".into(),
+            sql: "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 1; END".into(),
+        };
+        let mut current = ProjectState::default();
+        current.add_schema_object(old.clone()).unwrap();
+        let mut desired = ProjectState::default();
+        let mut changed = old.clone();
+        changed.sql =
+            "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 2; END".into();
+        desired.add_schema_object(changed.clone()).unwrap();
+        assert_eq!(
+            current.diff(&desired).unwrap(),
+            vec![
+                StateChange::DeleteSchemaObject(old),
+                StateChange::CreateSchemaObject(changed),
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_objects_are_removed_and_restored_around_a_table_change() {
+        let table = TableState {
+            name: "items".into(),
+            columns: vec![column("id")],
+            unique_constraints: vec![],
+            indexes: vec![],
+        };
+        let key = ModelKey {
+            app: "items".into(),
+            name: "Item".into(),
+        };
+        let trigger = SchemaObjectState {
+            app: "items".into(),
+            kind: SchemaObjectKind::Trigger,
+            name: "items_guard".into(),
+            sql: "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 1; END".into(),
+        };
+        let before = ProjectState {
+            tables: vec![table.clone()],
+            model_keys: BTreeMap::from([("items".into(), key.clone())]),
+            objects: vec![trigger.clone()],
+        };
+        let mut changed_table = table;
+        changed_table.columns.push(column("title"));
+        let after = ProjectState {
+            tables: vec![changed_table],
+            model_keys: BTreeMap::from([("items".into(), key)]),
+            objects: vec![trigger.clone()],
+        };
+        let changes = before.diff(&after).unwrap();
+        assert!(
+            matches!(changes[0], StateChange::DeleteSchemaObject(ref object) if object == &trigger)
+        );
+        assert!(matches!(changes[1], StateChange::AddColumn { ref table, .. } if table == "items"));
+        assert!(
+            matches!(changes[2], StateChange::CreateSchemaObject(ref object) if object == &trigger)
+        );
+    }
+
+    #[test]
+    fn schema_object_sql_must_match_its_declared_kind_and_name() {
+        let error = ProjectState::default()
+            .add_schema_object(SchemaObjectState {
+                app: "items".into(),
+                kind: SchemaObjectKind::View,
+                name: "items_view".into(),
+                sql: "CREATE TRIGGER items_view BEFORE INSERT ON items BEGIN SELECT 1; END".into(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected View items_view"));
+    }
+
+    #[test]
     fn graph_orders_and_replays_migrations_deterministically() {
         let graph = MigrationGraph::new(vec![
             Migration {
@@ -2317,6 +2709,7 @@ mod tests {
                 },
             ],
             model_keys: BTreeMap::new(),
+            objects: vec![],
         };
 
         MigrationOperation::RenameTable {
@@ -2375,6 +2768,7 @@ mod tests {
                 },
             ],
             model_keys: BTreeMap::new(),
+            objects: vec![],
         };
 
         assert!(matches!(

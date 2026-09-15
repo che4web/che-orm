@@ -372,7 +372,7 @@ fn assert_rebuild_objects_match_history(
     let dependents = sqlite_opaque_dependents(connection, table)?;
     if !dependents.is_empty() {
         return Err(format!(
-            "cannot rebuild table {table}; SQLite object(s) {} may depend on it. Use an explicit RunSql migration that recreates them and declares matching state operations",
+            "cannot rebuild table {table}; SQLite object(s) {} may depend on it. Drop and recreate the matching declared schema objects around the table operation",
             dependents.join(", ")
         )
         .into());
@@ -472,7 +472,10 @@ pub fn pending_operation_migrations<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ColumnState, ColumnType, ForeignKeyState, MigrationId, TableState};
+    use crate::{
+        ColumnState, ColumnType, ForeignKeyState, MigrationId, SchemaObjectKind, SchemaObjectState,
+        TableState,
+    };
 
     fn column(name: &str) -> ColumnState {
         ColumnState {
@@ -504,6 +507,141 @@ mod tests {
         .state_forwards(&mut state)
         .unwrap();
         state
+    }
+
+    #[test]
+    fn declared_trigger_can_be_dropped_rebuilt_and_restored_with_its_table() {
+        let trigger = SchemaObjectState {
+            app: "items".into(),
+            kind: SchemaObjectKind::Trigger,
+            name: "items_guard".into(),
+            sql: "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 1; END".into(),
+        };
+        let initial = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0001_initial".into(),
+            },
+            vec![],
+            vec![
+                MigrationOperation::CreateTable {
+                    table: TableState {
+                        name: "items".into(),
+                        columns: vec![column("id")],
+                        unique_constraints: vec![],
+                        indexes: vec![],
+                    },
+                },
+                MigrationOperation::CreateSchemaObject {
+                    object: trigger.clone(),
+                },
+            ],
+        );
+        let mut title = column("title");
+        title.nullable = true;
+        let rebuild = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0002_title".into(),
+            },
+            vec![initial.id.clone()],
+            vec![
+                MigrationOperation::DropSchemaObject {
+                    kind: SchemaObjectKind::Trigger,
+                    name: trigger.name.clone(),
+                },
+                MigrationOperation::AddColumn {
+                    table: "items".into(),
+                    column: title,
+                },
+                MigrationOperation::CreateSchemaObject { object: trigger },
+            ],
+        );
+        let mut connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![initial.clone()]).unwrap(),
+        )
+        .unwrap();
+        connection
+            .execute("INSERT INTO items(id) VALUES ('one')", [])
+            .unwrap();
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![initial, rebuild]).unwrap(),
+        )
+        .unwrap();
+        let row: (String, Option<String>) = connection
+            .query_row("SELECT id, title FROM items", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, ("one".into(), None));
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'items_guard')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+    }
+
+    #[test]
+    fn schema_object_operations_create_and_drop_sqlite_objects() {
+        let create = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0001_create_view".into(),
+            },
+            vec![],
+            vec![MigrationOperation::CreateSchemaObject {
+                object: SchemaObjectState {
+                    app: "items".into(),
+                    kind: SchemaObjectKind::View,
+                    name: "item_view".into(),
+                    sql: "CREATE VIEW item_view AS SELECT 1 AS id".into(),
+                },
+            }],
+        );
+        let drop = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0002_drop_view".into(),
+            },
+            vec![create.id.clone()],
+            vec![MigrationOperation::DropSchemaObject {
+                kind: SchemaObjectKind::View,
+                name: "item_view".into(),
+            }],
+        );
+        let mut connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        apply_operation_migrations_to_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![create.clone(), drop.clone()]).unwrap(),
+            Some(create.id.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT id FROM item_view", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![create, drop]).unwrap(),
+        )
+        .unwrap();
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'view' AND name = 'item_view'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(exists.is_none());
     }
 
     #[test]
