@@ -4,6 +4,7 @@ use crate::{
     rusqlite::OptionalExtension,
 };
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub fn apply_operation_migrations_on_connection(
@@ -30,9 +31,9 @@ pub fn apply_operation_migrations_to_on_connection(
         let foreign_keys: bool =
             connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
         connection.pragma_update(None, "foreign_keys", false)?;
-        if let Err(error) = connection.execute_batch("BEGIN IMMEDIATE") {
+        if let Err(error) = begin_immediate(connection, Duration::from_secs(5)) {
             connection.pragma_update(None, "foreign_keys", foreign_keys)?;
-            return Err(error.into());
+            return Err(error);
         }
         let result = (|| {
             // Read history only after acquiring the write lock. Recompute this
@@ -81,6 +82,30 @@ pub fn apply_operation_migrations_to_on_connection(
     }
 }
 
+fn begin_immediate(
+    connection: &mut crate::rusqlite::Connection,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    connection.busy_timeout(timeout)?;
+    match connection.execute_batch("BEGIN IMMEDIATE") {
+        Ok(()) => Ok(()),
+        Err(crate::rusqlite::Error::SqliteFailure(error, _))
+            if matches!(
+                error.code,
+                crate::rusqlite::ErrorCode::DatabaseBusy
+                    | crate::rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            Err(format!(
+                "database is locked; could not acquire the migration write lock within {} ms",
+                timeout.as_millis()
+            )
+            .into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn apply_single_operation_migration(
     connection: &mut crate::rusqlite::Connection,
     migration: &Migration,
@@ -104,6 +129,7 @@ fn apply_single_operation_migration(
             }
             _ => {
                 if let Some(table) = SqliteSchemaEditor::rebuild_table_name(operation) {
+                    ensure_rebuild_can_preserve_rows(connection, operation)?;
                     assert_rebuild_objects_match_history(connection, table, migration_state)?;
                 }
                 let plan = SqliteSchemaEditor::plan(operation, migration_state)?;
@@ -127,11 +153,128 @@ fn apply_single_operation_migration(
     Ok(())
 }
 
+fn ensure_rebuild_can_preserve_rows(
+    connection: &crate::rusqlite::Connection,
+    operation: &MigrationOperation,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match operation {
+        MigrationOperation::AddColumn { table, column }
+            if !column.nullable
+                && !column.primary_key
+                && column.default.is_none()
+                && !column.auto_now_add
+                && !column.auto_now =>
+        {
+            let table = quote_identifier(table);
+            let has_rows: bool = connection.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"),
+                [],
+                |row| row.get(0),
+            )?;
+            if has_rows {
+                return Err(format!(
+                    "cannot add required column {} without a value for existing rows; add a default or use an explicit nullable → backfill → non-null migration",
+                    column.name
+                )
+                .into());
+            }
+        }
+        MigrationOperation::AlterColumn {
+            table,
+            old_column,
+            new_column,
+        } if old_column.nullable && !new_column.nullable => {
+            let has_nulls: bool = connection.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE {} IS NULL LIMIT 1)",
+                    quote_identifier(table),
+                    quote_identifier(&new_column.name)
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if has_nulls {
+                return Err(format!(
+                    "cannot make {}.{} non-null while existing rows contain NULL; backfill values before this migration",
+                    table, new_column.name
+                )
+                .into());
+            }
+        }
+        MigrationOperation::AddUniqueConstraint { table, columns } => {
+            ensure_unique_values(connection, table, columns)?;
+        }
+        MigrationOperation::AlterColumn {
+            table,
+            old_column,
+            new_column,
+        } if !old_column.unique && new_column.unique => {
+            ensure_unique_values(connection, table, &[new_column.name.clone()])?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_unique_values(
+    connection: &crate::rusqlite::Connection,
+    table: &str,
+    columns: &[String],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let columns_sql = columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let non_null = columns
+        .iter()
+        .map(|column| format!("{} IS NOT NULL", quote_identifier(column)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let duplicates: bool = connection.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM {} WHERE {non_null} GROUP BY {columns_sql} HAVING count(*) > 1 LIMIT 1)",
+            quote_identifier(table)
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    if duplicates {
+        return Err(format!(
+            "cannot add unique constraint on {}({}); existing rows contain duplicates",
+            table,
+            columns.join(", ")
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 fn assert_rebuild_objects_match_history(
     connection: &crate::rusqlite::Connection,
     table: &str,
     migration_state: &ProjectState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let table_sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if table_sql
+        .as_deref()
+        .is_some_and(|sql| sql.to_ascii_uppercase().contains("AUTOINCREMENT"))
+    {
+        return Err(format!(
+            "cannot rebuild {table}: AUTOINCREMENT is not represented in historical state; use explicit RunSql that preserves sqlite_sequence"
+        )
+        .into());
+    }
     // A rebuild drops every index owned by the old table. Refuse unknown
     // definitions instead of silently losing them.
     let expected = migration_state
@@ -146,12 +289,14 @@ fn assert_rebuild_objects_match_history(
         .map(|column| vec![column.name.clone()])
         .chain(expected.unique_constraints.iter().cloned())
         .collect::<Vec<_>>();
+    let mut unmatched_unique = expected_unique.clone();
     let expected_primary_key = expected
         .columns
         .iter()
         .filter(|column| column.primary_key)
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
+    let mut unmatched_indexes = expected.indexes.clone();
     let mut indexes = connection
         .prepare("SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1)")?;
     let indexes = indexes
@@ -168,29 +313,39 @@ fn assert_rebuild_objects_match_history(
         let info = sqlite_index_columns(connection, &name)?;
         match origin.as_str() {
             "c" => {
-                let position = expected
-                    .indexes
-                    .iter()
-                    .enumerate()
-                    .find(|(i, _)| name == format!("{table}_idx_{i}"));
-                let Some((_, columns)) = position else {
+                if partial
+                    || info
+                        .0
+                        .iter()
+                        .any(|(_, desc, coll)| *desc || coll != "BINARY")
+                {
+                    return Err(format!("cannot rebuild {table}: divergent index {name}").into());
+                }
+                let unmatched = if unique {
+                    &mut unmatched_unique
+                } else {
+                    &mut unmatched_indexes
+                };
+                let Some(position) = unmatched.iter().position(|columns| *columns == info.1) else {
                     return Err(format!(
                         "cannot rebuild {table}: unmanaged index {name}; use explicit RunSql"
                     )
                     .into());
                 };
-                if unique
-                    || partial
-                    || info
-                        .0
-                        .iter()
-                        .any(|(_, desc, coll)| *desc || coll != "BINARY")
-                    || info.1 != *columns
-                {
-                    return Err(format!("cannot rebuild {table}: divergent index {name}").into());
-                }
+                unmatched.remove(position);
             }
-            "u" if unique && !partial && expected_unique.contains(&info.1) => {}
+            "u" if unique && !partial => {
+                let Some(position) = unmatched_unique
+                    .iter()
+                    .position(|columns| *columns == info.1)
+                else {
+                    return Err(format!(
+                        "cannot rebuild {table}: unmanaged or divergent index {name}; use explicit RunSql"
+                    )
+                    .into());
+                };
+                unmatched_unique.remove(position);
+            }
             "pk" if !partial && info.1 == expected_primary_key => {}
             _ => {
                 return Err(format!(
@@ -199,6 +354,20 @@ fn assert_rebuild_objects_match_history(
                 .into());
             }
         }
+    }
+    if !unmatched_indexes.is_empty() {
+        return Err(format!(
+            "cannot rebuild {table}: historical index(es) {:?} are missing from SQLite",
+            unmatched_indexes
+        )
+        .into());
+    }
+    if !unmatched_unique.is_empty() {
+        return Err(format!(
+            "cannot rebuild {table}: historical unique constraint(s) {:?} are missing from SQLite",
+            unmatched_unique
+        )
+        .into());
     }
     let dependents = sqlite_opaque_dependents(connection, table)?;
     if !dependents.is_empty() {
@@ -303,7 +472,7 @@ pub fn pending_operation_migrations<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ColumnState, ColumnType, MigrationId, TableState};
+    use crate::{ColumnState, ColumnType, ForeignKeyState, MigrationId, TableState};
 
     fn column(name: &str) -> ColumnState {
         ColumnState {
@@ -371,6 +540,103 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_index_changes_preserve_rows_and_match_history() {
+        for add_after_removal in [false, true] {
+            let table = TableState {
+                name: "items".into(),
+                columns: vec![column("a"), column("b"), column("c")],
+                unique_constraints: vec![],
+                indexes: vec![vec!["a".into()], vec!["b".into()], vec!["c".into()]],
+            };
+            let initial = Migration::new(
+                MigrationId {
+                    app: "items".into(),
+                    name: "0001".into(),
+                },
+                vec![],
+                vec![MigrationOperation::CreateTable { table }],
+            );
+            let mut db = crate::rusqlite::Connection::open_in_memory().unwrap();
+            apply_operation_migrations_on_connection(
+                &mut db,
+                MigrationGraph::new(vec![initial.clone()]).unwrap(),
+            )
+            .unwrap();
+            db.execute("INSERT INTO items VALUES ('A','B','C')", [])
+                .unwrap();
+            // Historical SQL can use names different from the generated ones.
+            db.execute_batch("DROP INDEX items_idx_0; CREATE INDEX legacy_a ON items(a)")
+                .unwrap();
+            let last = if add_after_removal {
+                MigrationOperation::AddIndex {
+                    table: "items".into(),
+                    columns: vec!["a".into(), "b".into()],
+                }
+            } else {
+                MigrationOperation::RemoveIndex {
+                    table: "items".into(),
+                    columns: vec!["c".into()],
+                }
+            };
+            let next = Migration::new(
+                MigrationId {
+                    app: "items".into(),
+                    name: "0002".into(),
+                },
+                vec![initial.id.clone()],
+                vec![
+                    MigrationOperation::RemoveIndex {
+                        table: "items".into(),
+                        columns: vec!["a".into()],
+                    },
+                    last,
+                ],
+            );
+            let graph = MigrationGraph::new(vec![initial, next]).unwrap();
+            apply_operation_migrations_on_connection(&mut db, graph.clone()).unwrap();
+            assert_rebuild_objects_match_history(
+                &db,
+                "items",
+                &graph.replay(Default::default()).unwrap(),
+            )
+            .unwrap();
+            let row: (String, String, String) = db
+                .query_row("SELECT a,b,c FROM items", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap();
+            assert_eq!(row, ("A".into(), "B".into(), "C".into()));
+            assert_eq!(
+                apply_operation_migrations_on_connection(&mut db, graph).unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn rebuild_accepts_historical_non_unique_index_names() {
+        let connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE items (id TEXT NOT NULL); \
+                 CREATE INDEX legacy_items_id_idx ON items(id)",
+            )
+            .unwrap();
+        let mut state = ProjectState::default();
+        MigrationOperation::CreateTable {
+            table: TableState {
+                name: "items".into(),
+                columns: vec![column("id")],
+                unique_constraints: vec![],
+                indexes: vec![vec!["id".into()]],
+            },
+        }
+        .state_forwards(&mut state)
+        .unwrap();
+        assert!(assert_rebuild_objects_match_history(&connection, "items", &state).is_ok());
+    }
+
+    #[test]
     fn rebuild_rejects_views_and_external_triggers_that_reference_the_table() {
         let connection = crate::rusqlite::Connection::open_in_memory().unwrap();
         connection
@@ -390,6 +656,402 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("view item_view"));
         assert!(message.contains("trigger audit_items"));
+    }
+
+    #[test]
+    fn rebuild_rejects_required_column_without_a_value_for_existing_rows() {
+        let connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE items (id TEXT NOT NULL); INSERT INTO items VALUES ('1')")
+            .unwrap();
+        let mut required = column("title");
+        required.nullable = false;
+        let error = ensure_rebuild_can_preserve_rows(
+            &connection,
+            &MigrationOperation::AddColumn {
+                table: "items".into(),
+                column: required,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("nullable → backfill → non-null"));
+    }
+
+    #[test]
+    fn rebuild_rejects_nulls_and_duplicates_before_new_constraints() {
+        let connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE items (id TEXT, email TEXT); INSERT INTO items VALUES (NULL, 'same'), (NULL, 'same')")
+            .unwrap();
+        let mut old_id = column("id");
+        old_id.nullable = true;
+        let error = ensure_rebuild_can_preserve_rows(
+            &connection,
+            &MigrationOperation::AlterColumn {
+                table: "items".into(),
+                old_column: old_id.clone(),
+                new_column: column("id"),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("contain NULL"));
+        let error = ensure_rebuild_can_preserve_rows(
+            &connection,
+            &MigrationOperation::AddUniqueConstraint {
+                table: "items".into(),
+                columns: vec!["email".into()],
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("contain duplicates"));
+    }
+
+    #[test]
+    fn backfill_allows_nullable_to_non_null_without_a_schema_default() {
+        let mut title = column("title");
+        title.nullable = true;
+        let initial = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0001".into(),
+            },
+            vec![],
+            vec![MigrationOperation::CreateTable {
+                table: TableState {
+                    name: "items".into(),
+                    columns: vec![column("id"), title.clone()],
+                    unique_constraints: vec![],
+                    indexes: vec![],
+                },
+            }],
+        );
+        let mut required = title.clone();
+        required.nullable = false;
+        let follow_up = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0002_title_required".into(),
+            },
+            vec![initial.id.clone()],
+            vec![
+                MigrationOperation::BackfillColumn {
+                    table: "items".into(),
+                    column: "title".into(),
+                    value: "'untitled'".into(),
+                },
+                MigrationOperation::AlterColumn {
+                    table: "items".into(),
+                    old_column: title,
+                    new_column: required,
+                },
+            ],
+        );
+        let graph = MigrationGraph::new(vec![initial, follow_up]).unwrap();
+        let mut connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![graph.ordered().next().unwrap().clone()]).unwrap(),
+        )
+        .unwrap();
+        connection
+            .execute("INSERT INTO items(id, title) VALUES ('1', NULL)", [])
+            .unwrap();
+        assert_eq!(
+            apply_operation_migrations_on_connection(&mut connection, graph).unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT title FROM items WHERE id='1'", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "untitled"
+        );
+        assert!(
+            connection
+                .execute("INSERT INTO items(id, title) VALUES ('2', NULL)", [])
+                .is_err()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT dflt_value FROM pragma_table_info('items') WHERE name='title'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rebuild_keeps_integer_primary_key_allocation_and_rejects_unmodeled_autoincrement() {
+        let mut id = column("id");
+        id.column_type = ColumnType::Integer;
+        id.primary_key = true;
+        let title = column("title");
+        let initial = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0001".into(),
+            },
+            vec![],
+            vec![MigrationOperation::CreateTable {
+                table: TableState {
+                    name: "items".into(),
+                    columns: vec![id.clone(), title.clone()],
+                    unique_constraints: vec![],
+                    indexes: vec![],
+                },
+            }],
+        );
+        let mut new_title = title.clone();
+        new_title.default = Some("'untitled'".into());
+        let rebuild = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0002_title_default".into(),
+            },
+            vec![initial.id.clone()],
+            vec![MigrationOperation::AlterColumn {
+                table: "items".into(),
+                old_column: title,
+                new_column: new_title,
+            }],
+        );
+        let mut connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![initial.clone()]).unwrap(),
+        )
+        .unwrap();
+        connection
+            .execute("INSERT INTO items(id, title) VALUES (5, 'existing')", [])
+            .unwrap();
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![initial, rebuild]).unwrap(),
+        )
+        .unwrap();
+        connection
+            .execute("INSERT INTO items(title) VALUES ('next')", [])
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT id FROM items WHERE title = 'next'", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            6
+        );
+
+        connection
+            .execute_batch(
+                "CREATE TABLE sequence_items(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)",
+            )
+            .unwrap();
+        let error = assert_rebuild_objects_match_history(
+            &connection,
+            "sequence_items",
+            &state_with_table(vec![id, column("title")]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("AUTOINCREMENT"));
+    }
+
+    #[test]
+    fn rebuild_preserves_composite_constraints_indexes_and_foreign_keys() {
+        let mut id = column("id");
+        id.column_type = ColumnType::Integer;
+        id.primary_key = true;
+        let mut parent_id = id.clone();
+        parent_id.name = "parent_id".into();
+        parent_id.field_name = "parent_id".into();
+        parent_id.primary_key = false;
+        parent_id.references = Some(ForeignKeyState {
+            target: "parents(id)".into(),
+            on_delete: Some("cascade".into()),
+        });
+        let code = column("code");
+        let description = column("description");
+        let initial = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0001".into(),
+            },
+            vec![],
+            vec![
+                MigrationOperation::CreateTable {
+                    table: TableState {
+                        name: "parents".into(),
+                        columns: vec![id.clone()],
+                        unique_constraints: vec![],
+                        indexes: vec![],
+                    },
+                },
+                MigrationOperation::CreateTable {
+                    table: TableState {
+                        name: "items".into(),
+                        columns: vec![id.clone(), parent_id, code.clone(), description.clone()],
+                        unique_constraints: vec![vec!["parent_id".into(), "code".into()]],
+                        indexes: vec![vec!["code".into(), "description".into()]],
+                    },
+                },
+            ],
+        );
+        let mut new_description = description.clone();
+        new_description.default = Some("'unknown'".into());
+        let rebuild = Migration::new(
+            MigrationId {
+                app: "items".into(),
+                name: "0002_description_default".into(),
+            },
+            vec![initial.id.clone()],
+            vec![MigrationOperation::AlterColumn {
+                table: "items".into(),
+                old_column: description,
+                new_column: new_description,
+            }],
+        );
+        let mut connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![initial.clone()]).unwrap(),
+        )
+        .unwrap();
+        connection
+            .execute("INSERT INTO parents(id) VALUES (1)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO items(id, parent_id, code, description) VALUES (1, 1, 'A', 'first')",
+                [],
+            )
+            .unwrap();
+        let graph = MigrationGraph::new(vec![initial, rebuild]).unwrap();
+        apply_operation_migrations_on_connection(&mut connection, graph.clone()).unwrap();
+        assert_rebuild_objects_match_history(
+            &connection,
+            "items",
+            &graph.replay(Default::default()).unwrap(),
+        )
+        .unwrap();
+        assert!(connection
+            .execute(
+                "INSERT INTO items(id, parent_id, code, description) VALUES (2, 1, 'A', 'duplicate')",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO items(id, parent_id, code, description) VALUES (3, 99, 'B', 'missing parent')",
+                [],
+            )
+            .is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT description FROM items WHERE id=1", [], |row| row
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn cyclic_foreign_key_tables_apply_with_their_declared_metadata() {
+        let mut id = column("id");
+        id.column_type = ColumnType::Integer;
+        id.primary_key = true;
+        let reference = |name: &str, target: &str| ColumnState {
+            field_name: name.into(),
+            name: name.into(),
+            column_type: ColumnType::Integer,
+            nullable: true,
+            primary_key: false,
+            unique: false,
+            default: None,
+            check: None,
+            choices: None,
+            references: Some(ForeignKeyState {
+                target: target.into(),
+                on_delete: Some("set null".into()),
+            }),
+            auto_now_add: false,
+            auto_now: false,
+        };
+        let migration = Migration::new(
+            MigrationId {
+                app: "cycle".into(),
+                name: "0001".into(),
+            },
+            vec![],
+            vec![
+                MigrationOperation::CreateTable {
+                    table: TableState {
+                        name: "left_items".into(),
+                        columns: vec![id.clone(), reference("right_id", "right_items(id)")],
+                        unique_constraints: vec![],
+                        indexes: vec![],
+                    },
+                },
+                MigrationOperation::CreateTable {
+                    table: TableState {
+                        name: "right_items".into(),
+                        columns: vec![id, reference("left_id", "left_items(id)")],
+                        unique_constraints: vec![],
+                        indexes: vec![],
+                    },
+                },
+            ],
+        );
+        let mut connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        apply_operation_migrations_on_connection(
+            &mut connection,
+            MigrationGraph::new(vec![migration]).unwrap(),
+        )
+        .unwrap();
+        let left_target: String = connection
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_list('left_items')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let right_target: String = connection
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_list('right_items')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            (left_target, right_target),
+            ("right_items".into(), "left_items".into())
+        );
+    }
+
+    #[test]
+    fn busy_write_lock_has_a_bounded_diagnostic_error() {
+        let path = std::env::temp_dir().join(format!(
+            "che_orm_lock_{}.sqlite",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let first = crate::rusqlite::Connection::open(&path).unwrap();
+        first.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let mut second = crate::rusqlite::Connection::open(&path).unwrap();
+        let error = begin_immediate(&mut second, Duration::from_millis(10)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("migration write lock within 10 ms")
+        );
+        first.execute_batch("ROLLBACK").unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

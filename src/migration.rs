@@ -791,6 +791,16 @@ fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
             render_string(table),
             render_strings(columns)
         ),
+        MigrationOperation::BackfillColumn {
+            table,
+            column,
+            value,
+        } => format!(
+            "MigrationOperation::BackfillColumn {{ table: {}, column: {}, value: {} }}",
+            render_string(table),
+            render_string(column),
+            render_string(value)
+        ),
         MigrationOperation::RunSql {
             forward,
             reverse,
@@ -858,6 +868,14 @@ pub enum MigrationOperation {
         table: String,
         columns: Vec<String>,
     },
+    /// Updates only existing NULL values before a later schema constraint.
+    /// `value` is a reviewed SQLite expression, for example `"'unknown'"`
+    /// or `"coalesce(title, 'untitled')"`.
+    BackfillColumn {
+        table: String,
+        column: String,
+        value: String,
+    },
     RunSql {
         forward: String,
         reverse: Option<String>,
@@ -894,7 +912,8 @@ fn operation_has_distinct_field_names(operation: &MigrationOperation) -> bool {
         | MigrationOperation::AddIndex { .. }
         | MigrationOperation::RemoveIndex { .. }
         | MigrationOperation::AddUniqueConstraint { .. }
-        | MigrationOperation::RemoveUniqueConstraint { .. } => false,
+        | MigrationOperation::RemoveUniqueConstraint { .. }
+        | MigrationOperation::BackfillColumn { .. } => false,
     }
 }
 
@@ -1065,6 +1084,16 @@ fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation, include
             bytes.push(11);
             encode_string(bytes, table);
             encode_string_list(bytes, columns);
+        }
+        MigrationOperation::BackfillColumn {
+            table,
+            column,
+            value,
+        } => {
+            bytes.push(13);
+            encode_string(bytes, table);
+            encode_string(bytes, column);
+            encode_string(bytes, value);
         }
     }
 }
@@ -1275,6 +1304,24 @@ impl MigrationOperation {
             Self::RemoveUniqueConstraint { table, columns } => {
                 let table = table_mut(state, table)?;
                 remove_constraint(&mut table.unique_constraints, columns, &table.name, false)?;
+            }
+            Self::BackfillColumn {
+                table,
+                column,
+                value,
+            } => {
+                if value.trim().is_empty()
+                    || value.contains(';')
+                    || value.contains("--")
+                    || value.contains("/*")
+                    || value.contains("*/")
+                {
+                    return Err(MigrationError::InvalidState(format!(
+                        "backfill value for {table}.{column} must be one non-empty SQLite expression without statements or comments"
+                    )));
+                }
+                let table = table_mut(state, table)?;
+                column_index(table, column)?;
             }
             Self::RunSql {
                 state_operations, ..
@@ -1864,6 +1911,17 @@ impl SqliteSchemaEditor {
                 quote_identifier(old_name),
                 quote_identifier(new_name)
             )],
+            MigrationOperation::BackfillColumn {
+                table,
+                column,
+                value,
+            } => vec![format!(
+                "UPDATE {} SET {} = {} WHERE {} IS NULL",
+                quote_identifier(table),
+                quote_identifier(column),
+                value,
+                quote_identifier(column),
+            )],
             _ if Self::rebuild_table_name(operation).is_some() => rebuild_table_statements(
                 Self::rebuild_table_name(operation).expect("operation requires a rebuild"),
                 before,
@@ -1982,7 +2040,7 @@ fn index_statements(table: &TableState) -> Vec<String> {
     for (position, columns) in table.indexes.iter().enumerate() {
         statements.push(format!(
             "CREATE INDEX {} ON {} ({})",
-            quote_identifier(&format!("{}_idx_{position}", table.name)),
+            quote_identifier(&index_name(&table.name, position)),
             quote_identifier(&table.name),
             columns
                 .iter()
@@ -1992,6 +2050,10 @@ fn index_statements(table: &TableState) -> Vec<String> {
         ));
     }
     statements
+}
+
+fn index_name(table: &str, position: usize) -> String {
+    format!("{table}_idx_{position}")
 }
 
 fn column_definition_sql(column: &ColumnState) -> String {
@@ -2671,6 +2733,33 @@ mod tests {
     }
 
     #[test]
+    fn backfill_rejects_sql_comments_that_could_change_its_null_filter() {
+        let mut state = ProjectState::default();
+        MigrationOperation::CreateTable {
+            table: TableState {
+                name: "items".into(),
+                columns: vec![column("title")],
+                unique_constraints: vec![],
+                indexes: vec![],
+            },
+        }
+        .state_forwards(&mut state)
+        .unwrap();
+
+        for value in ["0 WHERE 1=1 --", "0 /* WHERE title IS NULL */"] {
+            assert!(matches!(
+                (MigrationOperation::BackfillColumn {
+                    table: "items".into(),
+                    column: "title".into(),
+                    value: value.into(),
+                })
+                .state_forwards(&mut state.clone()),
+                Err(MigrationError::InvalidState(_))
+            ));
+        }
+    }
+
+    #[test]
     fn state_changes_become_replayable_forward_operations() {
         let key = ModelKey {
             app: "tasks".into(),
@@ -2715,20 +2804,28 @@ mod tests {
         let migration = Migration::new(
             id("tasks", "0002_title"),
             vec![id("accounts", "0001_initial")],
-            vec![MigrationOperation::RunSql {
-                forward: "UPDATE tasks SET title = 'ready';".into(),
-                reverse: None,
-                state_operations: vec![MigrationOperation::AddColumn {
+            vec![
+                MigrationOperation::RunSql {
+                    forward: "UPDATE tasks SET title = 'ready';".into(),
+                    reverse: None,
+                    state_operations: vec![MigrationOperation::AddColumn {
+                        table: "tasks".into(),
+                        column: title,
+                    }],
+                },
+                MigrationOperation::BackfillColumn {
                     table: "tasks".into(),
-                    column: title,
-                }],
-            }],
+                    column: "title".into(),
+                    value: "'untitled'".into(),
+                },
+            ],
         );
         let source = render_migration_rust(&migration);
         assert_eq!(source, render_migration_rust(&migration));
         assert!(source.contains("Migration::new("));
         assert!(source.contains("accounts"));
         assert!(source.contains("UPDATE tasks SET title"));
+        assert!(source.contains("MigrationOperation::BackfillColumn"));
         assert!(!source.contains(&migration.checksum));
     }
 }
