@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "che-orm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "che-orm-macros",
  "deadpool-sqlite",
