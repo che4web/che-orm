@@ -9,7 +9,7 @@ procedural macros.
 ## Status
 
 SQLite has an async pool, CRUD facade, transactions, relations, serializers,
-and Atlas-based migrations. The PostgreSQL dialect can compile SQL and DDL, but
+and compiled migrations. The PostgreSQL dialect can compile SQL and DDL, but
 does not yet provide a connection pool or executor.
 
 ## Quick Start
@@ -56,8 +56,34 @@ async fn main() -> Result<(), che_orm::OrmError> {
 }
 ```
 
-`create_table` is suitable for tests and local experiments. Use Atlas migrations
-for persistent application schemas.
+`create_table` is suitable for tests and local experiments. Use compiled
+migrations for persistent application schemas.
+
+## ImageField
+
+Use `Option<ImageField>` when a record can have an image:
+
+```rust
+use che_orm::{ImageField, Model};
+
+#[derive(Debug, Model)]
+#[orm(table = "boards")]
+struct Board {
+    #[orm(primary_key)]
+    id: i64,
+    preview: Option<ImageField>,
+}
+```
+
+The nullable SQLite `TEXT` column stores a relative key such as
+`board-previews/a1b2.png`, **not** image bytes, an absolute filesystem path, or
+the browser URL. `che-orm` reads and writes this key; `che-rest::media` handles
+uploads, validation, storage and serving files. Image fields are read-only in
+JSON writes. `ImageField::new(...)` only wraps a trusted string: it does **not**
+validate or create a file.
+
+See the [step-by-step ImageField guide](docs/en/image-field.md) for the complete
+model, ViewSet, JSON response, URL, deletion and migration workflow.
 
 The repository migration CLI is an example application command:
 

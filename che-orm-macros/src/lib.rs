@@ -200,7 +200,9 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
         let name = field.ident.expect("named fields always have identifiers");
         let field_type = field.ty.clone();
         let json_name = name.to_string();
-        let mut read_only = false;
+        // Image references are written by a validated upload handler, never by
+        // accepting a storage key from the JSON model API.
+        let mut read_only = is_image_field_type(&field_type);
         let mut write_only = false;
         let mut use_default_on_create = false;
         let serialize_value = if is_offset_date_time(&field_type) {
@@ -1321,6 +1323,25 @@ fn is_option_offset_date_time(ty: &syn::Type) -> bool {
     arguments.args.iter().any(|argument| {
         matches!(argument, syn::GenericArgument::Type(inner) if is_offset_date_time(inner))
     })
+}
+
+fn is_image_field_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident == "ImageField" {
+        return true;
+    }
+    if segment.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return false;
+    };
+    matches!(args.args.first(), Some(syn::GenericArgument::Type(ty)) if is_image_field_type(ty))
 }
 
 fn datetime_deserialize_attribute(

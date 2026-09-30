@@ -1,5 +1,9 @@
 # Migrations with Atlas
 
+> Historical guide for the retired CLI. The current example ships a frozen
+> compiled migration and does not support `makemigrations` or `migrate lint`.
+> See the [repository README](../../README.en.md) for the current workflow.
+
 The migration CLI is part of the example application and runs from
 `che-orm-examples`:
 

@@ -1,5 +1,8 @@
 # Пошаговый tutorial
 
+> Раздел про Atlas ниже описывает старый CLI; актуальный пример использует
+> frozen compiled migration. Команды миграции см. в [README](../README.md#миграции).
+
 Этот tutorial создаёт две связанные модели, сохраняет данные в SQLite, загружает
 relations и показывает переход к Atlas migrations. Для первого запуска
 используется in-memory SQLite; `create_table` предназначен только для тестов и

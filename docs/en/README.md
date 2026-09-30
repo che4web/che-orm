@@ -6,10 +6,11 @@ a PostgreSQL connection pool and executor are not yet implemented.
 
 ## Guides
 
-- [Tutorial](tutorial.md): create related models, use SQLite, and move to Atlas migrations.
+- [Tutorial](tutorial.md): create related models and use SQLite (the Atlas section is historical).
 - [Models and schema](models.md): model derives, fields, relations, and serializers.
+- [ImageField](image-field.md): a complete model-to-upload example, storage keys, URLs and cleanup.
 - [SQLite runtime](sqlite.md): connections, CRUD, queries, relations, and transactions.
-- [Atlas migrations](atlas.md): desired schema generation and the `manage` CLI.
+- [Historical Atlas migration guide](atlas.md): retained for reference; the example now uses compiled migrations.
 - [Compile-tested API examples](api-examples.md): models, relations, serializers, and queries.
 
 ## Project resources

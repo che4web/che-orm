@@ -76,7 +76,8 @@ fn status() -> Result<(), String> {
     let applied = orm::migration::sqlite_executor::applied_operation_migrations(&connection)
         .map_err(|error| error.to_string())?;
     for migration in migrations() {
-        let marker = if applied.contains_key(&(migration.id.app.clone(), migration.id.name.clone())) {
+        let marker = if applied.contains_key(&(migration.id.app.clone(), migration.id.name.clone()))
+        {
             "[X]"
         } else {
             "[ ]"
@@ -87,5 +88,7 @@ fn status() -> Result<(), String> {
 }
 
 fn print_help() {
-    println!("Usage:\n  cargo run -p che-orm-examples --bin manage -- schema\n  cargo run -p che-orm-examples --bin manage -- migrate\n  cargo run -p che-orm-examples --bin manage -- migrate status");
+    println!(
+        "Usage:\n  cargo run -p che-orm-examples --bin manage -- schema\n  cargo run -p che-orm-examples --bin manage -- migrate\n  cargo run -p che-orm-examples --bin manage -- migrate status"
+    );
 }

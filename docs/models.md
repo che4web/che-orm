@@ -58,6 +58,7 @@ derive для печати модели через `{:?}`.
 | Атрибут | Назначение |
 | --- | --- |
 | `primary_key` | Первичный ключ; `i64` получает identity/rowid поведение backend-а. |
+| `db_column = "old_name"` | Физическая SQL-колонка при другом Rust-имени поля. |
 | `unique` | Уникальность одной колонки. |
 | `default = "..."` | SQL expression для `DEFAULT`. Значение не параметризуется. |
 | `check = "..."` | SQL expression внутри `CHECK (...)`. |
@@ -93,12 +94,25 @@ struct User {
 | --- | --- | --- |
 | `i64` | `INTEGER` | Нет |
 | `String` | `TEXT` | Нет |
+| `ImageField` | `TEXT` (относительный ключ файла) | Нет |
+| `Vec<u8>` | `BLOB` | Нет |
 | `bool` | `INTEGER` (`0`/`1`) | Нет |
 | `time::OffsetDateTime` | `TEXT` UTC | Нет |
 | `Option<T>` | тип `T` | Да |
 
 `Option<T>` определяется как nullable автоматически. Для `OffsetDateTime`
 используется feature `time` у `rusqlite` и UTC-значения.
+
+`Option<ImageField>` хранит относительный ключ файла либо `NULL`, например
+`avatars/photo.png`. Он не содержит байты изображения или HTTP-адрес. В
+`#[derive(ModelSerializer)]` поле автоматически доступно только для чтения:
+обычный JSON CRUD не принимает от клиента путь к файлу. Загрузка и проверка
+изображения настраиваются в `che-rest::media`.
+
+Начните с [пошагового примера ImageField](image-field.md): там показаны модель,
+настройка папки, регистрация маршрутов, результат в JSON и перенос старых
+ключей. `#[orm(db_column = "old_name")]` нужен только если физическая SQL-колонка
+уже существует под другим именем; новым моделям он обычно не нужен.
 
 ## Timestamp fields
 
@@ -139,7 +153,8 @@ let registry = che_orm::AppRegistry::new()
     .register::<ContentApp>();
 ```
 
-Это разделяет ownership моделей и оставляет единый desired schema для Atlas.
+Это разделяет ownership моделей и оставляет единое состояние схемы для
+compiled migrations приложения.
 
 Foreign key между ORM-моделями описывается через `foreign_key`:
 

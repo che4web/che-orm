@@ -1,7 +1,10 @@
 # Step-by-Step Tutorial
 
-This tutorial creates two related models, stores data in SQLite, loads relations,
-`create_table` is intended only for tests and local experiments.
+> The Atlas section below describes the former CLI; the current example uses a
+> frozen compiled migration. See the [README](../../README.en.md#quick-start).
+
+This tutorial creates two related models, stores data in SQLite, and loads
+relations. `create_table` is intended only for tests and local experiments.
 
 ## 1. Create an Application
 

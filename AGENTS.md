@@ -14,14 +14,15 @@ Workspace members:
 ## Architecture
 
 - `src/types.rs`: database values, expressions, typed model fields.
+- `src/image.rs`: `ImageField`, a TEXT-backed relative file key; filesystem/HTTP handling belongs in `che-rest::media`.
 - `src/query.rs`: query AST, model trait, SELECT/INSERT/UPDATE/DELETE builders.
 - `src/schema.rs`: column metadata, `SchemaSet`, `AppConfig`, and `AppRegistry`.
 - `src/sql.rs`: SQLite/PostgreSQL dialects and SQL compilation.
 - `src/connection.rs`: async SQLite pool, CRUD execution, row decoding, and transactions.
 - `che-orm-macros/src/lib.rs`: `Model` derive implementation.
 - `che-orm-examples/src/lib.rs`: sample application models, registry, and database path.
-- `che-orm-examples/src/bin/manage.rs`: Atlas migration CLI for the sample application.
-- `che-orm-examples/migrations/`: sample Atlas migrations and `atlas.sum`.
+- `che-orm-examples/src/bin/manage.rs`: compiled-migration CLI for the sample application.
+- `che-orm-examples/migrations/`: the sample's frozen compiled baseline SQL.
 
 ## Application Modules
 
@@ -64,6 +65,9 @@ that define foreign keys to them.
 - Use `#[orm(auto_now_add)]` and `#[orm(auto_now)]` only with `OffsetDateTime`.
 - `auto_now` is updated by ORM-generated UPDATE statements. Raw SQL does not update it.
 - `Option<T>` maps to a nullable SQL column.
+- `ImageField` stores a relative key in SQLite `TEXT`, not bytes or an HTTP URL. `Option<ImageField>` is nullable. `src/image.rs` implements `ColumnTypeOf`, typed query binding, SQLite read/write and string JSON serialization; do not add filesystem operations to the ORM.
+- `ModelSerializer` makes `ImageField` and `Option<ImageField>` read-only in JSON writes even without an explicit annotation. Server code sets them after a validated upload; do not accept client-supplied storage keys through CRUD.
+- Keep the user-facing walkthrough in `docs/image-field.md` and `docs/en/image-field.md` aligned with the actual `che-rest::media` APIs. Ordinary models need just `Option<ImageField>`; show `#[orm(db_column = "...")]` only for an existing SQL column with a different name. `ImageField::new` wraps a trusted key but does not validate or store a file.
 - Avoid declaring both field-level `#[orm(unique)]` and a duplicate table-level
   `unique("field")` constraint.
 
@@ -78,8 +82,9 @@ Scalar writable foreign-key serializer fields use `#[serializer(foreign_key = Us
 
 ## Migrations
 
-Atlas is the source of applied schema changes. Do not use `Database::create_table`
-for production deployment; it is intended for tests and local setup.
+Application-owned compiled migration operations are the source of persistent schema
+changes. Do not use `Database::create_table` for production deployment; it is
+intended for tests and local setup.
 
 The sample application configuration lives in `che-orm-examples/src/lib.rs`:
 
@@ -91,24 +96,17 @@ Use the application CLI:
 
 ```bash
 cargo run -p che-orm-examples --bin manage -- schema
-cargo run -p che-orm-examples --bin manage -- makemigrations
 cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin manage -- migrate status
-cargo run -p che-orm-examples --bin manage -- migrate lint
 ```
 
-`makemigrations` writes the desired schema to a temporary file and invokes
-Atlas with `--to file://...`. The temporary file must not be committed.
-
-`migrate` and `migrate status` use the sample application's `DATABASE_PATH`;
-do not add a second database URL source to the CLI.
-
-Atlas must be installed and available as `atlas` in `PATH`. Set `ATLAS_BIN`
-when a non-default executable path is needed. Some Atlas versions require
-`atlas login` or Pro for `migrate lint`.
-
-Migration files and `atlas.sum` are committed to the repository. Review every
-generated migration before applying it.
+The example rejects `makemigrations`: its `0001_initial` history is frozen.
+`migrate` and `migrate status` use its `database_path()`; update the application's
+compiled migration registry when adding a model. `che-rest` applications have
+their own compiled `makemigrations` flow. Review generated operations and
+backfill existing file keys separately if changing their storage format:
+`#[orm(db_column = "existing_name")]` keeps the SQL column name but does not
+rewrite stored values. Preserve previous migration identities and checksums.
 
 The ORM high-level `create` and `update` APIs use SQLite `RETURNING`. The ORM
 does not generate `AFTER INSERT` or `AFTER UPDATE` triggers. Do not add such

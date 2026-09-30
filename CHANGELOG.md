@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3
+
+- Add nullable `ImageField` storage keys with SQLite round-trip support and read-only JSON writes.
+- Document image-field models, uploads, storage paths, and cleanup in Russian and English.
+
 ## 0.2.1
 
 - Add typed transaction execution and support inserts with only database defaults.

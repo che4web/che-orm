@@ -59,6 +59,7 @@ pub use serde;
 pub use serde_json;
 pub use time;
 
+mod image;
 pub mod migration;
 mod query;
 mod schema;
@@ -68,6 +69,7 @@ mod types;
 #[cfg(feature = "sqlite")]
 mod connection;
 
+pub use image::ImageField;
 pub use migration::*;
 pub use query::*;
 pub use schema::*;

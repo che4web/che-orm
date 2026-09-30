@@ -16,7 +16,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 - Низкоуровневые `insert`, `fetch_all`, `fetch_one` и произвольный `QueryAst`.
 - Транзакции с commit/rollback.
 - Foreign keys с каскадным удалением и typed `fetch_by` для связанных строк.
-- Versioned migrations через Atlas и встроенный `manage` CLI.
+- Версионированные compiled migrations и `manage` CLI приложения-примера.
 - Разделение моделей по application-модулям через `AppConfig` и `AppRegistry`.
 - `OffsetDateTime` и managed-поля `auto_now_add` / `auto_now`.
 - Защита от пустых mutation-запросов и случайных массовых update/delete.
@@ -116,6 +116,34 @@ struct Task {
 
 `DbEnum` generates `Serialize` and `Deserialize`; do not derive the serde traits separately. It
 stores values as `TEXT` and emits a `CHECK` constraint for the declared choices.
+
+## ImageField
+
+Если у записи есть картинка, объявите поле как `Option<ImageField>`:
+
+```rust
+use che_orm::{ImageField, Model};
+
+#[derive(Debug, Model)]
+#[orm(table = "boards")]
+struct Board {
+    #[orm(primary_key)]
+    id: i64,
+    preview: Option<ImageField>,
+}
+```
+
+В SQLite поле `preview` — nullable `TEXT`: там хранится, например,
+`board-previews/a1b2.png`. Это **относительный путь внутри хранилища**, а не
+PNG и не адрес в браузере. Папку с файлами и HTTP-маршруты настраивает
+`che-rest::media`; сам `che-orm` только сохраняет и читает ключ.
+
+Поле доступно на чтение в JSON, но не принимается в JSON-запросах к модели.
+Загружать файл нужно через объявленное в ViewSet image-действие, а не через
+`ImageField::new(...)`: этот конструктор **не создаёт и не проверяет файл**.
+
+Полный пример модели, загрузки, URL, удаления и миграции существующих данных:
+**[пошаговое руководство по ImageField](docs/image-field.md)**.
 
 ## Пул
 
@@ -260,18 +288,16 @@ CLI миграций находится в `che-orm-examples`, а не в librar
 
 ```bash
 cargo run -p che-orm-examples --bin manage -- schema
-cargo run -p che-orm-examples --bin manage -- makemigrations
 cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin manage -- migrate status
-cargo run -p che-orm-examples --bin manage -- migrate lint
 ```
 
-`makemigrations` собирает schema из Rust-моделей, записывает её во временный
-файл, передаёт Atlas через `--to file://...` и удаляет файл после завершения.
-Миграции примера хранятся в `che-orm-examples/migrations/` и применяются только отдельной командой
-deploy, а не при старте приложения. Подробности: [`docs/atlas.md`](docs/atlas.md).
-В некоторых версиях Atlas `migrate lint` требует `atlas login`/Pro; это
-ограничение Atlas, а не приложения.
+Пример содержит frozen compiled baseline в `che-orm-examples/migrations/`.
+Его `manage` не генерирует новые миграции: после изменения моделей обновите
+реестр миграций приложения. `migrate` применяет compiled операции отдельно от
+запуска сервера; `Database::create_table()` используйте только для тестов и
+локальных экспериментов. Приложения на `che-rest` могут генерировать compiled
+операции собственным `manage makemigrations`.
 
 ## Applications
 

@@ -57,6 +57,7 @@ Do not specify both forms for one field: this creates two uniqueness checks.
 | Attribute | Purpose |
 | --- | --- |
 | `primary_key` | Primary key; `i64` receives backend identity/rowid behavior. |
+| `db_column = "old_name"` | Physical SQL column when the Rust field has another name. |
 | `unique` | Uniqueness of one column. |
 | `default = "..."` | SQL expression for `DEFAULT`. The value is not parameterized. |
 | `check = "..."` | SQL expression inside `CHECK (...)`. |
@@ -92,12 +93,22 @@ struct User {
 | --- | --- | --- |
 | `i64` | `INTEGER` | No |
 | `String` | `TEXT` | No |
+| `ImageField` | `TEXT` (relative storage key) | No |
+| `Vec<u8>` | `BLOB` | No |
 | `bool` | `INTEGER` (`0`/`1`) | No |
 | `time::OffsetDateTime` | UTC `TEXT` | No |
 | `Option<T>` | `T` type | Yes |
 
 `Option<T>` is automatically considered nullable. `OffsetDateTime` uses the
 `time` feature of `rusqlite` and UTC values.
+
+`Option<ImageField>` holds a relative file key or `NULL`, not image bytes or an
+HTTP URL. The field is automatically read-only in JSON model writes; uploading
+and validating the file belongs to `che-rest::media`. Start with the
+[step-by-step ImageField guide](image-field.md) for model and ViewSet examples,
+storage layout, URLs, and migrations. Use `#[orm(db_column = "old_name")]` only
+when the existing SQL column has a different name; new models normally do not
+need it.
 
 ## Timestamp Fields
 
@@ -138,7 +149,8 @@ let registry = che_orm::AppRegistry::new()
     .register::<ContentApp>();
 ```
 
-This separates model ownership while retaining one desired schema for Atlas.
+This separates model ownership while retaining a single schema state for the
+application's compiled migrations.
 
 A foreign key between ORM models is declared through `foreign_key`:
 

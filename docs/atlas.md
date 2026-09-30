@@ -1,5 +1,9 @@
 # Миграции через Atlas
 
+> Архивная инструкция для прежнего CLI. Текущий пример использует frozen
+> compiled migration и не поддерживает `makemigrations` или `migrate lint`.
+> Актуальные команды см. в [README](../README.md#миграции).
+
 CLI миграций является частью example application и запускается из
 `che-orm-examples`:
 

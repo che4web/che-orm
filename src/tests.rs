@@ -1,6 +1,6 @@
 use crate::{
-    AppConfig, AppRegistry, ColumnRef, DatabaseValue, DbEnum, MigrationOperation, Model,
-    ModelSerializer, ModelWriteSerializer, PostgresDialect, QueryBuildError, QueryValue,
+    AppConfig, AppRegistry, ColumnRef, DatabaseValue, DbEnum, ImageField, MigrationOperation,
+    Model, ModelSerializer, ModelWriteSerializer, PostgresDialect, QueryBuildError, QueryValue,
     SqlCompiler, SqliteDialect,
 };
 use time::OffsetDateTime;
@@ -106,6 +106,22 @@ struct BinaryItem {
     #[orm(primary_key)]
     id: i64,
     payload: Vec<u8>,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "image_items")]
+struct ImageItem {
+    #[orm(primary_key)]
+    id: i64,
+    image: Option<ImageField>,
+}
+
+#[derive(ModelSerializer)]
+#[serializer(model = ImageItem)]
+struct ImageItemSerializer {
+    #[serializer(read_only)]
+    id: i64,
+    image: Option<ImageField>,
 }
 
 #[derive(Debug, Model)]
@@ -1075,6 +1091,39 @@ async fn sqlite_round_trips_binary_fields() {
 
     let loaded = database.get::<BinaryItem>(item.id).await.unwrap().unwrap();
     assert_eq!(loaded.payload, vec![0, 1, 2, 127, 255]);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_round_trips_image_field_and_serializes_storage_key() {
+    let database = crate::Database::connect_in_memory().unwrap();
+    database.create_table::<ImageItem>().await.unwrap();
+    let image = ImageField::new("previews/42.png");
+    let item = database
+        .create::<ImageItem>()
+        .set(ImageItem::IMAGE, Some(image.clone()))
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(item.image, Some(image.clone()));
+    assert_eq!(
+        database
+            .get::<ImageItem>(item.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .image,
+        Some(image)
+    );
+    let response = ImageItemSerializer::to_json(item).unwrap();
+    assert_eq!(response["image"], "previews/42.png");
+    assert!(
+        ImageItemSerializer::is_valid(
+            crate::serde_json::json!({ "image": "../untrusted.png" }),
+            crate::WriteMode::Create,
+        )
+        .is_err()
+    );
 }
 
 #[cfg(feature = "sqlite")]
