@@ -1,142 +1,200 @@
-use deadpool_sqlite::{Config, Pool, Runtime};
-use rusqlite::{OptionalExtension, types::Value};
-use std::collections::{HashMap, HashSet};
-use time::format_description::well_known::Rfc3339;
-
 use crate::{
-    BelongsTo, CompiledQuery, DatabaseValue, Expr, HasMany, Model, ModelField, QueryAst,
-    QueryBuildError, QueryValue, SelectQuery, SqlCompiler, SqliteDialect, ValidatedWrite,
+    BelongsTo, CompiledQuery, CurrentDialect, DatabaseValue, Expr, HasMany, MigrationGraph, Model,
+    ModelField, QueryAst, QueryBuildError, QueryValue, Row, SelectQuery, SqlCompiler,
+    ValidatedWrite, backend,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
 };
 
 #[derive(Debug, thiserror::Error)]
-/// Errors returned by the SQLite pool and ORM runtime.
 pub enum OrmError {
+    #[error("database configuration error: {0}")]
+    Configuration(String),
     #[error("database pool error: {0}")]
-    Pool(#[from] deadpool_sqlite::PoolError),
+    Pool(String),
     #[error("database interaction error: {0}")]
     Interaction(String),
+    #[cfg(feature = "sqlite")]
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[cfg(feature = "postgres")]
+    #[error("postgres error: {0}")]
+    Postgres(#[from] tokio_postgres::Error),
+    #[error("row decoding error: {0}")]
+    Decode(#[from] crate::DecodeError),
     #[error("query build error: {0:?}")]
     QueryBuild(QueryBuildError),
+    #[error("migration error: {0}")]
+    Migration(String),
+}
+
+impl From<QueryBuildError> for OrmError {
+    fn from(value: QueryBuildError) -> Self {
+        Self::QueryBuild(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Result metadata returned by an executed mutation or DDL statement.
+pub enum ConstraintKind {
+    Unique,
+    ForeignKey,
+    NotNull,
+    Check,
+}
+
+impl OrmError {
+    pub fn constraint_kind(&self) -> Option<ConstraintKind> {
+        #[cfg(feature = "postgres")]
+        if let Some(code) = self.sql_state() {
+            return match code {
+                "23505" => Some(ConstraintKind::Unique),
+                "23503" => Some(ConstraintKind::ForeignKey),
+                "23502" => Some(ConstraintKind::NotNull),
+                "23514" => Some(ConstraintKind::Check),
+                _ => None,
+            };
+        }
+        #[cfg(feature = "sqlite")]
+        if let Self::Sqlite(rusqlite::Error::SqliteFailure(error, _)) = self {
+            return match error.extended_code {
+                rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => Some(ConstraintKind::Unique),
+                rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => Some(ConstraintKind::ForeignKey),
+                rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL => Some(ConstraintKind::NotNull),
+                rusqlite::ffi::SQLITE_CONSTRAINT_CHECK => Some(ConstraintKind::Check),
+                _ => None,
+            };
+        }
+        None
+    }
+    /// PostgreSQL SQLSTATE, when the error originated from the server.
+    pub fn sql_state(&self) -> Option<&str> {
+        #[cfg(feature = "postgres")]
+        if let Self::Postgres(error) = self {
+            return error.code().map(|code| code.code());
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecuteResult {
     pub rows_affected: usize,
+    /// SQLite metadata only. Use CRUD `RETURNING` models for portable keys.
     pub last_insert_rowid: Option<i64>,
 }
 
+/// Async database using the backend selected by the crate feature.
 #[derive(Clone)]
-/// Async SQLite database backed by a `deadpool-sqlite` connection pool.
 pub struct Database {
-    pool: Pool,
+    pool: backend::Pool,
+}
+
+pub type TransactionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OrmError>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
 }
 
 impl Database {
-    /// Returns the underlying SQLite pool for advanced driver-specific use.
-    pub fn pool(&self) -> &Pool {
-        &self.pool
+    pub async fn connect(url: impl Into<String>) -> Result<Self, OrmError> {
+        let url = url.into();
+        let size = if url == ":memory:" || url == "sqlite://:memory:" {
+            1
+        } else {
+            4
+        };
+        Self::connect_with_pool_size(url, size).await
     }
-
-    /// Opens a SQLite database with a pool size of four connections.
-    pub fn connect(path: impl Into<String>) -> Result<Self, OrmError> {
-        Self::connect_with_pool_size(path, 4)
-    }
-
-    /// Opens a SQLite database with an explicit maximum pool size.
-    pub fn connect_with_pool_size(
-        path: impl Into<String>,
-        pool_size: usize,
+    pub async fn connect_with_pool_size(
+        url: impl Into<String>,
+        size: usize,
     ) -> Result<Self, OrmError> {
-        let config = Config::new(path.into());
-        let mut config = config;
-        config.pool = Some(deadpool_sqlite::PoolConfig::new(pool_size));
-        let pool = config
-            .create_pool(Runtime::Tokio1)
-            .map_err(|error| OrmError::Interaction(error.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool: backend::connect(url.into(), size).await?,
+        })
+    }
+    #[cfg(feature = "sqlite")]
+    pub async fn connect_in_memory() -> Result<Self, OrmError> {
+        Self::connect(":memory:").await
     }
 
-    /// Opens an in-memory SQLite database with a single connection.
-    pub fn connect_in_memory() -> Result<Self, OrmError> {
-        Self::connect_with_pool_size(":memory:", 1)
-    }
-
-    /// Executes a compiled AST query asynchronously.
     pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
-        ast.validate().map_err(OrmError::QueryBuild)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        self.execute_compiled(compiled).await
-    }
-
-    /// Creates a model table and its indexes.
-    pub async fn create_table<M: Model>(&self) -> Result<ExecuteResult, OrmError> {
-        let schema = M::schema();
-        let compiled = SqlCompiler::<SqliteDialect>::compile_schema(&schema);
-        let pool = self.pool.clone();
-        pool.get()
+        ast.validate()?;
+        backend::Session::acquire(&self.pool)
             .await?
-            .interact(move |connection| -> rusqlite::Result<ExecuteResult> {
-                configure_connection(connection)?;
-                connection.execute_batch(&compiled.table)?;
-                for index in compiled.indexes {
-                    connection.execute_batch(&index)?;
+            .execute(SqlCompiler::<CurrentDialect>::compile(&ast))
+            .await
+    }
+    /// Executes explicitly supplied SQL with bound values. SQL syntax is backend-specific.
+    pub async fn execute_sql(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<DatabaseValue>,
+    ) -> Result<ExecuteResult, OrmError> {
+        backend::Session::acquire(&self.pool)
+            .await?
+            .execute(CompiledQuery {
+                sql: sql.into(),
+                params,
+            })
+            .await
+    }
+    pub async fn query_sql(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<DatabaseValue>,
+    ) -> Result<Vec<Row>, OrmError> {
+        backend::Session::acquire(&self.pool)
+            .await?
+            .query(CompiledQuery {
+                sql: sql.into(),
+                params,
+            })
+            .await
+    }
+    pub async fn create_table<M: Model>(&self) -> Result<ExecuteResult, OrmError> {
+        M::schema().validate().map_err(|error| {
+            OrmError::QueryBuild(QueryBuildError::InvalidSchema(format!("{error:?}")))
+        })?;
+        let schema = SqlCompiler::<CurrentDialect>::compile_schema(&M::schema());
+        self.transaction(move |tx| {
+            Box::pin(async move {
+                tx.session.batch(&schema.table).await?;
+                for sql in schema.indexes {
+                    tx.session.batch(&sql).await?;
                 }
                 Ok(ExecuteResult {
                     rows_affected: 0,
                     last_insert_rowid: None,
                 })
             })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
+        })
+        .await
     }
-
-    /// Inserts a model, omitting generated integer keys and managed timestamps.
-    /// A UUID primary key is taken from the supplied model.
+    /// Inserts supplied UUID keys, omitting generated integer keys and managed timestamps.
     pub async fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
-        let ast = QueryAst::Insert(crate::InsertAst {
-            table: crate::TableRef::new(M::table_name()),
-            values: model.insert_values(),
-            returning: Vec::new(),
-        });
-        self.execute(ast).await
+        self.execute(insert_ast(model)).await
     }
-
-    /// Fetches all rows matching a typed select query.
     pub async fn fetch_all<M: Model + Send + 'static>(
         &self,
-        query: crate::SelectQuery<M>,
+        query: SelectQuery<M>,
     ) -> Result<Vec<M>, OrmError> {
-        let ast = query.into_ast().map_err(OrmError::QueryBuild)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = self.pool.clone();
-        pool.get()
-            .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                let mut statement = connection.prepare(&compiled.sql)?;
-                let params = sqlite_params(&compiled)?;
-                let rows = statement.query_map(rusqlite::params_from_iter(params), M::from_row)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
+        decode_models(self.rows(query.into_ast()?).await?)
     }
-
-    /// Fetches at most one row matching a typed select query.
     pub async fn fetch_one<M: Model + Send + 'static>(
         &self,
-        query: crate::SelectQuery<M>,
+        query: SelectQuery<M>,
     ) -> Result<Option<M>, OrmError> {
-        let mut rows = self.fetch_all(query.limit(1)).await?;
-        Ok(rows.pop())
+        Ok(self.fetch_all(query.limit(1)).await?.pop())
     }
-
-    /// Fetches a model by its typed primary key.
     pub async fn get<M: Model + Send + 'static>(
         &self,
         id: M::PrimaryKey,
@@ -144,93 +202,49 @@ impl Database {
         self.fetch_one(M::query().filter(M::primary_key().eq(id)))
             .await
     }
-
-    /// Fetches every row in a model's table.
     pub async fn all<M: Model + Send + 'static>(&self) -> Result<Vec<M>, OrmError> {
         self.fetch_all(M::query()).await
     }
-
     pub async fn count<M: Model + Send + 'static>(&self) -> Result<usize, OrmError> {
-        let table = M::table_name();
-        let pool = self.pool.clone();
-        pool.get()
-            .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get::<_, i64>(0)
-                })
-            })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map(|count| count as usize)
-            .map_err(OrmError::from)
+        self.count_query(M::query()).await
     }
-
     pub async fn count_query<M: Model + Send + 'static>(
         &self,
         query: SelectQuery<M>,
     ) -> Result<usize, OrmError> {
-        let ast = query.into_select_ast().map_err(OrmError::QueryBuild)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&QueryAst::Select(ast));
-        let sql = format!("SELECT COUNT(*) FROM ({})", compiled.sql);
-        let pool = self.pool.clone();
-        pool.get()
-            .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                let params = sqlite_params(&compiled)?;
-                connection.query_row(&sql, rusqlite::params_from_iter(params), |row| {
-                    row.get::<_, i64>(0)
-                })
-            })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map(|count| count as usize)
-            .map_err(OrmError::from)
+        let query = count_query(query)?;
+        count_rows(
+            backend::Session::acquire(&self.pool)
+                .await?
+                .query(query)
+                .await?,
+        )
     }
-
-    /// Starts a high-level insert builder.
     pub fn create<M: Model>(&self) -> CreateBuilder<'_, M> {
         CreateBuilder {
             database: self,
             query: M::insert(),
         }
     }
-
-    /// Starts a high-level update builder scoped to one primary key.
     pub fn update<M: Model>(&self, id: M::PrimaryKey) -> UpdateBuilder<'_, M> {
         UpdateBuilder {
             database: self,
             query: M::update().filter(M::primary_key().eq(id)),
         }
     }
-
-    /// Deletes one row by its typed primary key.
     pub async fn delete<M: Model + Send + 'static>(
         &self,
         id: M::PrimaryKey,
     ) -> Result<bool, OrmError> {
-        let result = self
-            .execute(
-                M::delete()
-                    .filter(M::primary_key().eq(id))
-                    .into_ast()
-                    .map_err(OrmError::QueryBuild)?,
-            )
-            .await?;
-        Ok(result.rows_affected == 1)
+        Ok(self
+            .execute(M::delete().filter(M::primary_key().eq(id)).into_ast()?)
+            .await?
+            .rows_affected
+            == 1)
     }
-
-    /// Starts a high-level typed select builder bound to this database.
     pub fn query<M: Model>(&self) -> DatabaseQuery<M> {
-        DatabaseQuery { query: M::query() }
+        DatabaseQuery::new(M::query())
     }
-
-    /// Fetches related rows by a typed model field.
-    ///
-    /// This is the low-level building block for `has_many` and `belongs_to`:
-    /// pass the foreign-key field on the target model and the owner key.
     pub async fn fetch_by<M, T, V>(
         &self,
         field: ModelField<M, T>,
@@ -242,8 +256,6 @@ impl Database {
     {
         self.fetch_all(M::query().filter(field.eq(value))).await
     }
-
-    /// Fetches rows whose typed field matches one of the supplied values.
     pub async fn fetch_by_many<M, T, I, V>(
         &self,
         field: ModelField<M, T>,
@@ -254,437 +266,445 @@ impl Database {
         I: IntoIterator<Item = V>,
         V: QueryValue<T>,
     {
-        const SQLITE_SAFE_VARIABLE_LIMIT: usize = 900;
         let values = values
             .into_iter()
             .map(QueryValue::<T>::into_query_value)
             .collect::<Vec<_>>();
-        if values.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut result = Vec::new();
-        for chunk in values.chunks(SQLITE_SAFE_VARIABLE_LIMIT) {
-            let filter = Expr::In {
-                left: Box::new(Expr::Column(field.column())),
-                values: chunk.to_vec(),
-            };
-            result.extend(self.fetch_all(M::query().filter(filter)).await?);
+        for chunk in values.chunks(backend::MAX_PARAMETERS) {
+            result.extend(
+                self.fetch_all(M::query().filter(Expr::In {
+                    left: Box::new(Expr::Column(field.column())),
+                    values: chunk.to_vec(),
+                }))
+                .await?,
+            );
         }
+        let mut seen = HashSet::new();
+        result.retain(|model| seen.insert(model.primary_key_value()));
         Ok(result)
     }
 
-    /// Runs a blocking SQLite closure in a pool worker transaction.
+    /// Runs one serializable async ORM transaction. Unfinished transactions are
+    /// rolled back before a cancelled transaction's connection is recycled.
+    /// Use `|tx| Box::pin(async move { ... })` and await transaction methods.
     pub async fn transaction<T, F>(&self, action: F) -> Result<T, OrmError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a Transaction) -> TransactionFuture<'a, T> + Send,
+    {
+        self.transaction_with_isolation(IsolationLevel::Serializable, action)
+            .await
+    }
+
+    /// SQLite uses its serializable snapshot for every requested isolation level.
+    pub async fn transaction_with_isolation<T, F>(
+        &self,
+        isolation: IsolationLevel,
+        action: F,
+    ) -> Result<T, OrmError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a Transaction) -> TransactionFuture<'a, T> + Send,
+    {
+        let session = backend::Session::acquire(&self.pool).await?;
+        let mut guard = TransactionGuard {
+            session: session.clone(),
+            active: true,
+        };
+        #[cfg(feature = "sqlite")]
+        let begin = {
+            let _ = isolation;
+            "BEGIN"
+        };
+        #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+        let begin = match isolation {
+            IsolationLevel::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
+            IsolationLevel::RepeatableRead => "BEGIN ISOLATION LEVEL REPEATABLE READ",
+            IsolationLevel::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
+        };
+        session.batch(begin).await?;
+        let transaction = Transaction { session };
+        match action(&transaction).await {
+            Ok(value) => {
+                transaction.session.commit().await?;
+                guard.active = false;
+                Ok(value)
+            }
+            Err(error) => {
+                transaction.session.batch("ROLLBACK").await?;
+                guard.active = false;
+                Err(error)
+            }
+        }
+    }
+    pub async fn typed_transaction<T, F>(&self, action: F) -> Result<T, OrmError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a Transaction) -> TransactionFuture<'a, T> + Send,
+    {
+        self.transaction(action).await
+    }
+
+    /// SQLite-only escape hatch for direct driver operations.
+    #[cfg(feature = "sqlite")]
+    pub async fn raw_transaction<T, F>(&self, action: F) -> Result<T, OrmError>
     where
         T: Send + 'static,
         F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static,
     {
-        let pool = self.pool.clone();
-        pool.get()
-            .await?
-            .interact(move |connection| -> rusqlite::Result<T> {
-                configure_connection(connection)?;
-                connection.execute_batch("BEGIN")?;
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(connection)))
-                {
-                    Ok(Ok(value)) => match connection.execute_batch("COMMIT") {
-                        Ok(()) => Ok(value),
-                        Err(error) => {
-                            let _ = connection.execute_batch("ROLLBACK");
-                            Err(error)
-                        }
-                    },
-                    Ok(Err(error)) => {
-                        let _ = connection.execute_batch("ROLLBACK");
-                        Err(error)
-                    }
-                    Err(payload) => {
-                        let _ = connection.execute_batch("ROLLBACK");
-                        std::panic::resume_unwind(payload);
-                    }
-                }
+        self.transaction(move |tx| {
+            Box::pin(async move {
+                tx.session
+                    .interact(move |connection| action(connection).map_err(Into::into))
+                    .await
             })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
+        })
+        .await
     }
-
-    /// Runs typed ORM operations on one SQLite transaction.
-    ///
-    /// Returning an error rolls back every mutation performed by `action`.
-    pub async fn typed_transaction<T, F>(&self, action: F) -> Result<T, OrmError>
-    where
-        T: Send + 'static,
-        F: FnOnce(&Transaction<'_>) -> Result<T, OrmError> + Send + 'static,
-    {
-        let pool = self.pool.clone();
-        pool.get()
+    pub async fn migrate(&self, graph: MigrationGraph) -> Result<usize, OrmError> {
+        self.migrate_to(graph, None).await
+    }
+    pub async fn migrate_to(
+        &self,
+        graph: MigrationGraph,
+        target: Option<crate::MigrationId>,
+    ) -> Result<usize, OrmError> {
+        backend::Session::acquire(&self.pool)
             .await?
-            .interact(move |connection| -> Result<T, OrmError> {
-                configure_connection(connection)?;
-                connection.execute_batch("BEGIN")?;
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    action(&Transaction { connection })
-                })) {
-                    Ok(Ok(value)) => match connection.execute_batch("COMMIT") {
-                        Ok(()) => Ok(value),
-                        Err(error) => {
-                            let _ = connection.execute_batch("ROLLBACK");
-                            Err(error.into())
-                        }
-                    },
-                    Ok(Err(error)) => {
-                        let _ = connection.execute_batch("ROLLBACK");
-                        Err(error)
-                    }
-                    Err(payload) => {
-                        let _ = connection.execute_batch("ROLLBACK");
-                        std::panic::resume_unwind(payload);
-                    }
-                }
-            })
+            .migrate(graph, target)
             .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
     }
-
-    async fn execute_compiled(&self, compiled: CompiledQuery) -> Result<ExecuteResult, OrmError> {
-        let pool = self.pool.clone();
-        pool.get()
+    pub async fn migration_history(&self) -> Result<HashMap<(String, String), String>, OrmError> {
+        backend::Session::acquire(&self.pool).await?.history().await
+    }
+    async fn rows(&self, ast: QueryAst) -> Result<Vec<Row>, OrmError> {
+        ast.validate()?;
+        backend::Session::acquire(&self.pool)
             .await?
-            .interact(move |connection| -> rusqlite::Result<ExecuteResult> {
-                configure_connection(connection)?;
-                let params = sqlite_params(&compiled)?;
-                let rows_affected =
-                    connection.execute(&compiled.sql, rusqlite::params_from_iter(params))?;
-                Ok(ExecuteResult {
-                    rows_affected,
-                    last_insert_rowid: Some(connection.last_insert_rowid()),
-                })
-            })
+            .query(SqlCompiler::<CurrentDialect>::compile(&ast))
             .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
     }
-
     async fn execute_returning<M: Model + Send + 'static>(
         &self,
         ast: QueryAst,
     ) -> Result<Option<M>, OrmError> {
-        ast.validate().map_err(OrmError::QueryBuild)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = self.pool.clone();
-        pool.get()
-            .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                let mut statement = connection.prepare(&compiled.sql)?;
-                let params = sqlite_params(&compiled)?;
-                statement
-                    .query_row(rusqlite::params_from_iter(params), M::from_row)
-                    .optional()
-            })
+        Ok(decode_models(self.rows(ast).await?)?.pop())
+    }
+}
+
+pub(crate) struct TransactionGuard {
+    pub(crate) session: backend::Session,
+    pub(crate) active: bool,
+}
+impl Drop for TransactionGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let session = self.session.clone();
+            tokio::spawn(async move {
+                let _ = session.batch("ROLLBACK").await;
+            });
+        }
+    }
+}
+
+/// ORM operations pinned to one transaction connection on either backend.
+pub struct Transaction {
+    session: backend::Session,
+}
+impl Transaction {
+    pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
+        ast.validate()?;
+        self.session
+            .execute(SqlCompiler::<CurrentDialect>::compile(&ast))
             .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
     }
-}
-
-/// Typed ORM executor bound to one SQLite transaction.
-pub struct Transaction<'connection> {
-    connection: &'connection rusqlite::Connection,
-}
-
-impl Transaction<'_> {
-    /// Executes a validated ORM query AST.
-    pub fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
-        ast.validate().map_err(OrmError::QueryBuild)?;
-        execute_compiled(self.connection, SqlCompiler::<SqliteDialect>::compile(&ast))
+    pub async fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
+        self.execute(insert_ast(model)).await
     }
-
-    /// Inserts a model, omitting generated integer keys and managed timestamps.
-    /// A UUID primary key is taken from the supplied model.
-    pub fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
-        self.execute(QueryAst::Insert(crate::InsertAst {
-            table: crate::TableRef::new(M::table_name()),
-            values: model.insert_values(),
-            returning: Vec::new(),
-        }))
+    pub async fn fetch_all<M: Model + Send + 'static>(
+        &self,
+        query: SelectQuery<M>,
+    ) -> Result<Vec<M>, OrmError> {
+        decode_models(self.rows(query.into_ast()?).await?)
     }
-
-    /// Fetches all rows matching a typed select query.
-    pub fn fetch_all<M: Model>(&self, query: SelectQuery<M>) -> Result<Vec<M>, OrmError> {
-        let ast = query.into_ast().map_err(OrmError::QueryBuild)?;
-        load_models(
-            self.connection,
-            &SqlCompiler::<SqliteDialect>::compile(&ast),
-        )
-        .map_err(OrmError::from)
+    pub async fn fetch_one<M: Model + Send + 'static>(
+        &self,
+        query: SelectQuery<M>,
+    ) -> Result<Option<M>, OrmError> {
+        Ok(self.fetch_all(query.limit(1)).await?.pop())
     }
-
-    /// Fetches at most one row matching a typed select query.
-    pub fn fetch_one<M: Model>(&self, query: SelectQuery<M>) -> Result<Option<M>, OrmError> {
-        Ok(self.fetch_all(query.limit(1))?.pop())
-    }
-
-    /// Fetches a model by its typed primary key.
-    pub fn get<M: Model>(&self, id: M::PrimaryKey) -> Result<Option<M>, OrmError> {
+    pub async fn get<M: Model + Send + 'static>(
+        &self,
+        id: M::PrimaryKey,
+    ) -> Result<Option<M>, OrmError> {
         self.fetch_one(M::query().filter(M::primary_key().eq(id)))
+            .await
     }
-
-    /// Starts a typed insert builder bound to this transaction.
+    pub async fn all<M: Model + Send + 'static>(&self) -> Result<Vec<M>, OrmError> {
+        self.fetch_all(M::query()).await
+    }
+    pub async fn count<M: Model + Send + 'static>(&self) -> Result<usize, OrmError> {
+        count_rows(self.session.query(count_query(M::query())?).await?)
+    }
+    pub async fn delete<M: Model + Send + 'static>(
+        &self,
+        id: M::PrimaryKey,
+    ) -> Result<bool, OrmError> {
+        Ok(self
+            .execute(M::delete().filter(M::primary_key().eq(id)).into_ast()?)
+            .await?
+            .rows_affected
+            == 1)
+    }
     pub fn create<M: Model>(&self) -> TransactionCreateBuilder<'_, M> {
         TransactionCreateBuilder {
-            connection: self.connection,
+            transaction: self,
             query: M::insert(),
         }
     }
-
-    /// Starts a typed update builder scoped to one primary key.
     pub fn update<M: Model>(&self, id: M::PrimaryKey) -> TransactionUpdateBuilder<'_, M> {
         TransactionUpdateBuilder {
-            connection: self.connection,
+            transaction: self,
             query: M::update().filter(M::primary_key().eq(id)),
         }
     }
-
-    /// Returns the typed select-query facade for this transaction.
     pub fn query<M: Model>(&self) -> TransactionQuery<'_, M> {
         TransactionQuery {
-            connection: self.connection,
+            transaction: self,
             query: M::query(),
         }
     }
-
-    fn execute_returning<M: Model>(&self, ast: QueryAst) -> Result<Option<M>, OrmError> {
-        ast.validate().map_err(OrmError::QueryBuild)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let mut statement = self.connection.prepare(&compiled.sql)?;
-        let params = sqlite_params(&compiled)?;
-        statement
-            .query_row(rusqlite::params_from_iter(params), M::from_row)
-            .optional()
-            .map_err(OrmError::from)
+    pub async fn fetch_by_many<M, T, I, V>(
+        &self,
+        field: ModelField<M, T>,
+        values: I,
+    ) -> Result<Vec<M>, OrmError>
+    where
+        M: Model + Send + 'static,
+        I: IntoIterator<Item = V>,
+        V: QueryValue<T>,
+    {
+        let values = values
+            .into_iter()
+            .map(QueryValue::<T>::into_query_value)
+            .collect::<Vec<_>>();
+        let mut result = Vec::new();
+        for chunk in values.chunks(backend::MAX_PARAMETERS) {
+            result.extend(
+                self.fetch_all(M::query().filter(Expr::In {
+                    left: Box::new(Expr::Column(field.column())),
+                    values: chunk.to_vec(),
+                }))
+                .await?,
+            );
+        }
+        let mut seen = HashSet::new();
+        result.retain(|model| seen.insert(model.primary_key_value()));
+        Ok(result)
+    }
+    async fn rows(&self, ast: QueryAst) -> Result<Vec<Row>, OrmError> {
+        ast.validate()?;
+        self.session
+            .query(SqlCompiler::<CurrentDialect>::compile(&ast))
+            .await
+    }
+    async fn execute_returning<M: Model + Send + 'static>(
+        &self,
+        ast: QueryAst,
+    ) -> Result<Option<M>, OrmError> {
+        Ok(decode_models(self.rows(ast).await?)?.pop())
     }
 }
 
-/// Typed insert builder bound to a [`Transaction`].
-pub struct TransactionCreateBuilder<'transaction, M> {
-    connection: &'transaction rusqlite::Connection,
-    query: crate::InsertQuery<M>,
+fn insert_ast<M: Model>(model: &M) -> QueryAst {
+    QueryAst::Insert(crate::InsertAst {
+        table: crate::TableRef::new(M::table_name()),
+        values: model.insert_values(),
+        returning: Vec::new(),
+    })
+}
+fn count_query<M: Model>(query: SelectQuery<M>) -> Result<CompiledQuery, OrmError> {
+    let ast = query.into_select_ast()?;
+    let compiled = SqlCompiler::<CurrentDialect>::compile(&QueryAst::Select(ast));
+    Ok(CompiledQuery {
+        sql: format!("SELECT COUNT(*) FROM ({}) AS che_count", compiled.sql),
+        params: compiled.params,
+    })
+}
+fn count_rows(rows: Vec<Row>) -> Result<usize, OrmError> {
+    let count: i64 = rows
+        .first()
+        .ok_or_else(|| OrmError::Interaction("count returned no row".into()))?
+        .get(0)?;
+    usize::try_from(count).map_err(|error| OrmError::Interaction(error.to_string()))
+}
+fn decode_models<M: Model>(rows: Vec<Row>) -> Result<Vec<M>, OrmError> {
+    rows.iter()
+        .map(|row| M::from_row(row).map_err(Into::into))
+        .collect()
 }
 
+pub struct TransactionCreateBuilder<'tx, M> {
+    transaction: &'tx Transaction,
+    query: crate::InsertQuery<M>,
+}
 impl<M: Model> TransactionCreateBuilder<'_, M> {
-    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
-    where
-        V: QueryValue<T>,
-    {
+    pub fn set<T, V: QueryValue<T>>(self, field: ModelField<M, T>, value: V) -> Self {
         Self {
-            connection: self.connection,
             query: self.query.set(field, value),
+            ..self
         }
     }
-
-    pub fn execute(self) -> Result<M, OrmError> {
-        Transaction {
-            connection: self.connection,
-        }
-        .execute_returning(
-            self.query
-                .returning_all()
-                .into_ast()
-                .map_err(OrmError::QueryBuild)?,
-        )?
-        .ok_or_else(|| OrmError::Interaction("insert did not return a row".into()))
-    }
-}
-
-/// Typed update builder bound to a [`Transaction`].
-pub struct TransactionUpdateBuilder<'transaction, M> {
-    connection: &'transaction rusqlite::Connection,
-    query: crate::UpdateQuery<M>,
-}
-
-impl<M: Model> TransactionUpdateBuilder<'_, M> {
-    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
-    where
-        V: QueryValue<T>,
-    {
-        Self {
-            connection: self.connection,
-            query: self.query.set(field, value),
-        }
-    }
-
-    pub fn execute(self) -> Result<Option<M>, OrmError> {
-        Transaction {
-            connection: self.connection,
-        }
-        .execute_returning(
-            self.query
-                .returning_all()
-                .into_ast()
-                .map_err(OrmError::QueryBuild)?,
-        )
-    }
-}
-
-/// Typed select-query facade bound to a [`Transaction`].
-pub struct TransactionQuery<'transaction, M> {
-    connection: &'transaction rusqlite::Connection,
-    query: SelectQuery<M>,
-}
-
-impl<M: Model> TransactionQuery<'_, M> {
-    pub fn filter(self, expr: Expr) -> Self {
-        Self {
-            connection: self.connection,
-            query: self.query.filter(expr),
-        }
-    }
-
-    pub fn order_by(self, order: crate::OrderBy) -> Self {
-        Self {
-            connection: self.connection,
-            query: self.query.order_by(order),
-        }
-    }
-
-    pub fn limit(self, limit: u64) -> Self {
-        Self {
-            connection: self.connection,
-            query: self.query.limit(limit),
-        }
-    }
-
-    pub fn all(self) -> Result<Vec<M>, OrmError> {
-        Transaction {
-            connection: self.connection,
-        }
-        .fetch_all(self.query)
-    }
-
-    pub fn first(self) -> Result<Option<M>, OrmError> {
-        Transaction {
-            connection: self.connection,
-        }
-        .fetch_one(self.query)
-    }
-}
-
-impl<M: Model + Send + 'static> ValidatedWrite<M> {
-    pub async fn save(self, database: &Database) -> Result<Option<M>, OrmError> {
-        let ast = match self {
-            Self::Create(query) => query
-                .returning_all()
-                .into_ast()
-                .map_err(OrmError::QueryBuild)?,
-            Self::Update(query) => query
-                .returning_all()
-                .into_ast()
-                .map_err(OrmError::QueryBuild)?,
-        };
-        database.execute_returning(ast).await
-    }
-}
-
-/// High-level insert builder. The executed result is the complete inserted model.
-pub struct CreateBuilder<'db, M> {
-    database: &'db Database,
-    query: crate::InsertQuery<M>,
-}
-
-impl<M: Model> CreateBuilder<'_, M> {
-    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
-    where
-        V: QueryValue<T>,
-    {
-        Self {
-            database: self.database,
-            query: self.query.set(field, value),
-        }
-    }
-
     pub async fn execute(self) -> Result<M, OrmError>
     where
         M: Send + 'static,
     {
-        let ast = self
-            .query
-            .returning_all()
-            .into_ast()
-            .map_err(OrmError::QueryBuild)?;
-        self.database
-            .execute_returning(ast)
+        self.transaction
+            .execute_returning(self.query.returning_all().into_ast()?)
             .await?
             .ok_or_else(|| OrmError::Interaction("insert did not return a row".into()))
     }
 }
-
-/// High-level update builder scoped to one model primary key.
-pub struct UpdateBuilder<'db, M> {
-    database: &'db Database,
+pub struct TransactionUpdateBuilder<'tx, M> {
+    transaction: &'tx Transaction,
     query: crate::UpdateQuery<M>,
 }
-
-impl<M: Model> UpdateBuilder<'_, M> {
-    pub fn set<T, V>(self, field: ModelField<M, T>, value: V) -> Self
-    where
-        V: QueryValue<T>,
-    {
+impl<M: Model> TransactionUpdateBuilder<'_, M> {
+    pub fn set<T, V: QueryValue<T>>(self, field: ModelField<M, T>, value: V) -> Self {
         Self {
-            database: self.database,
             query: self.query.set(field, value),
+            ..self
         }
     }
-
     pub async fn execute(self) -> Result<Option<M>, OrmError>
     where
         M: Send + 'static,
     {
-        let ast = self
-            .query
-            .returning_all()
-            .into_ast()
-            .map_err(OrmError::QueryBuild)?;
-        self.database.execute_returning(ast).await
+        self.transaction
+            .execute_returning(self.query.returning_all().into_ast()?)
+            .await
     }
 }
-
-/// High-level typed select builder bound to a database.
+pub struct TransactionQuery<'tx, M> {
+    transaction: &'tx Transaction,
+    query: SelectQuery<M>,
+}
+impl<M: Model> TransactionQuery<'_, M> {
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            query: self.query.filter(expr),
+            ..self
+        }
+    }
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            query: self.query.order_by(order),
+            ..self
+        }
+    }
+    pub fn limit(self, limit: u64) -> Self {
+        Self {
+            query: self.query.limit(limit),
+            ..self
+        }
+    }
+    pub fn offset(self, offset: u64) -> Self {
+        Self {
+            query: self.query.offset(offset),
+            ..self
+        }
+    }
+    pub async fn all(self) -> Result<Vec<M>, OrmError>
+    where
+        M: Send + 'static,
+    {
+        self.transaction.fetch_all(self.query).await
+    }
+    pub async fn first(self) -> Result<Option<M>, OrmError>
+    where
+        M: Send + 'static,
+    {
+        self.transaction.fetch_one(self.query).await
+    }
+}
+impl<M: Model + Send + 'static> ValidatedWrite<M> {
+    pub async fn save(self, database: &Database) -> Result<Option<M>, OrmError> {
+        let ast = match self {
+            Self::Create(query) => query.returning_all().into_ast()?,
+            Self::Update(query) => query.returning_all().into_ast()?,
+        };
+        database.execute_returning(ast).await
+    }
+}
+pub struct CreateBuilder<'db, M> {
+    database: &'db Database,
+    query: crate::InsertQuery<M>,
+}
+impl<M: Model> CreateBuilder<'_, M> {
+    pub fn set<T, V: QueryValue<T>>(self, field: ModelField<M, T>, value: V) -> Self {
+        Self {
+            query: self.query.set(field, value),
+            ..self
+        }
+    }
+    pub async fn execute(self) -> Result<M, OrmError>
+    where
+        M: Send + 'static,
+    {
+        self.database
+            .execute_returning(self.query.returning_all().into_ast()?)
+            .await?
+            .ok_or_else(|| OrmError::Interaction("insert did not return a row".into()))
+    }
+}
+pub struct UpdateBuilder<'db, M> {
+    database: &'db Database,
+    query: crate::UpdateQuery<M>,
+}
+impl<M: Model> UpdateBuilder<'_, M> {
+    pub fn set<T, V: QueryValue<T>>(self, field: ModelField<M, T>, value: V) -> Self {
+        Self {
+            query: self.query.set(field, value),
+            ..self
+        }
+    }
+    pub async fn execute(self) -> Result<Option<M>, OrmError>
+    where
+        M: Send + 'static,
+    {
+        self.database
+            .execute_returning(self.query.returning_all().into_ast()?)
+            .await
+    }
+}
 pub struct DatabaseQuery<M> {
     query: SelectQuery<M>,
 }
-
 impl<M: Model> DatabaseQuery<M> {
     pub fn new(query: SelectQuery<M>) -> Self {
         Self { query }
     }
-
     pub fn filter(self, expr: Expr) -> Self {
         Self {
             query: self.query.filter(expr),
         }
     }
-
     pub fn order_by(self, order: crate::OrderBy) -> Self {
         Self {
             query: self.query.order_by(order),
         }
     }
-
     pub fn limit(self, limit: u64) -> Self {
         Self {
             query: self.query.limit(limit),
         }
     }
-
     pub fn offset(self, offset: u64) -> Self {
         Self {
             query: self.query.offset(offset),
         }
     }
-
-    /// Loads one foreign-key relation without per-row queries.
     pub fn select_related<R, Relation, Key>(
         self,
         relation: BelongsTo<M, R, Relation, Key>,
@@ -694,131 +714,128 @@ impl<M: Model> DatabaseQuery<M> {
             relation,
         }
     }
-
-    /// Loads a reverse foreign-key relation with one batched query.
-    pub fn prefetch_related<P>(self, plan: P) -> P::Query
-    where
-        P: PrefetchRelation<M>,
-    {
+    pub fn prefetch_related<P: PrefetchRelation<M>>(self, plan: P) -> P::Query {
         plan.into_query(self.query)
     }
-
-    pub async fn all(self, database: &Database) -> Result<Vec<M>, OrmError>
+    pub async fn all(self, db: &Database) -> Result<Vec<M>, OrmError>
     where
         M: Send + 'static,
     {
-        database.fetch_all(self.query).await
+        db.fetch_all(self.query).await
     }
-
-    pub async fn first(self, database: &Database) -> Result<Option<M>, OrmError>
+    pub async fn first(self, db: &Database) -> Result<Option<M>, OrmError>
     where
         M: Send + 'static,
     {
-        database.fetch_one(self.query).await
+        db.fetch_one(self.query).await
     }
-
-    pub async fn count(self, database: &Database) -> Result<usize, OrmError>
+    pub async fn count(self, db: &Database) -> Result<usize, OrmError>
     where
         M: Send + 'static,
     {
-        database.count_query(self.query).await
+        db.count_query(self.query).await
     }
-
     pub fn into_select_query(self) -> SelectQuery<M> {
         self.query
     }
 }
-
 pub trait PrefetchRelation<Owner: Model> {
     type Query;
-
     fn into_query(self, query: SelectQuery<Owner>) -> Self::Query;
 }
 
-/// A model and its eagerly loaded `belongs_to` relation.
 #[derive(Debug)]
 pub struct WithOne<M, R, Relation = (), Key = i64> {
     pub model: M,
     pub related: R,
-    pub(crate) _relation: std::marker::PhantomData<Relation>,
-    pub(crate) _key: std::marker::PhantomData<Key>,
+    pub(crate) _relation: PhantomData<Relation>,
+    pub(crate) _key: PhantomData<Key>,
 }
-
 #[derive(Debug)]
 pub struct WithOptionalOne<M, R, Relation = ()> {
     pub model: M,
     pub related: Option<R>,
-    pub(crate) _relation: std::marker::PhantomData<Relation>,
+    pub(crate) _relation: PhantomData<Relation>,
 }
-
-/// A model and its eagerly loaded reverse relation.
 #[derive(Debug)]
 pub struct WithMany<M, R, Relation = (), Key = i64> {
     pub model: M,
     pub related: Vec<R>,
-    pub(crate) _relation: std::marker::PhantomData<Relation>,
-    pub(crate) _key: std::marker::PhantomData<Key>,
+    pub(crate) _relation: PhantomData<Relation>,
+    pub(crate) _key: PhantomData<Key>,
 }
-
-/// A materialized model and a tuple of preloaded relations.
 #[derive(Debug)]
 pub struct Loaded<M, Relations> {
     pub model: M,
     pub relations: Relations,
 }
-
-/// One reverse relation inside a materialized relation tuple.
 #[derive(Debug)]
 pub struct LoadedMany<R, Relation = ()> {
     pub related: Vec<R>,
-    pub(crate) _relation: std::marker::PhantomData<Relation>,
+    pub(crate) _relation: PhantomData<Relation>,
 }
-
 #[derive(Debug)]
 pub struct LoadedOne<R, Relation = ()> {
     pub related: R,
-    pub(crate) _relation: std::marker::PhantomData<Relation>,
+    pub(crate) _relation: PhantomData<Relation>,
 }
 
-/// Query which materializes a model together with one related model.
 pub struct SelectRelatedQuery<M, R, Relation = (), Key = i64> {
     query: SelectQuery<M>,
     relation: BelongsTo<M, R, Relation, Key>,
 }
-
+impl<M: Model, R, Relation, Key> SelectRelatedQuery<M, R, Relation, Key> {
+    pub fn filter(self, expr: Expr) -> Self {
+        Self {
+            query: self.query.filter(expr),
+            ..self
+        }
+    }
+    pub fn order_by(self, order: crate::OrderBy) -> Self {
+        Self {
+            query: self.query.order_by(order),
+            ..self
+        }
+    }
+    pub fn limit(self, limit: u64) -> Self {
+        Self {
+            query: self.query.limit(limit),
+            ..self
+        }
+    }
+    pub fn offset(self, offset: u64) -> Self {
+        Self {
+            query: self.query.offset(offset),
+            ..self
+        }
+    }
+    pub async fn count(self, db: &Database) -> Result<usize, OrmError>
+    where
+        M: Send + 'static,
+        R: Model,
+        Key: crate::ForeignKeyValue<R::PrimaryKey>,
+    {
+        let kind = if Key::OPTIONAL {
+            crate::JoinType::Left
+        } else {
+            crate::JoinType::Inner
+        };
+        let ast = self.query.into_joined_ast_with_kind(self.relation, kind)?;
+        let compiled = SqlCompiler::<CurrentDialect>::compile(&ast);
+        count_rows(
+            db.query_sql(
+                format!("SELECT COUNT(*) FROM ({}) AS che_count", compiled.sql),
+                compiled.params,
+            )
+            .await?,
+        )
+    }
+}
 impl<M, R, Relation, Key: crate::PrimaryKey> SelectRelatedQuery<M, R, Relation, Key>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
 {
-    pub fn filter(self, expr: Expr) -> Self {
-        Self {
-            query: self.query.filter(expr),
-            relation: self.relation,
-        }
-    }
-
-    pub fn order_by(self, order: crate::OrderBy) -> Self {
-        Self {
-            query: self.query.order_by(order),
-            relation: self.relation,
-        }
-    }
-
-    pub fn limit(self, limit: u64) -> Self {
-        Self {
-            query: self.query.limit(limit),
-            relation: self.relation,
-        }
-    }
-
-    pub fn offset(self, offset: u64) -> Self {
-        Self {
-            query: self.query.offset(offset),
-            relation: self.relation,
-        }
-    }
-
     pub fn select_related<R2: Model, Relation2>(
         self,
         relation: BelongsTo<M, R2, Relation2, R2::PrimaryKey>,
@@ -829,78 +846,83 @@ where
             second: relation,
         }
     }
-
-    pub async fn all(
-        self,
-        database: &Database,
-    ) -> Result<Vec<WithOne<M, R, Relation, Key>>, OrmError>
-    where
-        Relation: Send + 'static,
-    {
-        let ast = self
-            .query
-            .into_joined_ast(self.relation)
-            .map_err(OrmError::QueryBuild)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = database.pool.clone();
-        pool.get()
+    pub async fn all(self, db: &Database) -> Result<Vec<WithOne<M, R, Relation, Key>>, OrmError> {
+        let offset = M::columns().len();
+        db.rows(self.query.into_joined_ast(self.relation)?)
             .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                load_joined_models::<M, R, Relation, Key>(connection, &compiled)
+            .iter()
+            .map(|row| {
+                Ok(WithOne {
+                    model: M::from_row_at(row, 0)?,
+                    related: R::from_row_at(row, offset)?,
+                    _relation: PhantomData,
+                    _key: PhantomData,
+                })
             })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
-    }
-
-    pub async fn count(self, database: &Database) -> Result<usize, OrmError> {
-        database.count_query(self.query).await
+            .collect()
     }
 }
-
+impl<M, R, Relation, Key: crate::PrimaryKey> SelectRelatedQuery<M, R, Relation, Option<Key>>
+where
+    M: Model + Send + 'static,
+    R: Model + Send + 'static,
+{
+    pub async fn all(
+        self,
+        db: &Database,
+    ) -> Result<Vec<WithOptionalOne<M, R, Relation>>, OrmError> {
+        let offset = M::columns().len();
+        let pk_offset = R::columns()
+            .iter()
+            .position(|column| *column == R::primary_key().column().name)
+            .ok_or_else(|| {
+                OrmError::Interaction("primary key missing from model columns".into())
+            })?;
+        db.rows(self.query.into_optional_joined_ast(self.relation)?)
+            .await?
+            .iter()
+            .map(|row| {
+                let id: Option<R::PrimaryKey> = row.get(offset + pk_offset)?;
+                Ok(WithOptionalOne {
+                    model: M::from_row_at(row, 0)?,
+                    related: id.map(|_| R::from_row_at(row, offset)).transpose()?,
+                    _relation: PhantomData,
+                })
+            })
+            .collect()
+    }
+}
 pub struct MultiSelectRelatedQuery<M, R1, Relation1, R2: Model, Relation2, Key1 = i64> {
     query: SelectQuery<M>,
     first: BelongsTo<M, R1, Relation1, Key1>,
     second: BelongsTo<M, R2, Relation2, R2::PrimaryKey>,
 }
-
 impl<M, R1, Relation1, R2, Relation2, Key1>
     MultiSelectRelatedQuery<M, R1, Relation1, R2, Relation2, Key1>
 where
     M: Model + Send + 'static,
     R1: Model + Send + 'static,
     R2: Model + Send + 'static,
-    Relation1: Send + 'static,
-    Relation2: Send + 'static,
 {
     pub fn filter(self, expr: Expr) -> Self {
         Self {
             query: self.query.filter(expr),
-            first: self.first,
-            second: self.second,
+            ..self
         }
     }
-
     pub fn order_by(self, order: crate::OrderBy) -> Self {
         Self {
             query: self.query.order_by(order),
-            first: self.first,
-            second: self.second,
+            ..self
         }
     }
-
     pub async fn all(
         self,
-        database: &Database,
+        db: &Database,
     ) -> Result<Vec<Loaded<M, (LoadedOne<R1, Relation1>, LoadedOne<R2, Relation2>)>>, OrmError>
     {
-        let first = self.first;
         let second = self.second;
-        let mut ast = self
-            .query
-            .into_joined_ast(first)
-            .map_err(OrmError::QueryBuild)?;
+        let mut ast = self.query.into_joined_ast(self.first)?;
         if let QueryAst::Select(select) = &mut ast {
             select.columns.extend(
                 R2::columns()
@@ -912,103 +934,46 @@ where
                 alias: second.alias(),
                 kind: crate::JoinType::Inner,
                 on: crate::Expr::Compare {
-                    left: Box::new(crate::Expr::Column(second.field())),
+                    left: Box::new(Expr::Column(second.field())),
                     op: crate::CompareOp::Eq,
-                    right: Box::new(crate::Expr::Column(crate::ColumnRef::new(
+                    right: Box::new(Expr::Column(crate::ColumnRef::new(
                         second.alias(),
                         R2::primary_key().column().name,
                     ))),
                 },
             });
         }
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = database.pool.clone();
-        pool.get()
+        let offset = M::columns().len();
+        db.rows(ast)
             .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                load_multi_joined_models::<M, R1, Relation1, R2, Relation2>(connection, &compiled)
+            .iter()
+            .map(|row| {
+                Ok(Loaded {
+                    model: M::from_row_at(row, 0)?,
+                    relations: (
+                        LoadedOne {
+                            related: R1::from_row_at(row, offset)?,
+                            _relation: PhantomData,
+                        },
+                        LoadedOne {
+                            related: R2::from_row_at(row, offset + R1::columns().len())?,
+                            _relation: PhantomData,
+                        },
+                    ),
+                })
             })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
+            .collect()
     }
 }
 
-impl<M, R, Relation, Key: crate::PrimaryKey> SelectRelatedQuery<M, R, Relation, Option<Key>>
-where
-    M: Model + Send + 'static,
-    R: Model + Send + 'static,
-{
-    pub fn filter(self, expr: Expr) -> Self {
-        Self {
-            query: self.query.filter(expr),
-            relation: self.relation,
-        }
-    }
-
-    pub fn order_by(self, order: crate::OrderBy) -> Self {
-        Self {
-            query: self.query.order_by(order),
-            relation: self.relation,
-        }
-    }
-
-    pub fn limit(self, limit: u64) -> Self {
-        Self {
-            query: self.query.limit(limit),
-            relation: self.relation,
-        }
-    }
-
-    pub fn offset(self, offset: u64) -> Self {
-        Self {
-            query: self.query.offset(offset),
-            relation: self.relation,
-        }
-    }
-
-    pub async fn all(
-        self,
-        database: &Database,
-    ) -> Result<Vec<WithOptionalOne<M, R, Relation>>, OrmError>
-    where
-        Relation: Send + 'static,
-    {
-        let ast = self
-            .query
-            .into_optional_joined_ast(self.relation)
-            .map_err(OrmError::QueryBuild)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        let pool = database.pool.clone();
-        pool.get()
-            .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                load_optional_joined_models::<M, R, Relation>(connection, &compiled)
-            })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
-    }
-
-    pub async fn count(self, database: &Database) -> Result<usize, OrmError> {
-        database.count_query(self.query).await
-    }
-}
-
-/// Query which materializes a model together with its reverse relation.
 pub struct PrefetchRelatedQuery<M, R, Relation = (), Key = i64> {
     query: SelectQuery<M>,
     relation: HasMany<M, R, Relation, Key>,
 }
-
-impl<M: Model, R, Relation, Key> PrefetchRelation<M> for HasMany<M, R, Relation, Key>
-where
-    Key: crate::ForeignKeyValue<M::PrimaryKey>,
+impl<M: Model, R, Relation, Key: crate::ForeignKeyValue<M::PrimaryKey>> PrefetchRelation<M>
+    for HasMany<M, R, Relation, Key>
 {
     type Query = PrefetchRelatedQuery<M, R, Relation, Key>;
-
     fn into_query(self, query: SelectQuery<M>) -> Self::Query {
         PrefetchRelatedQuery {
             query,
@@ -1016,66 +981,26 @@ where
         }
     }
 }
-
-pub struct NestedPrefetchPlan<
-    M: Model,
-    R: Model,
-    Relation,
-    C,
-    ChildRelation,
-    OuterKey = <M as Model>::PrimaryKey,
-    InnerKey = <R as Model>::PrimaryKey,
-> {
-    outer: HasMany<M, R, Relation, OuterKey>,
-    inner: HasMany<R, C, ChildRelation, InnerKey>,
+fn ids<M: Model>(models: &[M]) -> Vec<M::PrimaryKey> {
+    models
+        .iter()
+        .map(Model::primary_key_value)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
 }
-
-impl<M: Model, R: Model, Relation, Key> HasMany<M, R, Relation, Key>
-where
-    Key: crate::ForeignKeyValue<M::PrimaryKey>,
-{
-    pub fn prefetch<C, ChildRelation, InnerKey>(
-        self,
-        inner: HasMany<R, C, ChildRelation, InnerKey>,
-    ) -> NestedPrefetchPlan<M, R, Relation, C, ChildRelation, Key, InnerKey>
-    where
-        InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
-    {
-        NestedPrefetchPlan { outer: self, inner }
-    }
-}
-
-impl<M: Model, R: Model, Relation, C, ChildRelation, OuterKey, InnerKey> PrefetchRelation<M>
-    for NestedPrefetchPlan<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
-where
-    OuterKey: crate::ForeignKeyValue<M::PrimaryKey>,
-    InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
-{
-    type Query = NestedPrefetchQuery<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>;
-
-    fn into_query(self, query: SelectQuery<M>) -> Self::Query {
-        NestedPrefetchQuery {
-            query,
-            outer: self.outer,
-            inner: self.inner,
+fn group<M: Model, R, Relation, Key: crate::ForeignKeyValue<M::PrimaryKey>>(
+    relation: &HasMany<M, R, Relation, Key>,
+    models: Vec<R>,
+) -> HashMap<M::PrimaryKey, Vec<R>> {
+    let mut grouped = HashMap::<M::PrimaryKey, Vec<R>>::new();
+    for model in models {
+        if let Some(key) = crate::ForeignKeyValue::owner_key(relation.foreign_key(&model)) {
+            grouped.entry(key).or_default().push(model);
         }
     }
+    grouped
 }
-
-pub struct NestedPrefetchQuery<
-    M: Model,
-    R: Model,
-    Relation,
-    C,
-    ChildRelation,
-    OuterKey = <M as Model>::PrimaryKey,
-    InnerKey = <R as Model>::PrimaryKey,
-> {
-    query: SelectQuery<M>,
-    outer: HasMany<M, R, Relation, OuterKey>,
-    inner: HasMany<R, C, ChildRelation, InnerKey>,
-}
-
 impl<M, R, Relation, Key> PrefetchRelatedQuery<M, R, Relation, Key>
 where
     M: Model + Send + 'static,
@@ -1085,120 +1010,76 @@ where
     pub fn filter(self, expr: Expr) -> Self {
         Self {
             query: self.query.filter(expr),
-            relation: self.relation,
+            ..self
         }
     }
-
     pub fn order_by(self, order: crate::OrderBy) -> Self {
         Self {
             query: self.query.order_by(order),
-            relation: self.relation,
+            ..self
         }
     }
-
     pub fn limit(self, limit: u64) -> Self {
         Self {
             query: self.query.limit(limit),
-            relation: self.relation,
+            ..self
         }
     }
-
     pub fn offset(self, offset: u64) -> Self {
         Self {
             query: self.query.offset(offset),
-            relation: self.relation,
+            ..self
         }
     }
-
-    pub fn prefetch_related<R2, Relation2, Key2>(
+    pub fn prefetch_related<R2, Relation2, Key2: crate::ForeignKeyValue<M::PrimaryKey>>(
         self,
         relation: HasMany<M, R2, Relation2, Key2>,
-    ) -> MultiPrefetchRelatedQuery<M, R, Relation, R2, Relation2, Key, Key2>
-    where
-        Key2: crate::ForeignKeyValue<M::PrimaryKey>,
-    {
+    ) -> MultiPrefetchRelatedQuery<M, R, Relation, R2, Relation2, Key, Key2> {
         MultiPrefetchRelatedQuery {
             query: self.query,
             first: self.relation,
             second: relation,
         }
     }
-
+    pub async fn count(self, db: &Database) -> Result<usize, OrmError> {
+        db.count_query(self.query).await
+    }
     pub async fn all(
         self,
-        database: &Database,
+        db: &Database,
     ) -> Result<Vec<Loaded<M, (LoadedMany<R, Relation>,)>>, OrmError>
     where
         Relation: Send + 'static,
     {
-        let parent_ast = self.query.into_ast().map_err(OrmError::QueryBuild)?;
-        let parent_compiled = SqlCompiler::<SqliteDialect>::compile(&parent_ast);
-        let relation = self.relation;
-        let pool = database.pool.clone();
-        pool.get()
-            .await?
-            .interact(move |connection| {
-                configure_connection(connection)?;
-                connection.execute_batch("BEGIN")?;
-                let result: rusqlite::Result<Vec<Loaded<M, (LoadedMany<R, Relation>,)>>> = (|| {
-                    let parents = load_models::<M>(connection, &parent_compiled)?;
-                    let parent_ids = parents
-                        .iter()
-                        .map(Model::primary_key_value)
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    let field = relation.field();
-                    let related = load_models_by_ids(
-                        connection,
+        db.transaction(move |tx| {
+            Box::pin(async move {
+                let parents = tx.fetch_all(self.query).await?;
+                let field = self.relation.field();
+                let related = tx
+                    .fetch_by_many(
                         ModelField::<R, M::PrimaryKey>::new(field.table, field.name),
-                        parent_ids,
-                    )?;
-                    let mut related_by_parent = HashMap::<M::PrimaryKey, Vec<R>>::new();
-                    for model in related {
-                        if let Some(key) =
-                            crate::ForeignKeyValue::owner_key(relation.foreign_key(&model))
-                        {
-                            related_by_parent.entry(key).or_default().push(model);
+                        ids(&parents),
+                    )
+                    .await?;
+                let mut related = group(&self.relation, related);
+                Ok(parents
+                    .into_iter()
+                    .map(|model| {
+                        let key = model.primary_key_value();
+                        Loaded {
+                            model,
+                            relations: (LoadedMany {
+                                related: related.remove(&key).unwrap_or_default(),
+                                _relation: PhantomData,
+                            },),
                         }
-                    }
-                    Ok(parents
-                        .into_iter()
-                        .map(|model| {
-                            let id = model.primary_key_value();
-                            Loaded {
-                                model,
-                                relations: (LoadedMany {
-                                    related: related_by_parent.remove(&id).unwrap_or_default(),
-                                    _relation: std::marker::PhantomData,
-                                },),
-                            }
-                        })
-                        .collect())
-                })(
-                );
-                match result {
-                    Ok(value) => {
-                        connection.execute_batch("COMMIT")?;
-                        Ok(value)
-                    }
-                    Err(error) => {
-                        let _ = connection.execute_batch("ROLLBACK");
-                        Err(error)
-                    }
-                }
+                    })
+                    .collect())
             })
-            .await
-            .map_err(|error| OrmError::Interaction(error.to_string()))?
-            .map_err(OrmError::from)
-    }
-
-    pub async fn count(self, database: &Database) -> Result<usize, OrmError> {
-        database.count_query(self.query).await
+        })
+        .await
     }
 }
-
-/// Query which materializes two reverse relations in one typed result.
 pub struct MultiPrefetchRelatedQuery<
     M: Model,
     R1,
@@ -1212,95 +1093,6 @@ pub struct MultiPrefetchRelatedQuery<
     first: HasMany<M, R1, Relation1, Key1>,
     second: HasMany<M, R2, Relation2, Key2>,
 }
-
-impl<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
-    NestedPrefetchQuery<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
-where
-    M: Model + Send + 'static,
-    R: Model + Send + 'static,
-    C: Model + Send + 'static,
-    Relation: Send + 'static,
-    ChildRelation: Send + 'static,
-    OuterKey: crate::ForeignKeyValue<M::PrimaryKey>,
-    InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
-{
-    pub async fn all(
-        self,
-        database: &Database,
-    ) -> Result<
-        Vec<Loaded<M, (LoadedMany<Loaded<R, (LoadedMany<C, ChildRelation>,)>, Relation>,)>>,
-        OrmError,
-    > {
-        let parents = database.fetch_all(self.query).await?;
-        let parent_ids = parents
-            .iter()
-            .map(Model::primary_key_value)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let outer_field = self.outer.field();
-        let children = database
-            .fetch_by_many(
-                ModelField::<R, M::PrimaryKey>::new(outer_field.table, outer_field.name),
-                parent_ids,
-            )
-            .await?;
-        let child_ids = children
-            .iter()
-            .map(Model::primary_key_value)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let inner_field = self.inner.field();
-        let grandchildren = database
-            .fetch_by_many(
-                ModelField::<C, R::PrimaryKey>::new(inner_field.table, inner_field.name),
-                child_ids,
-            )
-            .await?;
-        let mut grandchildren_by_child = HashMap::<R::PrimaryKey, Vec<C>>::new();
-        for model in grandchildren {
-            if let Some(key) = crate::ForeignKeyValue::owner_key(self.inner.foreign_key(&model)) {
-                grandchildren_by_child.entry(key).or_default().push(model);
-            }
-        }
-        let children = children
-            .into_iter()
-            .map(|model| {
-                let id = model.primary_key_value();
-                Loaded {
-                    model,
-                    relations: (LoadedMany {
-                        related: grandchildren_by_child.remove(&id).unwrap_or_default(),
-                        _relation: std::marker::PhantomData,
-                    },),
-                }
-            })
-            .collect::<Vec<_>>();
-        let mut children_by_parent = HashMap::<M::PrimaryKey, Vec<_>>::new();
-        for child in children {
-            if let Some(key) =
-                crate::ForeignKeyValue::owner_key(self.outer.foreign_key(&child.model))
-            {
-                children_by_parent.entry(key).or_default().push(child);
-            }
-        }
-        Ok(parents
-            .into_iter()
-            .map(|model| {
-                let id = model.primary_key_value();
-                Loaded {
-                    model,
-                    relations: (LoadedMany {
-                        related: children_by_parent.remove(&id).unwrap_or_default(),
-                        _relation: std::marker::PhantomData,
-                    },),
-                }
-            })
-            .collect())
-    }
-}
-
 impl<M, R1, Relation1, R2, Relation2, Key1, Key2>
     MultiPrefetchRelatedQuery<M, R1, Relation1, R2, Relation2, Key1, Key2>
 where
@@ -1314,200 +1106,175 @@ where
 {
     pub async fn all(
         self,
-        database: &Database,
+        db: &Database,
     ) -> Result<Vec<Loaded<M, (LoadedMany<R1, Relation1>, LoadedMany<R2, Relation2>)>>, OrmError>
     {
-        let parents = database.fetch_all(self.query).await?;
-        let parent_ids = parents
-            .iter()
-            .map(Model::primary_key_value)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let first_field = self.first.field();
-        let second_field = self.second.field();
-        let first = database
-            .fetch_by_many(
-                ModelField::<R1, M::PrimaryKey>::new(first_field.table, first_field.name),
-                parent_ids.clone(),
-            )
-            .await?;
-        let second = database
-            .fetch_by_many(
-                ModelField::<R2, M::PrimaryKey>::new(second_field.table, second_field.name),
-                parent_ids,
-            )
-            .await?;
-        let mut first_by_parent = HashMap::<M::PrimaryKey, Vec<R1>>::new();
-        for model in first {
-            if let Some(key) = crate::ForeignKeyValue::owner_key(self.first.foreign_key(&model)) {
-                first_by_parent.entry(key).or_default().push(model);
-            }
+        db.transaction(move |tx| {
+            Box::pin(async move {
+                let parents = tx.fetch_all(self.query).await?;
+                let keys = ids(&parents);
+                let field = self.first.field();
+                let first = tx
+                    .fetch_by_many(
+                        ModelField::<R1, M::PrimaryKey>::new(field.table, field.name),
+                        keys.clone(),
+                    )
+                    .await?;
+                let field = self.second.field();
+                let second = tx
+                    .fetch_by_many(
+                        ModelField::<R2, M::PrimaryKey>::new(field.table, field.name),
+                        keys,
+                    )
+                    .await?;
+                let mut first = group(&self.first, first);
+                let mut second = group(&self.second, second);
+                Ok(parents
+                    .into_iter()
+                    .map(|model| {
+                        let key = model.primary_key_value();
+                        Loaded {
+                            model,
+                            relations: (
+                                LoadedMany {
+                                    related: first.remove(&key).unwrap_or_default(),
+                                    _relation: PhantomData,
+                                },
+                                LoadedMany {
+                                    related: second.remove(&key).unwrap_or_default(),
+                                    _relation: PhantomData,
+                                },
+                            ),
+                        }
+                    })
+                    .collect())
+            })
+        })
+        .await
+    }
+}
+pub struct NestedPrefetchPlan<
+    M: Model,
+    R: Model,
+    Relation,
+    C,
+    ChildRelation,
+    OuterKey = <M as Model>::PrimaryKey,
+    InnerKey = <R as Model>::PrimaryKey,
+> {
+    outer: HasMany<M, R, Relation, OuterKey>,
+    inner: HasMany<R, C, ChildRelation, InnerKey>,
+}
+impl<M: Model, R: Model, Relation, Key: crate::ForeignKeyValue<M::PrimaryKey>>
+    HasMany<M, R, Relation, Key>
+{
+    pub fn prefetch<C, ChildRelation, InnerKey: crate::ForeignKeyValue<R::PrimaryKey>>(
+        self,
+        inner: HasMany<R, C, ChildRelation, InnerKey>,
+    ) -> NestedPrefetchPlan<M, R, Relation, C, ChildRelation, Key, InnerKey> {
+        NestedPrefetchPlan { outer: self, inner }
+    }
+}
+impl<
+    M: Model,
+    R: Model,
+    Relation,
+    C,
+    ChildRelation,
+    OuterKey: crate::ForeignKeyValue<M::PrimaryKey>,
+    InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
+> PrefetchRelation<M> for NestedPrefetchPlan<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
+{
+    type Query = NestedPrefetchQuery<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>;
+    fn into_query(self, query: SelectQuery<M>) -> Self::Query {
+        NestedPrefetchQuery {
+            query,
+            outer: self.outer,
+            inner: self.inner,
         }
-        let mut second_by_parent = HashMap::<M::PrimaryKey, Vec<R2>>::new();
-        for model in second {
-            if let Some(key) = crate::ForeignKeyValue::owner_key(self.second.foreign_key(&model)) {
-                second_by_parent.entry(key).or_default().push(model);
-            }
-        }
-
-        Ok(parents
-            .into_iter()
-            .map(|model| {
-                let id = model.primary_key_value();
-                Loaded {
-                    model,
-                    relations: (
-                        LoadedMany {
-                            related: first_by_parent.remove(&id).unwrap_or_default(),
-                            _relation: std::marker::PhantomData,
-                        },
-                        LoadedMany {
-                            related: second_by_parent.remove(&id).unwrap_or_default(),
-                            _relation: std::marker::PhantomData,
-                        },
-                    ),
+    }
+}
+pub struct NestedPrefetchQuery<
+    M: Model,
+    R: Model,
+    Relation,
+    C,
+    ChildRelation,
+    OuterKey = <M as Model>::PrimaryKey,
+    InnerKey = <R as Model>::PrimaryKey,
+> {
+    query: SelectQuery<M>,
+    outer: HasMany<M, R, Relation, OuterKey>,
+    inner: HasMany<R, C, ChildRelation, InnerKey>,
+}
+impl<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
+    NestedPrefetchQuery<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
+where
+    M: Model + Send + 'static,
+    R: Model + Send + 'static,
+    C: Model + Send + 'static,
+    Relation: Send + 'static,
+    ChildRelation: Send + 'static,
+    OuterKey: crate::ForeignKeyValue<M::PrimaryKey>,
+    InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
+{
+    pub async fn all(
+        self,
+        db: &Database,
+    ) -> Result<
+        Vec<Loaded<M, (LoadedMany<Loaded<R, (LoadedMany<C, ChildRelation>,)>, Relation>,)>>,
+        OrmError,
+    > {
+        db.transaction(move |tx| {
+            Box::pin(async move {
+                let parents = tx.fetch_all(self.query).await?;
+                let field = self.outer.field();
+                let children = tx
+                    .fetch_by_many(
+                        ModelField::<R, M::PrimaryKey>::new(field.table, field.name),
+                        ids(&parents),
+                    )
+                    .await?;
+                let field = self.inner.field();
+                let grandchildren = tx
+                    .fetch_by_many(
+                        ModelField::<C, R::PrimaryKey>::new(field.table, field.name),
+                        ids(&children),
+                    )
+                    .await?;
+                let mut grandchildren = group(&self.inner, grandchildren);
+                let mut grouped = HashMap::<M::PrimaryKey, Vec<_>>::new();
+                for model in children {
+                    if let Some(owner) =
+                        crate::ForeignKeyValue::owner_key(self.outer.foreign_key(&model))
+                    {
+                        let related = grandchildren
+                            .remove(&model.primary_key_value())
+                            .unwrap_or_default();
+                        grouped.entry(owner).or_default().push(Loaded {
+                            model,
+                            relations: (LoadedMany {
+                                related,
+                                _relation: PhantomData,
+                            },),
+                        });
+                    }
                 }
+                Ok(parents
+                    .into_iter()
+                    .map(|model| {
+                        let key = model.primary_key_value();
+                        Loaded {
+                            model,
+                            relations: (LoadedMany {
+                                related: grouped.remove(&key).unwrap_or_default(),
+                                _relation: PhantomData,
+                            },),
+                        }
+                    })
+                    .collect())
             })
-            .collect())
-    }
-}
-
-fn load_joined_models<M: Model, R: Model, Relation, Key>(
-    connection: &rusqlite::Connection,
-    compiled: &CompiledQuery,
-) -> rusqlite::Result<Vec<WithOne<M, R, Relation, Key>>> {
-    let mut statement = connection.prepare(&compiled.sql)?;
-    let params = sqlite_params(compiled)?;
-    let offset = M::columns().len();
-    let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
-        Ok(WithOne {
-            model: M::from_row_at(row, 0)?,
-            related: R::from_row_at(row, offset)?,
-            _relation: std::marker::PhantomData,
-            _key: std::marker::PhantomData,
         })
-    })?;
-    rows.collect()
-}
-
-fn load_optional_joined_models<M: Model, R: Model, Relation>(
-    connection: &rusqlite::Connection,
-    compiled: &CompiledQuery,
-) -> rusqlite::Result<Vec<WithOptionalOne<M, R, Relation>>> {
-    let mut statement = connection.prepare(&compiled.sql)?;
-    let params = sqlite_params(compiled)?;
-    let offset = M::columns().len();
-    let related_primary_key_offset = R::columns()
-        .iter()
-        .position(|column| *column == R::primary_key().column().name)
-        .expect("primary key must be one of the model columns");
-    let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
-        let related_id: Option<R::PrimaryKey> = row.get(offset + related_primary_key_offset)?;
-        Ok(WithOptionalOne {
-            model: M::from_row_at(row, 0)?,
-            related: related_id
-                .map(|_| R::from_row_at(row, offset))
-                .transpose()?,
-            _relation: std::marker::PhantomData,
-        })
-    })?;
-    rows.collect()
-}
-
-fn load_multi_joined_models<M: Model, R1: Model, Relation1, R2: Model, Relation2>(
-    connection: &rusqlite::Connection,
-    compiled: &CompiledQuery,
-) -> rusqlite::Result<Vec<Loaded<M, (LoadedOne<R1, Relation1>, LoadedOne<R2, Relation2>)>>> {
-    let mut statement = connection.prepare(&compiled.sql)?;
-    let params = sqlite_params(compiled)?;
-    let first_offset = M::columns().len();
-    let second_offset = first_offset + R1::columns().len();
-    let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
-        Ok(Loaded {
-            model: M::from_row_at(row, 0)?,
-            relations: (
-                LoadedOne {
-                    related: R1::from_row_at(row, first_offset)?,
-                    _relation: std::marker::PhantomData,
-                },
-                LoadedOne {
-                    related: R2::from_row_at(row, second_offset)?,
-                    _relation: std::marker::PhantomData,
-                },
-            ),
-        })
-    })?;
-    rows.collect()
-}
-
-fn load_models<M: Model>(
-    connection: &rusqlite::Connection,
-    compiled: &CompiledQuery,
-) -> rusqlite::Result<Vec<M>> {
-    let mut statement = connection.prepare(&compiled.sql)?;
-    let params = sqlite_params(compiled)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(params), M::from_row)?;
-    rows.collect()
-}
-
-fn load_models_by_ids<M: Model, Key: crate::PrimaryKey>(
-    connection: &rusqlite::Connection,
-    field: ModelField<M, Key>,
-    ids: Vec<Key>,
-) -> rusqlite::Result<Vec<M>> {
-    const SQLITE_SAFE_VARIABLE_LIMIT: usize = 900;
-    let mut result = Vec::new();
-    for chunk in ids.chunks(SQLITE_SAFE_VARIABLE_LIMIT) {
-        let ast = M::query()
-            .filter(Expr::In {
-                left: Box::new(Expr::Column(field.column())),
-                values: chunk
-                    .iter()
-                    .copied()
-                    .map(QueryValue::into_query_value)
-                    .collect(),
-            })
-            .into_ast()
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let compiled = SqlCompiler::<SqliteDialect>::compile(&ast);
-        result.extend(load_models(connection, &compiled)?);
-    }
-    Ok(result)
-}
-
-fn configure_connection(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("PRAGMA foreign_keys = ON")
-}
-
-fn execute_compiled(
-    connection: &rusqlite::Connection,
-    compiled: CompiledQuery,
-) -> Result<ExecuteResult, OrmError> {
-    let params = sqlite_params(&compiled)?;
-    let rows_affected = connection.execute(&compiled.sql, rusqlite::params_from_iter(params))?;
-    Ok(ExecuteResult {
-        rows_affected,
-        last_insert_rowid: Some(connection.last_insert_rowid()),
-    })
-}
-
-fn sqlite_params(compiled: &CompiledQuery) -> rusqlite::Result<Vec<Value>> {
-    compiled.params.iter().map(database_value).collect()
-}
-
-fn database_value(value: &DatabaseValue) -> rusqlite::Result<Value> {
-    match value {
-        DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
-        DatabaseValue::Real(value) => Ok(Value::Real(*value)),
-        DatabaseValue::Text(value) => Ok(Value::Text(value.clone())),
-        DatabaseValue::Binary(value) => Ok(Value::Blob(value.clone())),
-        DatabaseValue::Uuid(value) => Ok(Value::Blob(value.as_bytes().to_vec())),
-        DatabaseValue::Boolean(value) => Ok(Value::Integer(i64::from(*value))),
-        DatabaseValue::DateTime(value) => value
-            .format(&Rfc3339)
-            .map(Value::Text)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into())),
-        DatabaseValue::Null => Ok(Value::Null),
+        .await
     }
 }

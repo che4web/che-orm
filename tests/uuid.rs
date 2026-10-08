@@ -136,7 +136,8 @@ fn uuid_schema_and_insert_compile_for_both_dialects() {
     assert!(sqlite.contains("user_uuid BLOB PRIMARY KEY NOT NULL"));
     assert!(sqlite.contains("user_id BLOB NOT NULL REFERENCES uuid_users(user_uuid)"));
     let postgres = schema.to_sql::<PostgresDialect>();
-    assert!(postgres.contains("user_uuid UUID PRIMARY KEY NOT NULL"));
+    assert!(postgres.contains(r#""user_uuid" UUID CONSTRAINT "#));
+    assert!(postgres.contains("PRIMARY KEY NOT NULL"));
     assert!(
         !SqlCompiler::<PostgresDialect>::compile(&User::create_table().into_ast())
             .sql
@@ -153,7 +154,7 @@ fn uuid_schema_and_insert_compile_for_both_dialects() {
     );
     assert_eq!(
         postgres.sql,
-        "INSERT INTO uuid_users (name, user_uuid) VALUES ($1, $2)"
+        r#"INSERT INTO "uuid_users" ("name", "user_uuid") VALUES ($1, $2)"#
     );
     let DatabaseValue::Uuid(id) = sqlite.params[1] else {
         panic!("missing generated UUID")
@@ -187,7 +188,7 @@ fn uuid_schema_and_insert_compile_for_both_dialects() {
     assert!(
         SqlCompiler::<PostgresDialect>::compile(&joined)
             .sql
-            .contains("uuid_posts.user_id = user.user_uuid")
+            .contains(r#""uuid_posts"."user_id" = "user"."user_uuid""#)
     );
 }
 
@@ -233,6 +234,7 @@ fn uuid_json_and_write_modes_are_typed() {
 }
 
 #[test]
+#[cfg(feature = "sqlite")]
 fn uuid_migration_state_and_sql_preserve_uuid_identity() {
     use che_orm::{Migration, MigrationId, MigrationOperation, ProjectState, SqliteSchemaEditor};
     let state = ProjectState::from_schema(&SchemaSet::new().model::<User>());
@@ -289,13 +291,18 @@ fn uuid_migration_state_and_sql_preserve_uuid_identity() {
         connection.execute_batch(statement).unwrap();
     }
     let loaded = connection
-        .query_row("SELECT name, user_uuid FROM uuid_users", [], User::from_row)
+        .query_row(
+            "SELECT name, user_uuid FROM uuid_users",
+            [],
+            User::from_sqlite_row,
+        )
         .unwrap();
     assert_eq!(loaded.id, id);
     assert_eq!(loaded.name, "Alice");
 }
 
 #[test]
+#[cfg(feature = "sqlite")]
 fn malformed_uuid_blobs_and_text_are_rejected_on_read() {
     let connection = che_orm::rusqlite::Connection::open_in_memory().unwrap();
     connection
@@ -314,7 +321,11 @@ fn malformed_uuid_blobs_and_text_are_rejected_on_read() {
             .unwrap();
         assert!(
             connection
-                .query_row("SELECT name, user_uuid FROM uuid_users", [], User::from_row)
+                .query_row(
+                    "SELECT name, user_uuid FROM uuid_users",
+                    [],
+                    User::from_sqlite_row
+                )
                 .is_err()
         );
     }
@@ -363,8 +374,10 @@ mod runtime {
             .await
     }
 
-    fn database() -> Database {
-        Database::connect_with_pool_size(":memory:", 1).unwrap()
+    async fn database() -> Database {
+        Database::connect_with_pool_size(":memory:", 1)
+            .await
+            .unwrap()
     }
 
     #[test]
@@ -431,14 +444,18 @@ mod runtime {
             0
         );
         let user = connection
-            .query_row("SELECT name, user_uuid FROM uuid_users", [], User::from_row)
+            .query_row(
+                "SELECT name, user_uuid FROM uuid_users",
+                [],
+                User::from_sqlite_row,
+            )
             .unwrap();
         assert_eq!(user.id, id);
         let post = connection
             .query_row(
                 "SELECT id, user_id, editor_id, title FROM uuid_posts",
                 [],
-                Post::from_row,
+                Post::from_sqlite_row,
             )
             .unwrap();
         assert_eq!(post.user_id, id);
@@ -460,22 +477,26 @@ mod runtime {
 
     #[tokio::test]
     async fn uuid_prefetch_chunks_large_parent_key_sets() {
-        let db = database();
+        let db = database().await;
         db.create_table::<User>().await.unwrap();
         db.create_table::<Post>().await.unwrap();
         db.typed_transaction(|tx| {
-            for index in 0..901 {
-                let user = tx
-                    .create::<User>()
-                    .set(User::NAME, format!("User {index}"))
-                    .execute()?;
-                tx.create::<Post>()
-                    .set(Post::USER_ID, user.id)
-                    .set(Post::EDITOR_ID, user.id)
-                    .set(Post::TITLE, "Post")
-                    .execute()?;
-            }
-            Ok(())
+            Box::pin(async move {
+                for index in 0..901 {
+                    let user = tx
+                        .create::<User>()
+                        .set(User::NAME, format!("User {index}"))
+                        .execute()
+                        .await?;
+                    tx.create::<Post>()
+                        .set(Post::USER_ID, user.id)
+                        .set(Post::EDITOR_ID, user.id)
+                        .set(Post::TITLE, "Post")
+                        .execute()
+                        .await?;
+                }
+                Ok(())
+            })
         })
         .await
         .unwrap();
@@ -494,7 +515,7 @@ mod runtime {
 
     #[tokio::test]
     async fn uuid_crud_preserves_keys_and_uses_16_byte_blobs() {
-        let db = database();
+        let db = database().await;
         db.create_table::<User>().await.unwrap();
         let first = db
             .create::<User>()
@@ -512,7 +533,7 @@ mod runtime {
         assert_eq!(second.id.get_version_num(), 7);
         assert_ne!(first.id, second.id);
         let stored = db
-            .transaction(|conn| {
+            .raw_transaction(|conn| {
                 conn.query_row(
                     "SELECT typeof(user_uuid), length(user_uuid) FROM uuid_users LIMIT 1",
                     [],
@@ -577,34 +598,44 @@ mod runtime {
 
     #[tokio::test]
     async fn uuid_transactions_and_serializer_writes() {
-        let db = database();
+        let db = database().await;
         db.create_table::<User>().await.unwrap();
         let id = db
             .typed_transaction(|tx| {
-                let user = tx.create::<User>().set(User::NAME, "Initial").execute()?;
-                assert_eq!(user.id.get_version_num(), 7);
-                tx.update::<User>(user.id)
-                    .set(User::NAME, "Committed")
-                    .execute()?;
-                assert_eq!(tx.get::<User>(user.id)?.unwrap().name, "Committed");
-                let supplied = User {
-                    id: Uuid::now_v7(),
-                    name: "Supplied".into(),
-                };
-                tx.insert(&supplied)?;
-                assert!(tx.get::<User>(supplied.id)?.is_some());
-                Ok(user.id)
+                Box::pin(async move {
+                    let user = tx
+                        .create::<User>()
+                        .set(User::NAME, "Initial")
+                        .execute()
+                        .await?;
+                    assert_eq!(user.id.get_version_num(), 7);
+                    tx.update::<User>(user.id)
+                        .set(User::NAME, "Committed")
+                        .execute()
+                        .await?;
+                    assert_eq!(tx.get::<User>(user.id).await?.unwrap().name, "Committed");
+                    let supplied = User {
+                        id: Uuid::now_v7(),
+                        name: "Supplied".into(),
+                    };
+                    tx.insert(&supplied).await?;
+                    assert!(tx.get::<User>(supplied.id).await?.is_some());
+                    Ok(user.id)
+                })
             })
             .await
             .unwrap();
         let rolled_back = Uuid::now_v7();
         let result: Result<(), che_orm::OrmError> = db
             .typed_transaction(move |tx| {
-                tx.create::<User>()
-                    .set(User::ID, rolled_back)
-                    .set(User::NAME, "Rollback")
-                    .execute()?;
-                Err(che_orm::rusqlite::Error::InvalidQuery.into())
+                Box::pin(async move {
+                    tx.create::<User>()
+                        .set(User::ID, rolled_back)
+                        .set(User::NAME, "Rollback")
+                        .execute()
+                        .await?;
+                    Err(che_orm::rusqlite::Error::InvalidQuery.into())
+                })
             })
             .await;
         assert!(result.is_err());
@@ -638,7 +669,7 @@ mod runtime {
 
     #[tokio::test]
     async fn uuid_relations_load_required_optional_multiple_and_nested_models() {
-        let db = database();
+        let db = database().await;
         db.create_table::<User>().await.unwrap();
         db.create_table::<Post>().await.unwrap();
         db.create_table::<Comment>().await.unwrap();

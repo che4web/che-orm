@@ -6,6 +6,15 @@ use crate::{
 };
 
 pub trait SqlDialect {
+    fn identifier(identifier: &str, output: &mut String) {
+        output.push_str(identifier);
+    }
+    fn constraint_name(_table: &str, _kind: &str, _columns: &[&str]) -> Option<String> {
+        None
+    }
+    fn index_name(table: &str, position: usize) -> String {
+        format!("{table}_idx_{position}")
+    }
     fn placeholder(output: &mut String, index: usize);
     fn column_type(column_type: ColumnType, output: &mut String);
     fn identity_primary_key(output: &mut String);
@@ -14,6 +23,17 @@ pub trait SqlDialect {
 
 pub struct PostgresDialect;
 impl SqlDialect for PostgresDialect {
+    fn identifier(identifier: &str, output: &mut String) {
+        output.push('"');
+        output.push_str(&identifier.replace('"', "\"\""));
+        output.push('"');
+    }
+    fn constraint_name(table: &str, kind: &str, columns: &[&str]) -> Option<String> {
+        Some(crate::schema::schema_object_name(table, kind, columns))
+    }
+    fn index_name(table: &str, position: usize) -> String {
+        crate::schema::schema_object_name(table, "idx", &[&position.to_string()])
+    }
     fn placeholder(output: &mut String, index: usize) {
         output.push('$');
         output.push_str(&index.to_string());
@@ -68,7 +88,7 @@ impl SqlDialect for SqliteDialect {
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 pub type CurrentDialect = PostgresDialect;
 
-#[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+#[cfg(feature = "sqlite")]
 pub type CurrentDialect = SqliteDialect;
 
 #[derive(Debug)]
@@ -91,6 +111,7 @@ pub struct SqlCompiler<D> {
     _dialect: PhantomData<D>,
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub type Compiler = SqlCompiler<CurrentDialect>;
 
 impl<D: SqlDialect> SqlCompiler<D> {
@@ -107,17 +128,15 @@ impl<D: SqlDialect> SqlCompiler<D> {
             .map(|(index, columns)| {
                 let mut sql = String::new();
                 sql.push_str("CREATE INDEX ");
-                sql.push_str(schema.name);
-                sql.push_str("_idx_");
-                sql.push_str(&index.to_string());
+                D::identifier(&D::index_name(schema.name, index), &mut sql);
                 sql.push_str(" ON ");
-                sql.push_str(schema.name);
+                D::identifier(schema.name, &mut sql);
                 sql.push_str(" (");
                 for (column_index, column) in columns.iter().enumerate() {
                     if column_index != 0 {
                         sql.push_str(", ");
                     }
-                    sql.push_str(column);
+                    D::identifier(column, &mut sql);
                 }
                 sql.push(')');
                 sql
@@ -147,7 +166,7 @@ impl<D: SqlDialect> SqlCompiler<D> {
     }
 
     fn push_identifier(&mut self, identifier: &str) {
-        self.sql.push_str(identifier);
+        D::identifier(identifier, &mut self.sql);
     }
     fn push_column(&mut self, column: &ColumnRef) {
         self.push_identifier(column.table);
@@ -351,12 +370,14 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 D::identity_primary_key(&mut self.sql);
             }
             if column.primary_key {
+                self.push_constraint(schema.name, "pk", &[column.name]);
                 self.sql.push_str(" PRIMARY KEY");
             }
             if !column.nullable && (!column.primary_key || column.column_type == ColumnType::Uuid) {
                 self.sql.push_str(" NOT NULL");
             }
             if column.unique {
+                self.push_constraint(schema.name, "field_unique", &[column.name]);
                 self.sql.push_str(" UNIQUE");
             }
             if (column.auto_now_add || column.auto_now) && column.default.is_none() {
@@ -368,11 +389,13 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 self.sql.push_str(default);
             }
             if let Some(check) = column.check {
+                self.push_constraint(schema.name, "check", &[column.name]);
                 self.sql.push_str(" CHECK (");
                 self.sql.push_str(check);
                 self.sql.push(')');
             }
             if let Some(choices) = &column.choices {
+                self.push_constraint(schema.name, "choices", &[column.name]);
                 self.sql.push_str(" CHECK (");
                 self.push_identifier(column.name);
                 self.sql.push_str(" IN (");
@@ -387,8 +410,13 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 self.sql.push_str("))");
             }
             if let Some(reference) = &column.references {
+                self.push_constraint(schema.name, "fk", &[column.name]);
                 self.sql.push_str(" REFERENCES ");
-                self.sql.push_str(reference.target());
+                let (table, column) = reference.target_parts().expect("validated foreign key");
+                self.push_identifier(table);
+                self.sql.push('(');
+                self.push_identifier(column);
+                self.sql.push(')');
                 if let Some(on_delete) = reference.on_delete() {
                     self.sql.push_str(" ON DELETE ");
                     self.sql.push_str(&on_delete.to_uppercase());
@@ -397,11 +425,20 @@ impl<D: SqlDialect> SqlCompiler<D> {
         }
 
         for columns in &schema.unique_constraints {
-            self.sql.push_str(", UNIQUE (");
+            self.sql.push(',');
+            self.push_constraint(schema.name, "unique", columns);
+            self.sql.push_str(" UNIQUE (");
             self.push_column_names(columns);
             self.sql.push(')');
         }
         self.sql.push(')');
+    }
+
+    fn push_constraint(&mut self, table: &str, kind: &str, columns: &[&str]) {
+        if let Some(name) = D::constraint_name(table, kind, columns) {
+            self.sql.push_str(" CONSTRAINT ");
+            self.push_identifier(&name);
+        }
     }
 
     fn push_column_names(&mut self, columns: &[&'static str]) {

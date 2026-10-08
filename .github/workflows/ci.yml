@@ -1,25 +1,66 @@
 name: CI
-
 on:
   pull_request:
   push:
     branches: [main]
-
 jobs:
-  rust:
+  sqlite:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Format
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --workspace
-      - name: Test PostgreSQL compiler
-        run: cargo test -p che-orm --no-default-features --features postgres
-      - name: Documentation
-        run: cargo doc --workspace --no-deps
-      - name: Package macros
-        run: cargo package --manifest-path che-orm-macros/Cargo.toml
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo doc --workspace --no-deps
+      - name: Package core and macros
+        run: cargo package -p che-orm-macros -p che-orm
+      - name: Test packaged API
+        run: >-
+          cargo test --manifest-path target/package/che-orm-0.3.0/Cargo.toml
+          --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.0"'
+          --test public_api_examples --test uuid --test runtime
+      - name: Invalid feature combinations
+        run: |
+          if cargo check -p che-orm --no-default-features; then exit 1; fi
+          if cargo check -p che-orm --features postgres; then exit 1; fi
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: che_orm_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d che_orm_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/che_orm_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p che-orm --no-default-features --features postgres --all-targets -- -D warnings
+      - run: cargo test -p che-orm --no-default-features --features postgres
+      - run: cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
+      - run: cargo check -p che-orm-examples --no-default-features --features postgres --all-targets
+      - run: cargo doc -p che-orm --no-default-features --features postgres --no-deps
+      - name: No SQLite driver dependency
+        run: cargo tree -p che-orm --no-default-features --features postgres -e normal | python3 -c 'import sys; assert "rusqlite" not in sys.stdin.read()'
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.88.0'
+      - run: cargo check -p che-orm --locked
+      - run: cargo check -p che-orm --locked --no-default-features --features postgres

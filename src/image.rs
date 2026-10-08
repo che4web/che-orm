@@ -1,4 +1,6 @@
-use crate::{ColumnType, ColumnTypeOf, DatabaseValue, QueryValue, rusqlite, serde};
+#[cfg(feature = "sqlite")]
+use crate::rusqlite;
+use crate::{ColumnType, ColumnTypeOf, DatabaseValue, QueryValue, serde};
 
 /// A relative storage key for an image. The bytes live in a media backend,
 /// not in the database; `che-rest` manages uploads and URLs.
@@ -27,15 +29,23 @@ impl QueryValue<ImageField> for ImageField {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl rusqlite::types::ToSql for ImageField {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
         Ok(self.0.as_str().into())
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl rusqlite::types::FromSql for ImageField {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
         Ok(Self(value.as_str()?.to_owned()))
+    }
+}
+
+impl crate::FromDatabaseValue for ImageField {
+    fn from_database_value(value: &DatabaseValue) -> Result<Self, crate::DecodeError> {
+        String::from_database_value(value).map(Self)
     }
 }
 

@@ -3,7 +3,7 @@ use orm::Database;
 
 #[tokio::main]
 async fn main() -> Result<(), orm::OrmError> {
-    let database = Database::connect(che_orm_examples::database_path())?;
+    let database = Database::connect(che_orm_examples::database_url()).await?;
 
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -13,22 +13,30 @@ async fn main() -> Result<(), orm::OrmError> {
     let rolled_back_email = format!("rolled-back-{suffix}@example.test");
 
     database
-        .transaction(move |connection| -> orm::rusqlite::Result<()> {
-            connection.execute(
-                "INSERT INTO users (email, name, is_active) VALUES (?1, ?2, ?3)",
-                (&committed_email, "Committed", true),
-            )?;
-            Ok(())
+        .transaction(move |tx| {
+            Box::pin(async move {
+                tx.create::<ExampleUser>()
+                    .set(ExampleUser::EMAIL, committed_email)
+                    .set(ExampleUser::NAME, "Committed")
+                    .set(ExampleUser::IS_ACTIVE, true)
+                    .execute()
+                    .await?;
+                Ok(())
+            })
         })
         .await?;
 
-    let rollback = database
-        .transaction(move |connection| -> orm::rusqlite::Result<()> {
-            connection.execute(
-                "INSERT INTO users (email, name, is_active) VALUES (?1, ?2, ?3)",
-                (&rolled_back_email, "Rolled back", true),
-            )?;
-            Err(orm::rusqlite::Error::InvalidQuery)
+    let rollback: Result<(), orm::OrmError> = database
+        .transaction(move |tx| {
+            Box::pin(async move {
+                tx.create::<ExampleUser>()
+                    .set(ExampleUser::EMAIL, rolled_back_email)
+                    .set(ExampleUser::NAME, "Rolled back")
+                    .set(ExampleUser::IS_ACTIVE, true)
+                    .execute()
+                    .await?;
+                Err(orm::OrmError::Interaction("requested rollback".into()))
+            })
         })
         .await;
 

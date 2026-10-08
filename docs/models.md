@@ -149,11 +149,12 @@ struct User {
 - оба поля получают SQLite `DEFAULT` на основе `strftime(..., 'now')`;
 - managed-поля исключаются из обычного `INSERT` ORM;
 - для `auto_now` ORM добавляет assignment в каждый update-запрос;
-- raw SQL через `transaction` не обновляет timestamp автоматически;
+- raw SQL через `execute_sql` не обновляет timestamp автоматически;
 - при чтении значение декодируется в `OffsetDateTime`.
 
-На PostgreSQL compiler генерирует `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`, но
-PostgreSQL connection/executor пока не входит в runtime.
+На PostgreSQL используются `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP` и нативное
+декодирование `OffsetDateTime`. `CURRENT_TIMESTAMP` фиксируется в начале
+транзакции; `auto_now` в ORM UPDATE задаётся временем Rust-процесса.
 
 ## Связи
 

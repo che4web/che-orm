@@ -1,14 +1,14 @@
 [package]
 name = "che-orm"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
-description = "Typed SQLite ORM primitives for che-rest applications"
+description = "Typed SQLite and PostgreSQL ORM for che-rest applications"
 license = "MIT"
 repository = "https://github.com/che4web/che-orm"
 homepage = "https://github.com/che4web/che-orm"
 documentation = "https://docs.rs/che-orm"
-rust-version = "1.85"
-keywords = ["orm", "sqlite", "database"]
+rust-version = "1.88"
+keywords = ["orm", "sqlite", "postgres", "database"]
 categories = ["database"]
 
 [workspace]
@@ -16,19 +16,23 @@ members = ["che-orm-macros", "che-orm-examples"]
 
 [features]
 default = ["sqlite"]
-postgres = []
-sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "dep:postgres-native-tls", "dep:native-tls"]
+sqlite = ["dep:deadpool-sqlite", "dep:rusqlite"]
 
 [dependencies]
-che-orm-macros = { version = "0.2.3", path = "che-orm-macros" }
+che-orm-macros = { version = "0.3.0", path = "che-orm-macros" }
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-uuid-1", "with-time-0_3"] }
+postgres-native-tls = { version = "0.5", optional = true }
+native-tls = { version = "0.2", optional = true }
 deadpool-sqlite = { version = "0.12", optional = true }
-rusqlite = { version = "0.37", features = ["bundled", "time", "hooks", "uuid"] }
+rusqlite = { version = "0.37", optional = true, features = ["bundled", "time", "hooks", "uuid"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting", "parsing", "serde-human-readable", "serde-well-known"] }
-thiserror = { version = "2", optional = true }
-tokio = { version = "1", optional = true, features = ["macros", "rt-multi-thread"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 trybuild = "1"

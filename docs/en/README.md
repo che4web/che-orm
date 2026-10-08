@@ -1,11 +1,12 @@
 # che-orm Documentation
 
-`che-orm` is an experimental typed ORM for Rust. The current runtime supports
-SQLite through `deadpool-sqlite`; the PostgreSQL SQL compiler is available, but
-a PostgreSQL connection pool and executor are not yet implemented.
+`che-orm` is an experimental typed ORM for Rust. SQLite and PostgreSQL each
+provide a runtime; exactly one backend is selected at compile time. Both expose
+the same async high-level API.
 
 ## Guides
 
+- [Backends and PostgreSQL](backends.md): feature selection, transactions, migrations and the 0.3 upgrade.
 - [Tutorial](tutorial.md): create related models and use SQLite (the Atlas section is historical).
 - [Models and schema](models.md): model derives, fields, relations, and serializers.
 - [ImageField](image-field.md): a complete model-to-upload example, storage keys, URLs and cleanup.

@@ -2,10 +2,9 @@
 
 ## Scope
 
-The current runtime target is SQLite. PostgreSQL support is limited to SQL and
-DDL compilation until an executor is intentionally designed and implemented.
-Keep public APIs backend-neutral where possible, but do not claim runtime
-support that does not exist.
+SQLite and PostgreSQL are selected by mutually exclusive features. Keep the
+high-level API and model decoding backend-neutral; only driver adapters and
+schema execution belong to backend-specific modules.
 
 ## Development Workflow
 
@@ -13,8 +12,8 @@ support that does not exist.
    `che-orm-examples`; the core crate must remain application-independent.
 2. Use `#[derive(Debug, Model)]`, an explicit `#[orm(table = "...")]`, and one
    `#[orm(primary_key)]` field of type `i64` or `che_orm::Uuid` per model.
-3. Use Atlas migrations for persisted schema changes. Review generated SQL and
-   commit migration files with `che-orm-examples/migrations/atlas.sum`.
+3. Use application-owned compiled migrations for persisted schema changes.
+   Preserve historical identities and checksums; review backend-specific SQL.
 4. Add a regression test for every behavior change. Macro behavior used by
    downstream crates belongs in an integration or trybuild test.
 5. Keep SQL values parameterized. Identifiers must remain model-controlled.
@@ -28,9 +27,13 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p che-orm --no-default-features --features postgres
+cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
 cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
 ```
+
+The PostgreSQL runtime command requires `TEST_POSTGRES_URL` pointing at a live
+server and a role allowed to create test schemas. CI provisions a service for it.
 
 Run the examples after applying the configured migration:
 

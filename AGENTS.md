@@ -6,7 +6,7 @@
 
 Workspace members:
 
-- `che-orm`: core ORM library, SQLite runtime, SQL AST, and schema compiler.
+- `che-orm`: core ORM library, compile-time SQLite/PostgreSQL runtimes, SQL AST, and schema compiler.
 - `che-orm-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
   and `#[derive(ModelSerializer)]`.
 - `che-orm-examples`: downstream examples, sample application models, and the `manage` CLI.
@@ -18,7 +18,11 @@ Workspace members:
 - `src/query.rs`: query AST, model trait, SELECT/INSERT/UPDATE/DELETE builders.
 - `src/schema.rs`: column metadata, `SchemaSet`, `AppConfig`, and `AppRegistry`.
 - `src/sql.rs`: SQLite/PostgreSQL dialects and SQL compilation.
-- `src/connection.rs`: async SQLite pool, CRUD execution, row decoding, and transactions.
+- `src/connection.rs`: shared async Database, CRUD, transactions and relation loading.
+- `src/backend/`: the feature-selected driver, pool, binding and row adapters.
+- `src/row.rs`: backend-neutral Row, DecodeError and FromDatabaseValue.
+- `src/migration/postgres_schema.rs`: native PostgreSQL schema operations.
+- `src/migration/postgres_executor.rs`: PostgreSQL migration locking and execution.
 - `che-orm-macros/src/lib.rs`: `Model` derive implementation.
 - `che-orm-examples/src/lib.rs`: sample application models, registry, and database path.
 - `che-orm-examples/src/bin/manage.rs`: compiled-migration CLI for the sample application.
@@ -48,6 +52,12 @@ that define foreign keys to them.
 
 ## Model Rules
 
+- Enable exactly one backend: `sqlite` (default) or `postgres` with defaults
+  disabled. Upper-level application code uses the same Database/Transaction API.
+- Connection methods are async. Use `Database::connect(url).await?` and async
+  transaction callbacks `|tx| Box::pin(async move { ... })` with awaited methods.
+- Models decode the common `Row`; custom scalar types implement
+  `FromDatabaseValue`. Keep driver types in backend-specific adapters.
 - Use `#[derive(Debug, Model)]` for application models.
 - Always specify `#[orm(table = "...")]`.
 - Mark generated integer keys with `#[orm(primary_key)]`.
@@ -106,7 +116,8 @@ cargo run -p che-orm-examples --bin manage -- migrate status
 ```
 
 The example rejects `makemigrations`: its `0001_initial` history is frozen.
-`migrate` and `migrate status` use its `database_path()`; update the application's
+`migrate` and `migrate status` use its `database_url()` (`CHE_ORM_DATABASE_URL`,
+or the configured default). Each backend has its own frozen baseline. Update the application's
 compiled migration registry when adding a model. `che-rest` applications have
 their own compiled `makemigrations` flow. Review generated operations and
 backfill existing file keys separately if changing their storage format:
@@ -131,11 +142,16 @@ cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
 ```
 
-For the PostgreSQL SQL compiler without the SQLite runtime:
+For PostgreSQL without SQLite:
 
 ```bash
 cargo test -p che-orm --no-default-features --features postgres
+cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
 ```
+
+The explicit runtime test requires TEST_POSTGRES_URL and a live PostgreSQL
+server; absence of the variable is an error. The sample PostgreSQL build uses
+`-p che-orm-examples --no-default-features --features postgres`.
 
 Run examples after applying the configured migration:
 

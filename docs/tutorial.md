@@ -60,7 +60,7 @@ struct Post {
 
 #[tokio::main]
 async fn main() -> Result<(), che_orm::OrmError> {
-    let database = Database::connect_in_memory()?;
+    let database = Database::connect_in_memory().await?;
     database.create_table::<User>().await?;
     database.create_table::<Post>().await?;
 

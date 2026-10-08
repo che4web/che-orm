@@ -7,6 +7,19 @@ pub const fn database_path() -> &'static str {
     DATABASE_PATH
 }
 
+pub fn database_url() -> String {
+    std::env::var("CHE_ORM_DATABASE_URL").unwrap_or_else(|_| {
+        #[cfg(feature = "sqlite")]
+        {
+            DATABASE_PATH.into()
+        }
+        #[cfg(feature = "postgres")]
+        {
+            "postgresql://localhost/che_orm".into()
+        }
+    })
+}
+
 #[allow(dead_code)]
 #[derive(orm::Model)]
 #[orm(table = "aliased_models")]
@@ -126,5 +139,5 @@ pub fn database_schema_sql() -> String {
     orm::SchemaSet::new()
         .model::<ExampleUser>()
         .model::<ExamplePost>()
-        .to_sql::<orm::SqliteDialect>()
+        .to_sql::<orm::CurrentDialect>()
 }

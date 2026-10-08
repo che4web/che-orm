@@ -2,16 +2,16 @@
 
 Documentation: [English](README.en.md) | **Русский**
 
-Экспериментальная типизированная ORM для Rust. Сейчас рабочий runtime-backend —
-SQLite через `deadpool-sqlite`, а строки декодируются обратно в модели,
-сгенерированные procedural macro.
+Экспериментальная типизированная ORM для Rust. SQLite или PostgreSQL выбирается
+при компиляции; обе БД используют одинаковые модели и высокоуровневый async API.
+Требуется Rust 1.88 или новее.
 
 ## Возможности
 
 - `#[derive(Model)]` для генерации метаданных модели и typed fields.
 - SQL AST и параметризованная генерация `SELECT`, `INSERT`, `UPDATE`, `DELETE`.
 - Генерация `CREATE TABLE`, индексов и ограничений.
-- Async SQLite pool через `deadpool-sqlite` и Tokio.
+- Async-пулы SQLite и PostgreSQL, PostgreSQL TLS и типизированные ошибки.
 - High-level `get`, `all`, `create`, `update`, `delete` и typed `query` facade.
 - Низкоуровневые `insert`, `fetch_all`, `fetch_one` и произвольный `QueryAst`.
 - Транзакции с commit/rollback.
@@ -22,7 +22,8 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 - `f64` и `Option<f64>`: SQLite `REAL`, PostgreSQL `DOUBLE PRECISION`, числовые фильтры и параметризованная запись.
 - Защита от пустых mutation-запросов и случайных массовых update/delete.
 
-Проект находится в разработке. PostgreSQL executor пока не реализован.
+Проект находится в разработке. Для обеих БД реализованы CRUD, транзакции,
+загрузка связей и выполнение compiled migrations.
 
 ## Быстрый старт
 
@@ -30,7 +31,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 
 ```toml
 [dependencies]
-che-orm = "0.2"
+che-orm = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```
@@ -64,7 +65,7 @@ use che_orm::Database;
 
 #[tokio::main]
 async fn main() -> Result<(), che_orm::OrmError> {
-    let database = Database::connect("app.db")?;
+    let database = Database::connect("app.db").await?;
     database.create_table::<User>().await?;
 
     let user = database
@@ -89,6 +90,21 @@ async fn main() -> Result<(), che_orm::OrmError> {
 
 Managed timestamp-поля не передаются в `INSERT`: их значения создаёт SQLite.
 `updated_at` автоматически добавляется ORM в каждый update-запрос.
+
+## Выбор backend
+
+Включается ровно один feature. SQLite выбран по умолчанию. Для PostgreSQL:
+
+```toml
+che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
+```
+
+В обоих случаях приложение вызывает
+`Database::connect(settings.database_url()).await?`. Настройка содержит SQLite
+путь или PostgreSQL URL. Модели, CRUD, связи, сериализаторы и async-транзакции
+используют общий API. Выбора типа БД во время выполнения нет.
+
+Подробнее: [backend и PostgreSQL](docs/backends.md).
 
 ## Первичные ключи UUIDv7
 
@@ -189,19 +205,19 @@ PNG и не адрес в браузере. Папку с файлами и HTTP
 По умолчанию создаётся пул размером 4:
 
 ```rust
-let database = Database::connect("app.db")?;
+let database = Database::connect("app.db").await?;
 ```
 
 Размер можно задать явно:
 
 ```rust
-let database = Database::connect_with_pool_size("app.db", 8)?;
+let database = Database::connect_with_pool_size("app.db", 8).await?;
 ```
 
 Для in-memory SQLite используется пул размера 1:
 
 ```rust
-let database = Database::connect_in_memory()?;
+let database = Database::connect_in_memory().await?;
 ```
 
 Это важно: разные SQLite-соединения с `:memory:` имеют разные базы данных.
@@ -234,14 +250,14 @@ let query = User::update()
 database.execute(query).await?;
 ```
 
-Транзакция выполняется в worker-потоке SQLite pool:
+Транзакции используют общий async API для обеих БД:
 
 ```rust
 database
-    .transaction(|connection| {
-        connection.execute("DELETE FROM users WHERE id = ?1", [1])?;
+    .transaction(|tx| Box::pin(async move {
+        tx.delete::<User>(user.id).await?;
         Ok(())
-    })
+    }))
     .await?;
 ```
 
@@ -368,12 +384,18 @@ foreign keys.
 | Backend | SQL compiler | Pool/executor |
 | --- | --- | --- |
 | SQLite | Да | Да, async `deadpool-sqlite` |
-| PostgreSQL | Да, placeholders и DDL dialect | Нет |
+| PostgreSQL | Да | Да, async `deadpool-postgres`, TLS |
 
-Для проверки PostgreSQL compiler без SQLite runtime:
+Для проверки PostgreSQL-сборки без SQLite:
 
 ```bash
 cargo test -p che-orm --no-default-features --features postgres
+```
+
+Runtime-тесты с настоящим сервером запускаются отдельно с `TEST_POSTGRES_URL`:
+
+```bash
+cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
 ```
 
 Features `sqlite` и `postgres` взаимоисключающие.

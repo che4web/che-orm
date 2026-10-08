@@ -1,6 +1,8 @@
+#[cfg(feature = "sqlite")]
+use crate::ImageField;
 use crate::{
-    AppConfig, AppRegistry, ColumnRef, DatabaseValue, DbEnum, ImageField, MigrationOperation,
-    Model, ModelSerializer, ModelWriteSerializer, PostgresDialect, QueryBuildError, QueryValue,
+    AppConfig, AppRegistry, ColumnRef, DatabaseValue, DbEnum, MigrationOperation, Model,
+    ModelSerializer, ModelWriteSerializer, PostgresDialect, QueryBuildError, QueryValue,
     SqlCompiler, SqliteDialect,
 };
 use time::OffsetDateTime;
@@ -110,6 +112,7 @@ struct BinaryItem {
 
 #[derive(Debug, Model)]
 #[orm(table = "image_items")]
+#[cfg(feature = "sqlite")]
 struct ImageItem {
     #[orm(primary_key)]
     id: i64,
@@ -118,6 +121,7 @@ struct ImageItem {
 
 #[derive(ModelSerializer)]
 #[serializer(model = ImageItem)]
+#[cfg(feature = "sqlite")]
 struct ImageItemSerializer {
     #[serializer(read_only)]
     id: i64,
@@ -442,26 +446,29 @@ fn db_enum_uses_the_same_json_and_database_values() {
     );
     assert!(crate::serde_json::from_str::<TestStatus>("\"unknown\"").is_err());
 
-    let connection = crate::rusqlite::Connection::open_in_memory().unwrap();
-    connection
+    #[cfg(feature = "sqlite")]
+    {
+        let connection = crate::rusqlite::Connection::open_in_memory().unwrap();
+        connection
         .execute_batch("CREATE TABLE enum_values (status TEXT NOT NULL); INSERT INTO enum_values VALUES ('draft');")
         .unwrap();
-    let value = connection
-        .query_row("SELECT status FROM enum_values", [], |row| {
-            row.get::<_, TestStatus>(0)
-        })
-        .unwrap();
-    assert_eq!(value, TestStatus::Draft);
+        let value = connection
+            .query_row("SELECT status FROM enum_values", [], |row| {
+                row.get::<_, TestStatus>(0)
+            })
+            .unwrap();
+        assert_eq!(value, TestStatus::Draft);
 
-    connection
-        .execute("UPDATE enum_values SET status = 'unknown'", [])
-        .unwrap();
-    assert!(
         connection
-            .query_row("SELECT status FROM enum_values", [], |row| row
-                .get::<_, TestStatus>(0))
-            .is_err()
-    );
+            .execute("UPDATE enum_values SET status = 'unknown'", [])
+            .unwrap();
+        assert!(
+            connection
+                .query_row("SELECT status FROM enum_values", [], |row| row
+                    .get::<_, TestStatus>(0))
+                .is_err()
+        );
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -552,7 +559,7 @@ fn generated_serializer_inputs_are_strict_and_support_patch_presence() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn generated_serializer_rejects_empty_patch_before_database_update() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<User>().await.unwrap();
     let result = UserWriteSerializer::is_valid(
         crate::serde_json::json!({}),
@@ -564,7 +571,7 @@ async fn generated_serializer_rejects_empty_patch_before_database_update() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn generated_serializer_patch_persists_optional_datetime() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<ScheduledItem>().await.unwrap();
     let item = ScheduledItemSerializer::is_valid(
         crate::serde_json::json!({"title": "Scheduled", "due_at": null}),
@@ -593,7 +600,7 @@ async fn generated_serializer_patch_persists_optional_datetime() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn generated_serializer_executes_create_update_and_patch() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<User>().await.unwrap();
 
     let user = UserWriteSerializer::is_valid(
@@ -790,7 +797,7 @@ fn compiles_in_expression_for_sqlite_and_postgres() {
     let postgres = SqlCompiler::<PostgresDialect>::compile(&sqlite_query);
     assert_eq!(
         postgres.sql,
-        "SELECT users.id, users.email, users.name, users.is_active, users.created_at, users.updated_at FROM users WHERE ((users.id IN ($1, $2, $3)) AND (users.is_active = $4))"
+        r#"SELECT "users"."id", "users"."email", "users"."name", "users"."is_active", "users"."created_at", "users"."updated_at" FROM "users" WHERE (("users"."id" IN ($1, $2, $3)) AND ("users"."is_active" = $4))"#
     );
 }
 
@@ -825,7 +832,7 @@ fn compiles_select_related_as_one_join() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_select_related_chains_multiple_aliases() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<User>().await.unwrap();
     database.create_table::<DualPost>().await.unwrap();
     let author = database
@@ -907,7 +914,7 @@ fn compiles_insert_with_postgres_parameters() {
     let compiled = SqlCompiler::<PostgresDialect>::compile(&query);
     assert_eq!(
         compiled.sql,
-        "INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id, email, name, is_active, created_at, updated_at"
+        r#"INSERT INTO "users" ("email", "name") VALUES ($1, $2) RETURNING "id", "email", "name", "is_active", "created_at", "updated_at""#
     );
     assert_eq!(
         compiled.params,
@@ -932,7 +939,7 @@ fn compiles_empty_insert_with_defaults() {
     let postgres = SqlCompiler::<PostgresDialect>::compile(&query);
     assert_eq!(
         postgres.sql,
-        "INSERT INTO users DEFAULT VALUES RETURNING id, email, name, is_active, created_at, updated_at"
+        r#"INSERT INTO "users" DEFAULT VALUES RETURNING "id", "email", "name", "is_active", "created_at", "updated_at""#
     );
     assert!(postgres.params.is_empty());
 }
@@ -1010,7 +1017,7 @@ fn compiles_postgres_identity_create_table_from_model() {
 
     assert_eq!(
         compiled.sql,
-        "CREATE TABLE users (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL CHECK (length(name) > 0), is_active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE (email))"
+        r#"CREATE TABLE "users" ("id" BIGINT GENERATED BY DEFAULT AS IDENTITY CONSTRAINT "users_pk_9f66371e19a8cd97" PRIMARY KEY, "email" TEXT NOT NULL CONSTRAINT "users_field_unique_70a8c1a6db1298a9" UNIQUE, "name" TEXT NOT NULL CONSTRAINT "users_check_f29200ea81b9a70e" CHECK (length(name) > 0), "is_active" BOOLEAN NOT NULL DEFAULT true, "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT "users_unique_6116fc8dad27c9fe" UNIQUE ("email"))"#
     );
 }
 
@@ -1024,8 +1031,9 @@ async fn sqlite_facade_supports_crud_and_typed_queries() {
     ));
     let _ = std::fs::remove_file(&path);
 
-    let database =
-        crate::Database::connect_with_pool_size(path.to_string_lossy().into_owned(), 1).unwrap();
+    let database = crate::Database::connect_with_pool_size(path.to_string_lossy().into_owned(), 1)
+        .await
+        .unwrap();
     database.create_table::<User>().await.unwrap();
 
     let user = database
@@ -1077,7 +1085,7 @@ async fn sqlite_facade_supports_crud_and_typed_queries() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_round_trips_binary_fields() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<BinaryItem>().await.unwrap();
 
     let payload = vec![0, 1, 2, 127, 255];
@@ -1096,7 +1104,7 @@ async fn sqlite_round_trips_binary_fields() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_round_trips_image_field_and_serializes_storage_key() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<ImageItem>().await.unwrap();
     let image = ImageField::new("previews/42.png");
     let item = database
@@ -1132,8 +1140,9 @@ async fn sqlite_pool_persists_and_loads_models() {
     let path = std::env::temp_dir().join(format!("che_orm_test_{}_{}.db", std::process::id(), 1));
     let _ = std::fs::remove_file(&path);
 
-    let database =
-        crate::Database::connect_with_pool_size(path.to_string_lossy().into_owned(), 2).unwrap();
+    let database = crate::Database::connect_with_pool_size(path.to_string_lossy().into_owned(), 2)
+        .await
+        .unwrap();
     database.create_table::<User>().await.unwrap();
 
     let user = User {
@@ -1178,7 +1187,7 @@ async fn sqlite_pool_persists_and_loads_models() {
     assert_eq!(updated.name, "Updated Alice");
 
     let (created_at, updated_at): (String, String) = database
-        .transaction(|connection| {
+        .raw_transaction(|connection| {
             connection.query_row(
                 "SELECT created_at, updated_at FROM users WHERE email = ?1",
                 ["alice@example.test"],
@@ -1193,7 +1202,7 @@ async fn sqlite_pool_persists_and_loads_models() {
     let orm_updated_at = updated.updated_at;
     std::thread::sleep(std::time::Duration::from_millis(2));
     database
-        .transaction(|connection| {
+        .raw_transaction(|connection| {
             connection.execute(
                 "UPDATE users SET name = ?1 WHERE email = ?2",
                 ("Raw SQL Alice", "alice@example.test"),
@@ -1216,10 +1225,10 @@ async fn sqlite_pool_persists_and_loads_models() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_transaction_rolls_back_after_action_error() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
 
     let result: Result<(), crate::OrmError> = database
-        .transaction(|connection| {
+        .raw_transaction(|connection| {
             connection.execute_batch("CREATE TABLE rolled_back_table (id INTEGER)")?;
             Err(rusqlite::Error::InvalidQuery)
         })
@@ -1227,7 +1236,7 @@ async fn sqlite_transaction_rolls_back_after_action_error() {
     assert!(result.is_err());
 
     let table_count: i64 = database
-        .transaction(|connection| {
+        .raw_transaction(|connection| {
             connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'rolled_back_table'",
                 [],
@@ -1242,37 +1251,43 @@ async fn sqlite_transaction_rolls_back_after_action_error() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn typed_transaction_rolls_back_typed_writes_after_error() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<User>().await.unwrap();
 
     let result: Result<(), crate::OrmError> = database
         .typed_transaction(|transaction| {
-            let user = transaction
-                .create::<User>()
-                .set(User::EMAIL, "transaction@example.test")
-                .set(User::NAME, "Transaction")
-                .set(User::IS_ACTIVE, true)
-                .execute()?;
-            assert_eq!(
+            Box::pin(async move {
+                let user = transaction
+                    .create::<User>()
+                    .set(User::EMAIL, "transaction@example.test")
+                    .set(User::NAME, "Transaction")
+                    .set(User::IS_ACTIVE, true)
+                    .execute()
+                    .await?;
+                assert_eq!(
+                    transaction
+                        .query::<User>()
+                        .filter(User::ID.eq(user.id))
+                        .first()
+                        .await?
+                        .unwrap()
+                        .name,
+                    "Transaction"
+                );
                 transaction
-                    .query::<User>()
-                    .filter(User::ID.eq(user.id))
-                    .first()?
-                    .unwrap()
-                    .name,
-                "Transaction"
-            );
-            transaction
-                .update::<User>(user.id)
-                .set(User::NAME, "Updated in transaction")
-                .execute()?;
-            transaction
-                .create::<User>()
-                .set(User::EMAIL, "transaction@example.test")
-                .set(User::NAME, "Duplicate")
-                .set(User::IS_ACTIVE, true)
-                .execute()?;
-            Ok(())
+                    .update::<User>(user.id)
+                    .set(User::NAME, "Updated in transaction")
+                    .execute()
+                    .await?;
+                transaction
+                    .create::<User>()
+                    .set(User::EMAIL, "transaction@example.test")
+                    .set(User::NAME, "Duplicate")
+                    .set(User::IS_ACTIVE, true)
+                    .execute()
+                    .await?;
+                Ok(())
+            })
         })
         .await;
 
@@ -1297,8 +1312,9 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     ));
     let _ = std::fs::remove_file(&path);
 
-    let database =
-        crate::Database::connect_with_pool_size(path.to_string_lossy().into_owned(), 2).unwrap();
+    let database = crate::Database::connect_with_pool_size(path.to_string_lossy().into_owned(), 2)
+        .await
+        .unwrap();
     database.create_table::<User>().await.unwrap();
     database.create_table::<Post>().await.unwrap();
     database.create_table::<Audit>().await.unwrap();
@@ -1492,7 +1508,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_optional_foreign_key_uses_left_join_and_set_null() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<User>().await.unwrap();
     database.create_table::<OptionalPost>().await.unwrap();
     let user = database
@@ -1547,7 +1563,7 @@ async fn sqlite_optional_foreign_key_uses_left_join_and_set_null() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_optional_join_uses_primary_key_metadata() {
-    let database = crate::Database::connect_in_memory().unwrap();
+    let database = crate::Database::connect_in_memory().await.unwrap();
     database
         .create_table::<UserWithLatePrimaryKey>()
         .await

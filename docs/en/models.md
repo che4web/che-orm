@@ -145,11 +145,12 @@ need it.
 - Both fields receive a SQLite `DEFAULT` based on `strftime(..., 'now')`.
 - Managed fields are omitted from regular ORM `INSERT` statements.
 - For `auto_now`, the ORM adds an assignment to every update query.
-- Raw SQL through `transaction` does not update timestamps automatically.
+- Raw SQL through `execute_sql` does not update timestamps automatically.
 - On reads, the value is decoded into `OffsetDateTime`.
 
-The PostgreSQL compiler generates `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`, but
-the PostgreSQL connection/executor is not yet included in the runtime.
+PostgreSQL uses `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP` and native timestamp
+decoding. `CURRENT_TIMESTAMP` is fixed at the transaction's start; ORM UPDATE
+assignments for `auto_now` use the Rust process clock.
 
 ## Relations
 

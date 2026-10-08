@@ -1,6 +1,6 @@
 //! `che-orm` — экспериментальная типизированная ORM для Rust.
 //!
-//! Runtime сейчас ориентирован на SQLite: [`Database`] предоставляет async
+//! Backend выбирается feature `sqlite` или `postgres`: [`Database`] предоставляет async
 //! pool и high-level CRUD/query facade, а [`Model`] derive генерирует metadata,
 //! row decoding и insert values. SQL можно также использовать отдельно через
 //! [`SqlCompiler`].
@@ -19,7 +19,7 @@
 //! # }
 //! # #[tokio::main]
 //! # async fn run() -> Result<(), che_orm::OrmError> {
-//! let database = Database::connect_in_memory()?;
+//! let database = Database::connect_in_memory().await?;
 //! database.create_table::<User>().await?;
 //! let user = database
 //!     .create::<User>()
@@ -54,24 +54,31 @@ extern crate self as che_orm;
 
 pub use che_orm_macros::{DbEnum, Model, ModelSerializer};
 
+#[cfg(feature = "sqlite")]
 pub use rusqlite;
 pub use serde;
 pub use serde_json;
 pub use time;
+#[cfg(feature = "postgres")]
+pub use tokio_postgres;
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod backend;
 mod image;
 pub mod migration;
 mod query;
+mod row;
 mod schema;
 mod sql;
 mod types;
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod connection;
 
 pub use image::ImageField;
 pub use migration::*;
 pub use query::*;
+pub use row::*;
 pub use schema::*;
 pub use sql::*;
 pub use types::*;
@@ -212,7 +219,7 @@ where
     deserialize_optional_rfc3339(deserializer).map(PatchField::Value)
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use connection::*;
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]

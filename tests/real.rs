@@ -22,7 +22,7 @@ fn real_schema_and_sql_keep_fractional_values() {
     assert!(
         SqlCompiler::<PostgresDialect>::compile_schema(&schema)
             .table
-            .contains("amount DOUBLE PRECISION")
+            .contains(r#""amount" DOUBLE PRECISION"#)
     );
     let ast = Balance::insert()
         .set(Balance::AMOUNT, 12.75)
@@ -37,7 +37,7 @@ fn real_schema_and_sql_keep_fractional_values() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn real_fields_round_trip_and_filter_numerically() {
-    let db = che_orm::Database::connect_in_memory().unwrap();
+    let db = che_orm::Database::connect_in_memory().await.unwrap();
     db.create_table::<Balance>().await.unwrap();
     let result = db
         .insert(&Balance {

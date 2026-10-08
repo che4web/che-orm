@@ -132,15 +132,7 @@ fn derive_db_enum_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             }
         }
 
-        impl #orm::rusqlite::types::FromSql for #name {
-            fn column_result(value: #orm::rusqlite::types::ValueRef<'_>)
-                -> #orm::rusqlite::types::FromSqlResult<Self>
-            {
-                let value = value.as_str()?;
-                <Self as #orm::DbEnum>::from_str(value)
-                    .ok_or(#orm::rusqlite::types::FromSqlError::InvalidType)
-            }
-        }
+        #orm::__sqlite_db_enum_adapter!(#name);
     })
 }
 
@@ -1144,14 +1136,14 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 }
             }
 
-            fn from_row(row: &#orm::rusqlite::Row<'_>) -> #orm::rusqlite::Result<Self> {
+            fn from_row(row: &#orm::Row) -> ::core::result::Result<Self, #orm::DecodeError> {
                 Self::from_row_at(row, 0)
             }
 
             fn from_row_at(
-                row: &#orm::rusqlite::Row<'_>,
+                row: &#orm::Row,
                 offset: usize,
-            ) -> #orm::rusqlite::Result<Self> {
+            ) -> ::core::result::Result<Self, #orm::DecodeError> {
                 Ok(Self {
                     #(#row_fields)*
                 })

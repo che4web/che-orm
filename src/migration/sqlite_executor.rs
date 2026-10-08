@@ -209,7 +209,7 @@ fn ensure_rebuild_can_preserve_rows(
             old_column,
             new_column,
         } if !old_column.unique && new_column.unique => {
-            ensure_unique_values(connection, table, &[new_column.name.clone()])?;
+            ensure_unique_values(connection, table, std::slice::from_ref(&new_column.name))?;
         }
         _ => {}
     }
@@ -467,6 +467,52 @@ pub fn pending_operation_migrations<'a>(
             !applied.contains_key(&(migration.id.app.clone(), migration.id.name.clone()))
         })
         .collect())
+}
+
+const OPERATION_MIGRATION_HISTORY_SQL: &str = "CREATE TABLE IF NOT EXISTS che_migration_history (app TEXT NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_on TEXT NOT NULL, PRIMARY KEY (app, name));";
+
+pub fn applied_operation_migrations(
+    connection: &crate::rusqlite::Connection,
+) -> Result<HashMap<(String, String), String>, Box<dyn std::error::Error + Send + Sync>> {
+    let has_history = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'che_migration_history'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?;
+    if has_history.is_none() {
+        return Ok(HashMap::new());
+    }
+    let mut statement =
+        connection.prepare("SELECT app, name, checksum FROM che_migration_history")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+            row.get(2)?,
+        ))
+    })?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(Into::into)
+}
+
+fn assert_foreign_keys_valid(
+    connection: &crate::rusqlite::Connection,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check;")
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+    if rows
+        .next()
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+        .is_some()
+    {
+        return Err("migration left foreign key violations".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1397,50 +1443,4 @@ mod tests {
             Some(&first.checksum)
         );
     }
-}
-
-const OPERATION_MIGRATION_HISTORY_SQL: &str = "CREATE TABLE IF NOT EXISTS che_migration_history (app TEXT NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_on TEXT NOT NULL, PRIMARY KEY (app, name));";
-
-pub fn applied_operation_migrations(
-    connection: &crate::rusqlite::Connection,
-) -> Result<HashMap<(String, String), String>, Box<dyn std::error::Error + Send + Sync>> {
-    let has_history = connection
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'che_migration_history'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()?;
-    if has_history.is_none() {
-        return Ok(HashMap::new());
-    }
-    let mut statement =
-        connection.prepare("SELECT app, name, checksum FROM che_migration_history")?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-            row.get(2)?,
-        ))
-    })?;
-    rows.collect::<Result<HashMap<_, _>, _>>()
-        .map_err(Into::into)
-}
-
-fn assert_foreign_keys_valid(
-    connection: &crate::rusqlite::Connection,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut statement = connection
-        .prepare("PRAGMA foreign_key_check;")
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
-    let mut rows = statement
-        .query([])
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
-    if rows
-        .next()
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
-        .is_some()
-    {
-        return Err("migration left foreign key violations".into());
-    }
-    Ok(())
 }

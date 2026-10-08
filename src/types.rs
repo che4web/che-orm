@@ -29,7 +29,7 @@ impl QueryValue<uuid::Uuid> for uuid::Uuid {
 
 /// Supported model keys, including their automatic INSERT value.
 pub trait PrimaryKey:
-    Copy + Eq + std::hash::Hash + Send + Sync + 'static + QueryValue<Self> + rusqlite::types::FromSql
+    Copy + Eq + std::hash::Hash + Send + Sync + 'static + QueryValue<Self> + crate::FromDatabaseValue
 {
     fn generated_value() -> Option<DatabaseValue>;
 }
@@ -48,16 +48,19 @@ impl PrimaryKey for uuid::Uuid {
 
 /// Extracts the owner key from a required or nullable foreign-key field.
 pub trait ForeignKeyValue<Key: PrimaryKey>: Copy + Send + 'static {
+    const OPTIONAL: bool;
     fn owner_key(self) -> Option<Key>;
 }
 
 impl<Key: PrimaryKey> ForeignKeyValue<Key> for Key {
+    const OPTIONAL: bool = false;
     fn owner_key(self) -> Option<Key> {
         Some(self)
     }
 }
 
 impl<Key: PrimaryKey> ForeignKeyValue<Key> for Option<Key> {
+    const OPTIONAL: bool = true;
     fn owner_key(self) -> Option<Key> {
         self
     }

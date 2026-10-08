@@ -3,20 +3,20 @@
 ## Подключение
 
 ```rust
-let database = che_orm::Database::connect("app.db")?;
+let database = che_orm::Database::connect("app.db").await?;
 ```
 
 `Database` содержит `deadpool-sqlite::Pool`. По умолчанию pool size равен 4.
 Для настройки:
 
 ```rust
-let database = che_orm::Database::connect_with_pool_size("app.db", 8)?;
+let database = che_orm::Database::connect_with_pool_size("app.db", 8).await?;
 ```
 
 Для тестов:
 
 ```rust
-let database = che_orm::Database::connect_in_memory()?;
+let database = che_orm::Database::connect_in_memory().await?;
 ```
 
 In-memory database должна использовать pool size 1, иначе каждое соединение
@@ -235,27 +235,20 @@ user_id: Option<i64>,
 
 ```rust
 database
-    .transaction(|connection| {
-        connection.execute(
-            "UPDATE users SET is_active = ?1 WHERE id = ?2",
-            (false, 1),
-        )?;
+    .transaction(|tx| Box::pin(async move {
+        tx.update::<User>(1).set(User::IS_ACTIVE, false).execute().await?;
         Ok(())
-    })
+    }))
     .await?;
 ```
 
-Closure получает blocking `rusqlite::Connection`, но вызывается внутри
-worker-потока `deadpool-sqlite`, поэтому SQLite-операция не выполняется на
-Tokio executor thread. Ошибка из closure вызывает rollback, успех вызывает
-commit.
+Closure получает общий `Transaction`. Каждая ORM-операция асинхронная; SQLite
+выполняет её в worker-потоке пула. Ошибка вызывает rollback, успех — commit.
+Для прямого `rusqlite::Connection` есть SQLite-only `raw_transaction`.
 
 ## Ошибки и ограничения
 
-`OrmError` объединяет pool error, SQLite error, interaction error и ошибки
-построения query.
-
-Текущий runtime не содержит:
-
-- автоматического diff схемы;
-- PostgreSQL connection pool;
+`OrmError` объединяет ошибки подключения, пула, драйвера, декодирования,
+построения запросов и миграций. `constraint_kind()` возвращает общий тип
+нарушенного ограничения. Compiled migrations применяются через
+`Database::migrate`; выбор PostgreSQL описан в [backend guide](backends.md).

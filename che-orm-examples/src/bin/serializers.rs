@@ -5,13 +5,18 @@ use orm::Database;
 
 #[tokio::main]
 async fn main() -> Result<(), orm::OrmError> {
-    let database = Database::connect_in_memory()?;
-    database.create_table::<ExampleUser>().await?;
-    database.create_table::<ExamplePost>().await?;
+    let database = Database::connect(che_orm_examples::database_url()).await?;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
 
     let user = database
         .create::<ExampleUser>()
-        .set(ExampleUser::EMAIL, "alice@example.test")
+        .set(
+            ExampleUser::EMAIL,
+            format!("serializer-{suffix}@example.test"),
+        )
         .set(ExampleUser::NAME, "Alice")
         .set(ExampleUser::IS_ACTIVE, true)
         .execute()
@@ -26,6 +31,7 @@ async fn main() -> Result<(), orm::OrmError> {
     // prefetch_related performs the users query and one batched posts query.
     let users = database
         .query::<ExampleUser>()
+        .filter(ExampleUser::ID.eq(user.id))
         .prefetch_related(ExamplePost::USER.reverse())
         .all(&database)
         .await?;
@@ -38,6 +44,7 @@ async fn main() -> Result<(), orm::OrmError> {
     // select_related materializes the related user before serialization.
     let posts = database
         .query::<ExamplePost>()
+        .filter(ExamplePost::USER_ID.eq(user.id))
         .select_related(ExamplePost::USER)
         .all(&database)
         .await?;

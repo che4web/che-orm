@@ -6,10 +6,11 @@ publish = false
 
 [features]
 default = ["sqlite"]
-sqlite = []
+sqlite = ["orm/sqlite"]
+postgres = ["orm/postgres"]
 
 [dependencies]
-orm = { package = "che-orm", path = ".." }
+orm = { package = "che-orm", path = "..", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 serde_json = "1"

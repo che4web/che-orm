@@ -198,11 +198,18 @@ impl QueryAst {
     pub fn validate(&self) -> Result<(), QueryBuildError> {
         match self {
             Self::Select(query) => {
-                validate_expr_table(query.filter.as_ref(), query.table.name)?;
-                validate_columns_table(
-                    query.table.name,
-                    query.order_by.iter().map(|order| &order.column),
-                )
+                let mut tables = vec![query.table.name];
+                for join in &query.joins {
+                    tables.extend([join.table.name, join.alias]);
+                }
+                validate_expr_tables(query.filter.as_ref(), &tables)?;
+                for join in &query.joins {
+                    validate_expr_tables(Some(&join.on), &tables)?;
+                }
+                for order in &query.order_by {
+                    validate_expr_tables(Some(&Expr::Column(order.column)), &tables)?;
+                }
+                Ok(())
             }
             Self::Insert(query) => {
                 validate_unique_columns(query.values.iter().map(|value| &value.column))?;
@@ -262,17 +269,26 @@ pub trait Model: Sized {
     fn columns() -> &'static [&'static str];
     /// Returns the model's typed primary-key field.
     fn primary_key() -> ModelField<Self, Self::PrimaryKey>;
-    fn primary_key_value(&self) -> Self::PrimaryKey {
-        panic!("Model::primary_key_value must be implemented for eager relations")
-    }
+    fn primary_key_value(&self) -> Self::PrimaryKey;
     fn schema() -> TableSchema;
-    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self>;
-    fn from_row_at(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Self> {
+    fn from_row(row: &crate::Row) -> Result<Self, crate::DecodeError>;
+    fn from_row_at(row: &crate::Row, offset: usize) -> Result<Self, crate::DecodeError> {
         if offset == 0 {
             Self::from_row(row)
         } else {
-            Err(rusqlite::Error::InvalidColumnIndex(offset))
+            Err(crate::DecodeError::InvalidColumnIndex(offset))
         }
+    }
+    /// Adapter for direct SQLite driver queries.
+    #[cfg(feature = "sqlite")]
+    fn from_sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Self::from_row(&crate::Row::from_sqlite(row)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Null,
+                Box::new(error),
+            )
+        })
     }
     fn insert_values(&self) -> Vec<InsertValue>;
     fn managed_update_values() -> Vec<Assignment> {
@@ -461,7 +477,6 @@ impl<M: Model> SelectQuery<M> {
         Ok(QueryAst::Select(self.ast))
     }
 
-    #[cfg(feature = "sqlite")]
     pub(crate) fn into_select_ast(self) -> Result<SelectAst, QueryBuildError> {
         match self.into_ast()? {
             QueryAst::Select(select) => Ok(select),
@@ -483,7 +498,7 @@ impl<M: Model> SelectQuery<M> {
         self.into_joined_ast_with_kind(relation, JoinType::Left)
     }
 
-    fn into_joined_ast_with_kind<R: Model, Relation, Key>(
+    pub(crate) fn into_joined_ast_with_kind<R: Model, Relation, Key>(
         mut self,
         relation: BelongsTo<M, R, Relation, Key>,
         kind: JoinType,
@@ -545,10 +560,10 @@ impl<M: Model> InsertQuery<M> {
     }
     pub fn into_ast(mut self) -> Result<QueryAst, QueryBuildError> {
         let column = M::primary_key().column();
-        if !self.ast.values.iter().any(|value| value.column == column) {
-            if let Some(value) = <M::PrimaryKey as crate::PrimaryKey>::generated_value() {
-                self.ast.values.push(InsertValue { column, value });
-            }
+        if !self.ast.values.iter().any(|value| value.column == column)
+            && let Some(value) = <M::PrimaryKey as crate::PrimaryKey>::generated_value()
+        {
+            self.ast.values.push(InsertValue { column, value });
         }
         validate_unique_columns(self.ast.values.iter().map(|value| &value.column))?;
         Ok(QueryAst::Insert(self.ast))

@@ -1,5 +1,23 @@
 use std::marker::PhantomData;
 
+pub(crate) fn schema_object_name(table: &str, kind: &str, parts: &[&str]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for part in std::iter::once(table)
+        .chain(std::iter::once(kind))
+        .chain(parts.iter().copied())
+    {
+        for byte in part.bytes().chain(std::iter::once(0)) {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        }
+    }
+    let prefix = format!("{table}_{kind}");
+    let mut end = prefix.len().min(46);
+    while !prefix.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}_{hash:016x}", &prefix[..end])
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// SQL column types supported by the schema compiler.
 pub enum ColumnType {
@@ -114,6 +132,12 @@ impl ForeignKey {
         &self.target
     }
 
+    pub fn target_parts(&self) -> Option<(&str, &str)> {
+        self.target
+            .split_once('(')
+            .and_then(|(table, column)| column.strip_suffix(')').map(|column| (table, column)))
+    }
+
     pub fn on_delete(&self) -> Option<&'static str> {
         self.on_delete
     }
@@ -198,13 +222,13 @@ impl TableSchema {
             }
             if let Some(reference) = &column.references {
                 validate_reference(reference.target())?;
-                if let Some(action) = reference.on_delete() {
-                    if !matches!(
+                if let Some(action) = reference.on_delete()
+                    && !matches!(
                         action.to_ascii_lowercase().as_str(),
                         "cascade" | "restrict" | "no action" | "set null" | "set default"
-                    ) {
-                        return Err(SchemaError::InvalidOnDelete(action.into()));
-                    }
+                    )
+                {
+                    return Err(SchemaError::InvalidOnDelete(action.into()));
                 }
             }
         }
@@ -272,7 +296,7 @@ impl SchemaSet {
     }
 }
 
-fn validate_identifier(identifier: &str) -> Result<(), SchemaError> {
+pub(crate) fn validate_identifier(identifier: &str) -> Result<(), SchemaError> {
     let mut chars = identifier.chars();
     let valid_start = chars
         .next()

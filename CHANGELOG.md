@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0
+
+- Add a PostgreSQL runtime with TLS, pooled connections, typed CRUD, relations,
+  transactions, and compiled migration execution.
+- Select exactly one backend at compile time with `sqlite` (default) or
+  `postgres`. Both expose the same `Database`, builders, and `Transaction` API.
+- Make database connection methods async. Transaction callbacks return boxed
+  async futures and all transaction operations are awaited.
+- Decode models through backend-neutral `Row` / `FromDatabaseValue`, replacing
+  the SQLite row contract. `Model::from_sqlite_row` and `raw_transaction` are
+  SQLite-specific adapters for direct driver operations.
+- Add native PostgreSQL schema operations, stable constraint names, migration
+  locking, checksum validation, and rollback on failure.
+- Preserve existing SQLite migration identities and checksums.
+- Require `che-orm-macros` 0.3.0 and Rust 1.88 (the current `time` dependency's
+  minimum supported version).
+
 ## 0.2.3
 
 - Add UUIDv7 primary keys, 16-byte SQLite BLOB storage, UUID PostgreSQL DDL,

@@ -1,10 +1,11 @@
 use std::{env, process::ExitCode};
 
-use che_orm_examples::database_path;
-use orm::{Migration, MigrationGraph, MigrationId, MigrationOperation, SqliteDialect};
+use che_orm_examples::database_url;
+use orm::{CurrentDialect, Database, Migration, MigrationGraph, MigrationId, MigrationOperation};
 
-fn main() -> ExitCode {
-    match run(env::args().skip(1).collect()) {
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run(env::args().skip(1).collect()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("manage: {error}");
@@ -13,7 +14,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: Vec<String>) -> Result<(), String> {
+async fn run(args: Vec<String>) -> Result<(), String> {
     match args.as_slice() {
         [] => {
             print_help();
@@ -24,11 +25,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         [command] if command == "schema" => {
-            print!("{}", che_orm_examples::registry().to_sql::<SqliteDialect>());
+            print!("{}", che_orm_examples::registry().to_sql::<CurrentDialect>());
             Ok(())
         }
-        [command] if command == "migrate" => migrate(),
-        [command, action] if command == "migrate" && action == "status" => status(),
+        [command] if command == "migrate" => migrate().await,
+        [command, action] if command == "migrate" && action == "status" => status().await,
         [command, ..] if command == "makemigrations" => Err(
             "the example ships a frozen compiled baseline; change its migration module before adding model changes".into(),
         ),
@@ -37,6 +38,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 fn migrations() -> Vec<Migration> {
+    #[cfg(feature = "sqlite")]
+    let sql = include_str!("../../migrations/20260815144721_initial_schema.sql");
+    #[cfg(feature = "postgres")]
+    let sql = include_str!("../../migrations/postgres_initial.sql");
     vec![Migration::new(
         MigrationId {
             app: "examples".into(),
@@ -44,36 +49,39 @@ fn migrations() -> Vec<Migration> {
         },
         vec![],
         vec![MigrationOperation::RunSql {
-            forward: include_str!("../../migrations/20260815144721_initial_schema.sql").into(),
+            forward: sql.into(),
             reverse: None,
             state_operations: vec![],
         }],
     )]
 }
 
-fn database() -> Result<orm::rusqlite::Connection, String> {
-    let path = database_path();
+async fn database() -> Result<Database, String> {
+    let path = database_url();
     if path.is_empty() || path == ":memory:" {
         return Err("compiled example migrations require a SQLite file path".into());
     }
-    orm::rusqlite::Connection::open(path).map_err(|error| error.to_string())
+    Database::connect(path)
+        .await
+        .map_err(|error| error.to_string())
 }
 
-fn migrate() -> Result<(), String> {
+async fn migrate() -> Result<(), String> {
     let graph = MigrationGraph::new(migrations()).map_err(|error| error.to_string())?;
-    let mut connection = database()?;
-    let count = orm::migration::sqlite_executor::apply_operation_migrations_on_connection(
-        &mut connection,
-        graph,
-    )
-    .map_err(|error| error.to_string())?;
+    let database = database().await?;
+    let count = database
+        .migrate(graph)
+        .await
+        .map_err(|error| error.to_string())?;
     println!("Applied {count} compiled migration(s).");
     Ok(())
 }
 
-fn status() -> Result<(), String> {
-    let connection = database()?;
-    let applied = orm::migration::sqlite_executor::applied_operation_migrations(&connection)
+async fn status() -> Result<(), String> {
+    let database = database().await?;
+    let applied = database
+        .migration_history()
+        .await
         .map_err(|error| error.to_string())?;
     for migration in migrations() {
         let marker = if applied.contains_key(&(migration.id.app.clone(), migration.id.name.clone()))

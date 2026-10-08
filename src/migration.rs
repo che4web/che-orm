@@ -3,8 +3,12 @@ use std::fmt;
 
 use crate::{ColumnSchema, ColumnType, ForeignKey, SchemaSet, TableSchema};
 
+mod postgres_schema;
 #[cfg(feature = "sqlite")]
 pub mod sqlite_executor;
+pub use postgres_schema::{DeferredForeignKey, PostgresOperationPlan, PostgresSchemaEditor};
+#[cfg(feature = "postgres")]
+pub(crate) mod postgres_executor;
 
 /// An owned foreign-key definition in a migration state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,13 +321,13 @@ impl ProjectState {
                         column: column.name.clone(),
                     });
                 }
-                if let Some(reference) = &column.references {
-                    if parse_reference(&reference.target).is_none() {
-                        return Err(MigrationError::InvalidState(format!(
-                            "invalid reference {}",
-                            reference.target
-                        )));
-                    }
+                if let Some(reference) = &column.references
+                    && parse_reference(&reference.target).is_none()
+                {
+                    return Err(MigrationError::InvalidState(format!(
+                        "invalid reference {}",
+                        reference.target
+                    )));
                 }
             }
             for constraint in table.indexes.iter().chain(&table.unique_constraints) {
@@ -566,7 +570,7 @@ fn schema_object_depends_on(object: &SchemaObjectState, tables: &BTreeSet<String
 }
 
 fn parse_schema_object_header(sql: &str) -> Option<(SchemaObjectKind, String)> {
-    let mut words = sql.trim_start().split_whitespace();
+    let mut words = sql.split_whitespace();
     if !words.next()?.eq_ignore_ascii_case("CREATE") {
         return None;
     }
@@ -2294,10 +2298,10 @@ fn copy_source_column<'a>(
     if let MigrationOperation::RenameColumn {
         old_name, new_name, ..
     } = operation
+        && new_column.name == *new_name
+        && old_columns.contains(old_name.as_str())
     {
-        if new_column.name == *new_name && old_columns.contains(old_name.as_str()) {
-            return Some(old_name);
-        }
+        return Some(old_name);
     }
     old_columns
         .contains(new_column.name.as_str())
@@ -2366,10 +2370,8 @@ fn column_definition_sql(column: &ColumnState) -> String {
     if column.unique {
         sql.push_str(" UNIQUE");
     }
-    if column.auto_now_add || column.auto_now {
-        if column.default.is_none() {
-            sql.push_str(" DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))");
-        }
+    if (column.auto_now_add || column.auto_now) && column.default.is_none() {
+        sql.push_str(" DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))");
     }
     if let Some(default) = &column.default {
         sql.push_str(" DEFAULT ");
@@ -3123,6 +3125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sqlite")]
     fn sqlite_editor_rebuilds_a_table_and_preserves_existing_rows() {
         let create = MigrationOperation::CreateTable {
             table: TableState {
