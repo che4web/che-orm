@@ -12,6 +12,9 @@ SQLite has an async pool, CRUD facade, transactions, relations, serializers,
 and compiled migrations. The PostgreSQL dialect can compile SQL and DDL, but
 does not yet provide a connection pool or executor.
 
+Model fields support `f64` and `Option<f64>` as SQLite `REAL` and PostgreSQL
+`DOUBLE PRECISION`, including typed numeric filters and parameterized writes.
+
 ## Quick Start
 
 ```toml

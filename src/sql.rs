@@ -22,6 +22,7 @@ impl SqlDialect for PostgresDialect {
     fn column_type(column_type: ColumnType, output: &mut String) {
         output.push_str(match column_type {
             ColumnType::Integer => "BIGINT",
+            ColumnType::Real => "DOUBLE PRECISION",
             ColumnType::Text => "TEXT",
             ColumnType::Binary => "BYTEA",
             ColumnType::Boolean => "BOOLEAN",
@@ -48,6 +49,7 @@ impl SqlDialect for SqliteDialect {
     fn column_type(column_type: ColumnType, output: &mut String) {
         output.push_str(match column_type {
             ColumnType::Integer => "INTEGER",
+            ColumnType::Real => "REAL",
             ColumnType::Text => "TEXT",
             ColumnType::Binary => "BLOB",
             ColumnType::Boolean => "INTEGER",

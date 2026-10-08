@@ -8,6 +8,7 @@ use crate::{DbEnum, OrderBy, OrderDirection};
 /// Values bound to SQL placeholders.
 pub enum DatabaseValue {
     Integer(i64),
+    Real(f64),
     Text(String),
     Binary(Vec<u8>),
     Boolean(bool),
@@ -65,6 +66,12 @@ impl<Key: PrimaryKey> ForeignKeyValue<Key> for Option<Key> {
 impl QueryValue<i64> for i64 {
     fn into_query_value(self) -> DatabaseValue {
         DatabaseValue::Integer(self)
+    }
+}
+
+impl QueryValue<f64> for f64 {
+    fn into_query_value(self) -> DatabaseValue {
+        DatabaseValue::Real(self)
     }
 }
 

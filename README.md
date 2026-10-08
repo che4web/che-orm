@@ -19,6 +19,7 @@ SQLite через `deadpool-sqlite`, а строки декодируются о
 - Версионированные compiled migrations и `manage` CLI приложения-примера.
 - Разделение моделей по application-модулям через `AppConfig` и `AppRegistry`.
 - `OffsetDateTime` и managed-поля `auto_now_add` / `auto_now`.
+- `f64` и `Option<f64>`: SQLite `REAL`, PostgreSQL `DOUBLE PRECISION`, числовые фильтры и параметризованная запись.
 - Защита от пустых mutation-запросов и случайных массовых update/delete.
 
 Проект находится в разработке. PostgreSQL executor пока не реализован.

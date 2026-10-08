@@ -844,6 +844,7 @@ fn render_strings(values: &[String]) -> String {
 fn render_column_type(column_type: ColumnType) -> &'static str {
     match column_type {
         ColumnType::Integer => "ColumnType::Integer",
+        ColumnType::Real => "ColumnType::Real",
         ColumnType::Text => "ColumnType::Text",
         ColumnType::Binary => "ColumnType::Binary",
         ColumnType::Boolean => "ColumnType::Boolean",
@@ -1194,6 +1195,7 @@ fn encode_column(bytes: &mut Vec<u8>, column: &ColumnState, include_field_name: 
         ColumnType::Binary => 2,
         ColumnType::Boolean => 3,
         ColumnType::DateTime => 4,
+        ColumnType::Real => 5,
         ColumnType::Uuid => 6,
     });
     encode_bool(bytes, column.nullable);
@@ -2405,6 +2407,7 @@ fn column_definition_sql(column: &ColumnState) -> String {
 fn sqlite_column_type(column_type: ColumnType) -> &'static str {
     match column_type {
         ColumnType::Integer => "INTEGER",
+        ColumnType::Real => "REAL",
         ColumnType::Text => "TEXT",
         ColumnType::Binary => "BLOB",
         ColumnType::Boolean => "INTEGER",

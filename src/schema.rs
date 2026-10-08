@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 /// SQL column types supported by the schema compiler.
 pub enum ColumnType {
     Integer,
+    Real,
     Text,
     Binary,
     Boolean,
@@ -31,6 +32,12 @@ impl ColumnTypeOf for i64 {
 impl ColumnTypeOf for uuid::Uuid {
     fn column_type() -> ColumnType {
         ColumnType::Uuid
+    }
+}
+
+impl ColumnTypeOf for f64 {
+    fn column_type() -> ColumnType {
+        ColumnType::Real
     }
 }
 

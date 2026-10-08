@@ -1499,6 +1499,7 @@ fn sqlite_params(compiled: &CompiledQuery) -> rusqlite::Result<Vec<Value>> {
 fn database_value(value: &DatabaseValue) -> rusqlite::Result<Value> {
     match value {
         DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
+        DatabaseValue::Real(value) => Ok(Value::Real(*value)),
         DatabaseValue::Text(value) => Ok(Value::Text(value.clone())),
         DatabaseValue::Binary(value) => Ok(Value::Blob(value.clone())),
         DatabaseValue::Uuid(value) => Ok(Value::Blob(value.as_bytes().to_vec())),
