@@ -99,8 +99,11 @@ println!("{}", result.rows_affected);
 println!("{:?}", result.last_insert_rowid);
 ```
 
-`primary_key`, `auto_now_add`, and `auto_now` are not included in a regular
-insert. The `auto_now` field is added automatically to an ORM-generated update.
+Integer `primary_key`, `auto_now_add`, and `auto_now` fields are omitted from
+`database.insert(&model)`. UUID keys are supplied from the model as 16-byte
+BLOBs. For UUID models, `database.create::<User>()` generates UUIDv7 when the
+key is not supplied through `.set(User::ID, uuid)`.
+The `auto_now` field is added automatically to an ORM-generated update.
 All other fields are passed as SQL parameters.
 
 For normal creation, use `database.create::<User>()`. The low-level `insert`

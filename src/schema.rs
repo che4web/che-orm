@@ -8,6 +8,7 @@ pub enum ColumnType {
     Binary,
     Boolean,
     DateTime,
+    Uuid,
 }
 
 /// Maps a Rust field type to a SQL column type.
@@ -24,6 +25,12 @@ pub trait ColumnTypeOf {
 impl ColumnTypeOf for i64 {
     fn column_type() -> ColumnType {
         ColumnType::Integer
+    }
+}
+
+impl ColumnTypeOf for uuid::Uuid {
+    fn column_type() -> ColumnType {
+        ColumnType::Uuid
     }
 }
 

@@ -51,6 +51,10 @@ that define foreign keys to them.
 - Use `#[derive(Debug, Model)]` for application models.
 - Always specify `#[orm(table = "...")]`.
 - Mark generated integer keys with `#[orm(primary_key)]`.
+- UUID keys use `#[orm(primary_key)] id: che_orm::Uuid`. INSERT builders generate
+  UUIDv7 in Rust when the key is omitted; explicitly supplied keys are preserved.
+  SQLite stores UUIDs as 16-byte BLOBs, PostgreSQL compiles them as UUID, and JSON
+  uses UUID strings. `Database::insert(&model)` uses the model's supplied UUID.
 - Use `#[orm(db_column = "existing_name")]` when a Rust field must use a
   different name from its physical SQL column. Queries, indexes and generated
   schema use the physical name while Rust code keeps the field-based constant.
@@ -60,8 +64,9 @@ that define foreign keys to them.
   ORM models. This generates `Post::USER` and `Post::USER.reverse()`.
 - Use `#[orm(references = "table(column)")]` only for tables without an ORM
   model; it does not generate typed relations.
-- `foreign_key` supports `i64` and `Option<i64>`. Use `on_delete = "set null"`
-  only with `Option<i64>`.
+- `foreign_key` supports `i64`, `Uuid`, `Option<i64>` and `Option<Uuid>`; its
+  underlying type must match the target model's primary key. Use
+  `on_delete = "set null"` only with optional keys.
 - Use `#[orm(auto_now_add)]` and `#[orm(auto_now)]` only with `OffsetDateTime`.
 - `auto_now` is updated by ORM-generated UPDATE statements. Raw SQL does not update it.
 - `Option<T>` maps to a nullable SQL column.

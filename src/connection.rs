@@ -94,7 +94,8 @@ impl Database {
             .map_err(OrmError::from)
     }
 
-    /// Inserts a model. Primary key and managed timestamp fields are omitted.
+    /// Inserts a model, omitting generated integer keys and managed timestamps.
+    /// A UUID primary key is taken from the supplied model.
     pub async fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
         let ast = QueryAst::Insert(crate::InsertAst {
             table: crate::TableRef::new(M::table_name()),
@@ -135,8 +136,11 @@ impl Database {
         Ok(rows.pop())
     }
 
-    /// Fetches a model by its generated integer primary key.
-    pub async fn get<M: Model + Send + 'static>(&self, id: i64) -> Result<Option<M>, OrmError> {
+    /// Fetches a model by its typed primary key.
+    pub async fn get<M: Model + Send + 'static>(
+        &self,
+        id: M::PrimaryKey,
+    ) -> Result<Option<M>, OrmError> {
         self.fetch_one(M::query().filter(M::primary_key().eq(id)))
             .await
     }
@@ -195,15 +199,18 @@ impl Database {
     }
 
     /// Starts a high-level update builder scoped to one primary key.
-    pub fn update<M: Model>(&self, id: i64) -> UpdateBuilder<'_, M> {
+    pub fn update<M: Model>(&self, id: M::PrimaryKey) -> UpdateBuilder<'_, M> {
         UpdateBuilder {
             database: self,
             query: M::update().filter(M::primary_key().eq(id)),
         }
     }
 
-    /// Deletes one row by its generated integer primary key.
-    pub async fn delete<M: Model + Send + 'static>(&self, id: i64) -> Result<bool, OrmError> {
+    /// Deletes one row by its typed primary key.
+    pub async fn delete<M: Model + Send + 'static>(
+        &self,
+        id: M::PrimaryKey,
+    ) -> Result<bool, OrmError> {
         let result = self
             .execute(
                 M::delete()
@@ -394,7 +401,8 @@ impl Transaction<'_> {
         execute_compiled(self.connection, SqlCompiler::<SqliteDialect>::compile(&ast))
     }
 
-    /// Inserts a model, omitting its primary key and managed timestamps.
+    /// Inserts a model, omitting generated integer keys and managed timestamps.
+    /// A UUID primary key is taken from the supplied model.
     pub fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
         self.execute(QueryAst::Insert(crate::InsertAst {
             table: crate::TableRef::new(M::table_name()),
@@ -418,8 +426,8 @@ impl Transaction<'_> {
         Ok(self.fetch_all(query.limit(1))?.pop())
     }
 
-    /// Fetches a model by its generated integer primary key.
-    pub fn get<M: Model>(&self, id: i64) -> Result<Option<M>, OrmError> {
+    /// Fetches a model by its typed primary key.
+    pub fn get<M: Model>(&self, id: M::PrimaryKey) -> Result<Option<M>, OrmError> {
         self.fetch_one(M::query().filter(M::primary_key().eq(id)))
     }
 
@@ -432,7 +440,7 @@ impl Transaction<'_> {
     }
 
     /// Starts a typed update builder scoped to one primary key.
-    pub fn update<M: Model>(&self, id: i64) -> TransactionUpdateBuilder<'_, M> {
+    pub fn update<M: Model>(&self, id: M::PrimaryKey) -> TransactionUpdateBuilder<'_, M> {
         TransactionUpdateBuilder {
             connection: self.connection,
             query: M::update().filter(M::primary_key().eq(id)),
@@ -778,7 +786,7 @@ pub struct SelectRelatedQuery<M, R, Relation = (), Key = i64> {
     relation: BelongsTo<M, R, Relation, Key>,
 }
 
-impl<M, R, Relation> SelectRelatedQuery<M, R, Relation, i64>
+impl<M, R, Relation, Key: crate::PrimaryKey> SelectRelatedQuery<M, R, Relation, Key>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
@@ -811,10 +819,10 @@ where
         }
     }
 
-    pub fn select_related<R2, Relation2>(
+    pub fn select_related<R2: Model, Relation2>(
         self,
-        relation: BelongsTo<M, R2, Relation2, i64>,
-    ) -> MultiSelectRelatedQuery<M, R, Relation, R2, Relation2> {
+        relation: BelongsTo<M, R2, Relation2, R2::PrimaryKey>,
+    ) -> MultiSelectRelatedQuery<M, R, Relation, R2, Relation2, Key> {
         MultiSelectRelatedQuery {
             query: self.query,
             first: self.relation,
@@ -822,7 +830,10 @@ where
         }
     }
 
-    pub async fn all(self, database: &Database) -> Result<Vec<WithOne<M, R, Relation>>, OrmError>
+    pub async fn all(
+        self,
+        database: &Database,
+    ) -> Result<Vec<WithOne<M, R, Relation, Key>>, OrmError>
     where
         Relation: Send + 'static,
     {
@@ -836,7 +847,7 @@ where
             .await?
             .interact(move |connection| {
                 configure_connection(connection)?;
-                load_joined_models::<M, R, Relation>(connection, &compiled)
+                load_joined_models::<M, R, Relation, Key>(connection, &compiled)
             })
             .await
             .map_err(|error| OrmError::Interaction(error.to_string()))?
@@ -848,13 +859,14 @@ where
     }
 }
 
-pub struct MultiSelectRelatedQuery<M, R1, Relation1, R2, Relation2> {
+pub struct MultiSelectRelatedQuery<M, R1, Relation1, R2: Model, Relation2, Key1 = i64> {
     query: SelectQuery<M>,
-    first: BelongsTo<M, R1, Relation1, i64>,
-    second: BelongsTo<M, R2, Relation2, i64>,
+    first: BelongsTo<M, R1, Relation1, Key1>,
+    second: BelongsTo<M, R2, Relation2, R2::PrimaryKey>,
 }
 
-impl<M, R1, Relation1, R2, Relation2> MultiSelectRelatedQuery<M, R1, Relation1, R2, Relation2>
+impl<M, R1, Relation1, R2, Relation2, Key1>
+    MultiSelectRelatedQuery<M, R1, Relation1, R2, Relation2, Key1>
 where
     M: Model + Send + 'static,
     R1: Model + Send + 'static,
@@ -923,7 +935,7 @@ where
     }
 }
 
-impl<M, R, Relation> SelectRelatedQuery<M, R, Relation, Option<i64>>
+impl<M, R, Relation, Key: crate::PrimaryKey> SelectRelatedQuery<M, R, Relation, Option<Key>>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
@@ -991,8 +1003,11 @@ pub struct PrefetchRelatedQuery<M, R, Relation = (), Key = i64> {
     relation: HasMany<M, R, Relation, Key>,
 }
 
-impl<M: Model, R, Relation> PrefetchRelation<M> for HasMany<M, R, Relation, i64> {
-    type Query = PrefetchRelatedQuery<M, R, Relation, i64>;
+impl<M: Model, R, Relation, Key> PrefetchRelation<M> for HasMany<M, R, Relation, Key>
+where
+    Key: crate::ForeignKeyValue<M::PrimaryKey>,
+{
+    type Query = PrefetchRelatedQuery<M, R, Relation, Key>;
 
     fn into_query(self, query: SelectQuery<M>) -> Self::Query {
         PrefetchRelatedQuery {
@@ -1002,24 +1017,41 @@ impl<M: Model, R, Relation> PrefetchRelation<M> for HasMany<M, R, Relation, i64>
     }
 }
 
-pub struct NestedPrefetchPlan<M, R, Relation, C, ChildRelation> {
-    outer: HasMany<M, R, Relation, i64>,
-    inner: HasMany<R, C, ChildRelation, i64>,
+pub struct NestedPrefetchPlan<
+    M: Model,
+    R: Model,
+    Relation,
+    C,
+    ChildRelation,
+    OuterKey = <M as Model>::PrimaryKey,
+    InnerKey = <R as Model>::PrimaryKey,
+> {
+    outer: HasMany<M, R, Relation, OuterKey>,
+    inner: HasMany<R, C, ChildRelation, InnerKey>,
 }
 
-impl<M, R, Relation> HasMany<M, R, Relation, i64> {
-    pub fn prefetch<C, ChildRelation>(
+impl<M: Model, R: Model, Relation, Key> HasMany<M, R, Relation, Key>
+where
+    Key: crate::ForeignKeyValue<M::PrimaryKey>,
+{
+    pub fn prefetch<C, ChildRelation, InnerKey>(
         self,
-        inner: HasMany<R, C, ChildRelation, i64>,
-    ) -> NestedPrefetchPlan<M, R, Relation, C, ChildRelation> {
+        inner: HasMany<R, C, ChildRelation, InnerKey>,
+    ) -> NestedPrefetchPlan<M, R, Relation, C, ChildRelation, Key, InnerKey>
+    where
+        InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
+    {
         NestedPrefetchPlan { outer: self, inner }
     }
 }
 
-impl<M: Model, R, Relation, C, ChildRelation> PrefetchRelation<M>
-    for NestedPrefetchPlan<M, R, Relation, C, ChildRelation>
+impl<M: Model, R: Model, Relation, C, ChildRelation, OuterKey, InnerKey> PrefetchRelation<M>
+    for NestedPrefetchPlan<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
+where
+    OuterKey: crate::ForeignKeyValue<M::PrimaryKey>,
+    InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
 {
-    type Query = NestedPrefetchQuery<M, R, Relation, C, ChildRelation>;
+    type Query = NestedPrefetchQuery<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>;
 
     fn into_query(self, query: SelectQuery<M>) -> Self::Query {
         NestedPrefetchQuery {
@@ -1030,16 +1062,25 @@ impl<M: Model, R, Relation, C, ChildRelation> PrefetchRelation<M>
     }
 }
 
-pub struct NestedPrefetchQuery<M, R, Relation, C, ChildRelation> {
+pub struct NestedPrefetchQuery<
+    M: Model,
+    R: Model,
+    Relation,
+    C,
+    ChildRelation,
+    OuterKey = <M as Model>::PrimaryKey,
+    InnerKey = <R as Model>::PrimaryKey,
+> {
     query: SelectQuery<M>,
-    outer: HasMany<M, R, Relation, i64>,
-    inner: HasMany<R, C, ChildRelation, i64>,
+    outer: HasMany<M, R, Relation, OuterKey>,
+    inner: HasMany<R, C, ChildRelation, InnerKey>,
 }
 
-impl<M, R, Relation> PrefetchRelatedQuery<M, R, Relation, i64>
+impl<M, R, Relation, Key> PrefetchRelatedQuery<M, R, Relation, Key>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
+    Key: crate::ForeignKeyValue<M::PrimaryKey>,
 {
     pub fn filter(self, expr: Expr) -> Self {
         Self {
@@ -1069,10 +1110,13 @@ where
         }
     }
 
-    pub fn prefetch_related<R2, Relation2>(
+    pub fn prefetch_related<R2, Relation2, Key2>(
         self,
-        relation: HasMany<M, R2, Relation2>,
-    ) -> MultiPrefetchRelatedQuery<M, R, Relation, R2, Relation2> {
+        relation: HasMany<M, R2, Relation2, Key2>,
+    ) -> MultiPrefetchRelatedQuery<M, R, Relation, R2, Relation2, Key, Key2>
+    where
+        Key2: crate::ForeignKeyValue<M::PrimaryKey>,
+    {
         MultiPrefetchRelatedQuery {
             query: self.query,
             first: self.relation,
@@ -1107,15 +1151,16 @@ where
                     let field = relation.field();
                     let related = load_models_by_ids(
                         connection,
-                        ModelField::<R, i64>::new(field.table, field.name),
+                        ModelField::<R, M::PrimaryKey>::new(field.table, field.name),
                         parent_ids,
                     )?;
-                    let mut related_by_parent = HashMap::<i64, Vec<R>>::new();
+                    let mut related_by_parent = HashMap::<M::PrimaryKey, Vec<R>>::new();
                     for model in related {
-                        related_by_parent
-                            .entry(relation.foreign_key(&model))
-                            .or_default()
-                            .push(model);
+                        if let Some(key) =
+                            crate::ForeignKeyValue::owner_key(relation.foreign_key(&model))
+                        {
+                            related_by_parent.entry(key).or_default().push(model);
+                        }
                     }
                     Ok(parents
                         .into_iter()
@@ -1154,19 +1199,30 @@ where
 }
 
 /// Query which materializes two reverse relations in one typed result.
-pub struct MultiPrefetchRelatedQuery<M, R1, Relation1, R2, Relation2> {
+pub struct MultiPrefetchRelatedQuery<
+    M: Model,
+    R1,
+    Relation1,
+    R2,
+    Relation2,
+    Key1 = <M as Model>::PrimaryKey,
+    Key2 = <M as Model>::PrimaryKey,
+> {
     query: SelectQuery<M>,
-    first: HasMany<M, R1, Relation1>,
-    second: HasMany<M, R2, Relation2>,
+    first: HasMany<M, R1, Relation1, Key1>,
+    second: HasMany<M, R2, Relation2, Key2>,
 }
 
-impl<M, R, Relation, C, ChildRelation> NestedPrefetchQuery<M, R, Relation, C, ChildRelation>
+impl<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
+    NestedPrefetchQuery<M, R, Relation, C, ChildRelation, OuterKey, InnerKey>
 where
     M: Model + Send + 'static,
     R: Model + Send + 'static,
     C: Model + Send + 'static,
     Relation: Send + 'static,
     ChildRelation: Send + 'static,
+    OuterKey: crate::ForeignKeyValue<M::PrimaryKey>,
+    InnerKey: crate::ForeignKeyValue<R::PrimaryKey>,
 {
     pub async fn all(
         self,
@@ -1185,7 +1241,7 @@ where
         let outer_field = self.outer.field();
         let children = database
             .fetch_by_many(
-                ModelField::<R, i64>::new(outer_field.table, outer_field.name),
+                ModelField::<R, M::PrimaryKey>::new(outer_field.table, outer_field.name),
                 parent_ids,
             )
             .await?;
@@ -1198,16 +1254,15 @@ where
         let inner_field = self.inner.field();
         let grandchildren = database
             .fetch_by_many(
-                ModelField::<C, i64>::new(inner_field.table, inner_field.name),
+                ModelField::<C, R::PrimaryKey>::new(inner_field.table, inner_field.name),
                 child_ids,
             )
             .await?;
-        let mut grandchildren_by_child = HashMap::<i64, Vec<C>>::new();
+        let mut grandchildren_by_child = HashMap::<R::PrimaryKey, Vec<C>>::new();
         for model in grandchildren {
-            grandchildren_by_child
-                .entry(self.inner.foreign_key(&model))
-                .or_default()
-                .push(model);
+            if let Some(key) = crate::ForeignKeyValue::owner_key(self.inner.foreign_key(&model)) {
+                grandchildren_by_child.entry(key).or_default().push(model);
+            }
         }
         let children = children
             .into_iter()
@@ -1222,12 +1277,13 @@ where
                 }
             })
             .collect::<Vec<_>>();
-        let mut children_by_parent = HashMap::<i64, Vec<_>>::new();
+        let mut children_by_parent = HashMap::<M::PrimaryKey, Vec<_>>::new();
         for child in children {
-            children_by_parent
-                .entry(self.outer.foreign_key(&child.model))
-                .or_default()
-                .push(child);
+            if let Some(key) =
+                crate::ForeignKeyValue::owner_key(self.outer.foreign_key(&child.model))
+            {
+                children_by_parent.entry(key).or_default().push(child);
+            }
         }
         Ok(parents
             .into_iter()
@@ -1245,13 +1301,16 @@ where
     }
 }
 
-impl<M, R1, Relation1, R2, Relation2> MultiPrefetchRelatedQuery<M, R1, Relation1, R2, Relation2>
+impl<M, R1, Relation1, R2, Relation2, Key1, Key2>
+    MultiPrefetchRelatedQuery<M, R1, Relation1, R2, Relation2, Key1, Key2>
 where
     M: Model + Send + 'static,
     R1: Model + Send + 'static,
     R2: Model + Send + 'static,
     Relation1: Send + 'static,
     Relation2: Send + 'static,
+    Key1: crate::ForeignKeyValue<M::PrimaryKey>,
+    Key2: crate::ForeignKeyValue<M::PrimaryKey>,
 {
     pub async fn all(
         self,
@@ -1269,29 +1328,27 @@ where
         let second_field = self.second.field();
         let first = database
             .fetch_by_many(
-                ModelField::<R1, i64>::new(first_field.table, first_field.name),
+                ModelField::<R1, M::PrimaryKey>::new(first_field.table, first_field.name),
                 parent_ids.clone(),
             )
             .await?;
         let second = database
             .fetch_by_many(
-                ModelField::<R2, i64>::new(second_field.table, second_field.name),
+                ModelField::<R2, M::PrimaryKey>::new(second_field.table, second_field.name),
                 parent_ids,
             )
             .await?;
-        let mut first_by_parent = HashMap::<i64, Vec<R1>>::new();
+        let mut first_by_parent = HashMap::<M::PrimaryKey, Vec<R1>>::new();
         for model in first {
-            first_by_parent
-                .entry(self.first.foreign_key(&model))
-                .or_default()
-                .push(model);
+            if let Some(key) = crate::ForeignKeyValue::owner_key(self.first.foreign_key(&model)) {
+                first_by_parent.entry(key).or_default().push(model);
+            }
         }
-        let mut second_by_parent = HashMap::<i64, Vec<R2>>::new();
+        let mut second_by_parent = HashMap::<M::PrimaryKey, Vec<R2>>::new();
         for model in second {
-            second_by_parent
-                .entry(self.second.foreign_key(&model))
-                .or_default()
-                .push(model);
+            if let Some(key) = crate::ForeignKeyValue::owner_key(self.second.foreign_key(&model)) {
+                second_by_parent.entry(key).or_default().push(model);
+            }
         }
 
         Ok(parents
@@ -1316,10 +1373,10 @@ where
     }
 }
 
-fn load_joined_models<M: Model, R: Model, Relation>(
+fn load_joined_models<M: Model, R: Model, Relation, Key>(
     connection: &rusqlite::Connection,
     compiled: &CompiledQuery,
-) -> rusqlite::Result<Vec<WithOne<M, R, Relation>>> {
+) -> rusqlite::Result<Vec<WithOne<M, R, Relation, Key>>> {
     let mut statement = connection.prepare(&compiled.sql)?;
     let params = sqlite_params(compiled)?;
     let offset = M::columns().len();
@@ -1346,7 +1403,7 @@ fn load_optional_joined_models<M: Model, R: Model, Relation>(
         .position(|column| *column == R::primary_key().column().name)
         .expect("primary key must be one of the model columns");
     let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
-        let related_id: Option<i64> = row.get(offset + related_primary_key_offset)?;
+        let related_id: Option<R::PrimaryKey> = row.get(offset + related_primary_key_offset)?;
         Ok(WithOptionalOne {
             model: M::from_row_at(row, 0)?,
             related: related_id
@@ -1394,10 +1451,10 @@ fn load_models<M: Model>(
     rows.collect()
 }
 
-fn load_models_by_ids<M: Model>(
+fn load_models_by_ids<M: Model, Key: crate::PrimaryKey>(
     connection: &rusqlite::Connection,
-    field: ModelField<M, i64>,
-    ids: Vec<i64>,
+    field: ModelField<M, Key>,
+    ids: Vec<Key>,
 ) -> rusqlite::Result<Vec<M>> {
     const SQLITE_SAFE_VARIABLE_LIMIT: usize = 900;
     let mut result = Vec::new();
@@ -1405,7 +1462,11 @@ fn load_models_by_ids<M: Model>(
         let ast = M::query()
             .filter(Expr::In {
                 left: Box::new(Expr::Column(field.column())),
-                values: chunk.iter().copied().map(DatabaseValue::Integer).collect(),
+                values: chunk
+                    .iter()
+                    .copied()
+                    .map(QueryValue::into_query_value)
+                    .collect(),
             })
             .into_ast()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -1440,6 +1501,7 @@ fn database_value(value: &DatabaseValue) -> rusqlite::Result<Value> {
         DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
         DatabaseValue::Text(value) => Ok(Value::Text(value.clone())),
         DatabaseValue::Binary(value) => Ok(Value::Blob(value.clone())),
+        DatabaseValue::Uuid(value) => Ok(Value::Blob(value.as_bytes().to_vec())),
         DatabaseValue::Boolean(value) => Ok(Value::Integer(i64::from(*value))),
         DatabaseValue::DateTime(value) => value
             .format(&Rfc3339)

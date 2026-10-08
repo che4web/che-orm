@@ -848,6 +848,7 @@ fn render_column_type(column_type: ColumnType) -> &'static str {
         ColumnType::Binary => "ColumnType::Binary",
         ColumnType::Boolean => "ColumnType::Boolean",
         ColumnType::DateTime => "ColumnType::DateTime",
+        ColumnType::Uuid => "ColumnType::Uuid",
     }
 }
 
@@ -1193,6 +1194,7 @@ fn encode_column(bytes: &mut Vec<u8>, column: &ColumnState, include_field_name: 
         ColumnType::Binary => 2,
         ColumnType::Boolean => 3,
         ColumnType::DateTime => 4,
+        ColumnType::Uuid => 6,
     });
     encode_bool(bytes, column.nullable);
     encode_bool(bytes, column.primary_key);
@@ -2355,7 +2357,8 @@ fn column_definition_sql(column: &ColumnState) -> String {
     );
     if column.primary_key {
         sql.push_str(" PRIMARY KEY");
-    } else if !column.nullable {
+    }
+    if !column.nullable && (!column.primary_key || column.column_type == ColumnType::Uuid) {
         sql.push_str(" NOT NULL");
     }
     if column.unique {
@@ -2406,6 +2409,7 @@ fn sqlite_column_type(column_type: ColumnType) -> &'static str {
         ColumnType::Binary => "BLOB",
         ColumnType::Boolean => "INTEGER",
         ColumnType::DateTime => "TEXT",
+        ColumnType::Uuid => "BLOB",
     }
 }
 

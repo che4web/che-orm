@@ -339,15 +339,15 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
     let has_nested = !nested.is_empty();
     let field_count = serialize_fields.len();
     let conversion = if nested.len() == 1 {
-        let (name, many, _related_model, marker, optional, serializer_type) =
+        let (name, many, related_model, marker, optional, serializer_type) =
             nested.into_iter().next().unwrap();
         let child_input = quote! { <#serializer_type as #orm::ModelSerializer>::Input };
         let wrapper = if many {
-            quote! { #orm::WithMany<#model, #child_input, #marker> }
+            quote! { #orm::WithMany<#model, #child_input, #marker, <#model as #orm::Model>::PrimaryKey> }
         } else if optional {
             quote! { #orm::WithOptionalOne<#model, #child_input, #marker> }
         } else {
-            quote! { #orm::WithOne<#model, #child_input, #marker> }
+            quote! { #orm::WithOne<#model, #child_input, #marker, <#related_model as #orm::Model>::PrimaryKey> }
         };
         let loaded_wrapper = quote! {
             #orm::Loaded<#model, (#orm::LoadedMany<#child_input, #marker>,)>
@@ -614,7 +614,7 @@ fn derive_model_serializer_impl(input: DeriveInput) -> syn::Result<proc_macro2::
 
             fn is_valid(
                 data: #orm::serde_json::Value,
-                mode: #orm::WriteMode,
+                mode: #orm::WriteMode<<#model as #orm::Model>::PrimaryKey>,
             ) -> ::core::result::Result<#orm::ValidatedWrite<#model>, #orm::ValidationErrors> {
                 #validator_call
                 match mode {
@@ -855,6 +855,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut primary_key_seen = false;
     let mut primary_key_constant = None;
     let mut primary_key_field = None;
+    let mut primary_key_type = None;
     let mut generated_constants = HashSet::new();
     let mut field_columns = HashMap::new();
 
@@ -881,10 +882,12 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         if field_attributes.foreign_key.is_some()
             && !is_i64(&field_type)
             && !is_option_i64(&field_type)
+            && !is_uuid(&field_type)
+            && !is_option_uuid(&field_type)
         {
             return Err(Error::new_spanned(
                 &field_type,
-                "foreign_key currently requires an i64 field",
+                "foreign_key requires i64, Uuid, Option<i64> or Option<Uuid>",
             ));
         }
 
@@ -894,10 +897,11 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 .as_ref()
                 .is_some_and(|action| action.value().eq_ignore_ascii_case("set null"))
             && !is_option_i64(&field_type)
+            && !is_option_uuid(&field_type)
         {
             return Err(Error::new_spanned(
                 &field_type,
-                "on_delete = \"set null\" requires an Option<i64> foreign_key field",
+                "on_delete = \"set null\" requires an Option<i64> or Option<Uuid> foreign_key field",
             ));
         }
 
@@ -908,15 +912,16 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                     "a model can have only one primary_key field",
                 ));
             }
-            if !is_i64(&field_type) {
+            if !is_i64(&field_type) && !is_uuid(&field_type) {
                 return Err(Error::new_spanned(
                     &field_type,
-                    "primary_key requires an i64 field",
+                    "primary_key requires an i64 or Uuid field",
                 ));
             }
             primary_key_seen = true;
             primary_key_constant = Some(constant.clone());
             primary_key_field = Some(field_name.clone());
+            primary_key_type = Some(field_type.clone());
         }
 
         if (field_attributes.auto_now_add || field_attributes.auto_now)
@@ -975,6 +980,13 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             }
         });
         if let Some(target) = &field_attributes.foreign_key {
+            let key_type = if is_option_i64(&field_type) {
+                quote! { i64 }
+            } else if is_option_uuid(&field_type) {
+                quote! { #orm::Uuid }
+            } else {
+                quote! { #field_type }
+            };
             let relation_name = field_column
                 .strip_suffix("_id")
                 .unwrap_or(&field_column)
@@ -1018,6 +1030,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 impl #orm::RelationSource for #marker_name {
                     const SOURCE: &'static str = #column;
                 }
+                const _: () = {
+                    fn check_target_key<T: #orm::Model<PrimaryKey = #key_type>>() {}
+                    let _ = check_target_key::<#target>;
+                };
             });
         }
 
@@ -1043,7 +1059,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             #field_name: row.get(#index + offset)?,
         });
 
-        if !field_attributes.primary_key && !auto_now_add && !auto_now {
+        if (!field_attributes.primary_key || is_uuid(&field_type)) && !auto_now_add && !auto_now {
             insert_values.push(quote! {
                 #orm::InsertValue {
                     column: #orm::ColumnRef::new(#table, #column),
@@ -1073,6 +1089,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         )
     })?;
     let primary_key_field = primary_key_field.expect("primary key constant has a field");
+    let primary_key_type = primary_key_type.expect("primary key has a type");
 
     let unique_constraints = model_attributes.unique_constraints.iter().map(|columns| {
         let columns = columns.iter().map(|column| {
@@ -1099,6 +1116,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         #(#relation_markers)*
 
         impl #orm::Model for #model {
+            type PrimaryKey = #primary_key_type;
             fn table_name() -> &'static str {
                 #table
             }
@@ -1107,11 +1125,11 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 &[#(#columns),*]
             }
 
-            fn primary_key() -> #orm::ModelField<Self, i64> {
+            fn primary_key() -> #orm::ModelField<Self, Self::PrimaryKey> {
                 Self::#primary_key_constant
             }
 
-            fn primary_key_value(&self) -> i64 {
+            fn primary_key_value(&self) -> Self::PrimaryKey {
                 self.#primary_key_field
             }
 
@@ -1372,6 +1390,27 @@ fn is_i64(ty: &syn::Type) -> bool {
         syn::Type::Path(path) => path.qself.is_none() && path.path.is_ident("i64"),
         _ => false,
     }
+}
+
+fn is_uuid(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(path) if path.qself.is_none()
+        && path.path.segments.last().is_some_and(|segment| segment.ident == "Uuid"))
+}
+
+fn is_option_uuid(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    matches!(arguments.args.first(), Some(syn::GenericArgument::Type(inner)) if is_uuid(inner))
 }
 
 fn is_option_i64(ty: &syn::Type) -> bool {

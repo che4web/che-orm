@@ -1,0 +1,17 @@
+error[E0271]: type mismatch resolving `<User as Model>::PrimaryKey == i64`
+  --> tests/ui/uuid_foreign_key_type_mismatch.rs:15:25
+   |
+15 |     #[orm(foreign_key = User)]
+   |                         ^^^^ type mismatch resolving `<User as Model>::PrimaryKey == i64`
+   |
+note: expected this to be `i64`
+  --> tests/ui/uuid_foreign_key_type_mismatch.rs:7:9
+   |
+ 7 |     id: Uuid,
+   |         ^^^^
+note: required by a bound in `check_target_key`
+  --> tests/ui/uuid_foreign_key_type_mismatch.rs:10:17
+   |
+10 | #[derive(Debug, Model)]
+   |                 ^^^^^ required by this bound in `check_target_key`
+   = note: this error originates in the derive macro `Model` (in Nightly builds, run with -Z macro-backtrace for more info)

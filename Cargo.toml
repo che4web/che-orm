@@ -20,9 +20,10 @@ postgres = []
 sqlite = ["dep:deadpool-sqlite", "dep:thiserror", "dep:tokio"]
 
 [dependencies]
-che-orm-macros = { version = "0.2.2", path = "che-orm-macros" }
+che-orm-macros = { version = "0.2.3", path = "che-orm-macros" }
 deadpool-sqlite = { version = "0.12", optional = true }
-rusqlite = { version = "0.37", features = ["bundled", "time", "hooks"] }
+rusqlite = { version = "0.37", features = ["bundled", "time", "hooks", "uuid"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting", "parsing", "serde-human-readable", "serde-well-known"] }

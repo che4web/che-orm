@@ -101,7 +101,10 @@ println!("{}", result.rows_affected);
 println!("{:?}", result.last_insert_rowid);
 ```
 
-`primary_key`, `auto_now_add` и `auto_now` не включаются в обычный insert.
+Целочисленный `primary_key`, `auto_now_add` и `auto_now` не включаются в
+`database.insert(&model)`. UUID-ключ передаётся из модели как 16-байтовый BLOB.
+Для UUID-моделей `database.create::<User>()` генерирует UUIDv7, если ключ не
+задан через `.set(User::ID, uuid)`.
 Поле `auto_now` автоматически добавляется в ORM-generated update.
 Остальные поля передаются как SQL parameters.
 

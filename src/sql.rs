@@ -26,6 +26,7 @@ impl SqlDialect for PostgresDialect {
             ColumnType::Binary => "BYTEA",
             ColumnType::Boolean => "BOOLEAN",
             ColumnType::DateTime => "TIMESTAMPTZ",
+            ColumnType::Uuid => "UUID",
         });
     }
 
@@ -51,6 +52,7 @@ impl SqlDialect for SqliteDialect {
             ColumnType::Binary => "BLOB",
             ColumnType::Boolean => "INTEGER",
             ColumnType::DateTime => "TEXT",
+            ColumnType::Uuid => "BLOB",
         });
     }
 
@@ -349,7 +351,7 @@ impl<D: SqlDialect> SqlCompiler<D> {
             if column.primary_key {
                 self.sql.push_str(" PRIMARY KEY");
             }
-            if !column.nullable && !column.primary_key {
+            if !column.nullable && (!column.primary_key || column.column_type == ColumnType::Uuid) {
                 self.sql.push_str(" NOT NULL");
             }
             if column.unique {

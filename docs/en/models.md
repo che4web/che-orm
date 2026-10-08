@@ -3,7 +3,8 @@
 ## Derive Model
 
 `#[derive(Model)]` generates the `Model` implementation and typed field constants.
-Every model must have exactly one `#[orm(primary_key)]` field of type `i64`:
+Every model must have exactly one `#[orm(primary_key)]` field of type `i64`
+or `che_orm::Uuid`:
 
 ```rust
 #[derive(Model)]
@@ -22,6 +23,31 @@ high-level facade for `get`, `update`, and `delete`.
 
 `Debug` in `#[derive(Debug, Model)]` is unrelated to the ORM. It is the standard
 Rust derive for printing a model with `{:?}`.
+
+### UUIDv7
+
+```rust
+use che_orm::{Model, Uuid};
+
+#[derive(Debug, Model)]
+#[orm(table = "uuid_users")]
+struct User {
+    #[orm(primary_key)]
+    id: Uuid,
+    name: String,
+}
+```
+
+`database.create::<User>()` and `User::insert()` generate UUIDv7 in Rust when
+building an INSERT if the key was not supplied through `.set(User::ID, uuid)`.
+`database.insert(&model)` preserves `model.id`. Explicit UUIDs are preserved
+regardless of version. SQLite stores a 16-byte `BLOB`, PostgreSQL DDL uses
+`UUID`, and JSON serializers expose UUID strings.
+
+The derive sets `Model::PrimaryKey` from the field type. Hand-written `Model`
+implementations must specify `type PrimaryKey = i64` or `Uuid`; `primary_key`
+and `primary_key_value` use this type. Serializer write modes use the model's
+key type, for example `WriteMode<Uuid>`.
 
 ## Table Attributes
 
@@ -56,7 +82,7 @@ Do not specify both forms for one field: this creates two uniqueness checks.
 
 | Attribute | Purpose |
 | --- | --- |
-| `primary_key` | Primary key; `i64` receives backend identity/rowid behavior. |
+| `primary_key` | Primary key; `i64` receives backend identity/rowid behavior, `Uuid` generates UUIDv7 in Rust when the key is omitted. |
 | `db_column = "old_name"` | Physical SQL column when the Rust field has another name. |
 | `unique` | Uniqueness of one column. |
 | `default = "..."` | SQL expression for `DEFAULT`. The value is not parameterized. |
@@ -92,6 +118,7 @@ struct User {
 | Rust | SQLite SQL | Nullable |
 | --- | --- | --- |
 | `i64` | `INTEGER` | No |
+| `Uuid` | `BLOB` (16 bytes) | No |
 | `String` | `TEXT` | No |
 | `ImageField` | `TEXT` (relative storage key) | No |
 | `Vec<u8>` | `BLOB` | No |
@@ -152,7 +179,10 @@ let registry = che_orm::AppRegistry::new()
 This separates model ownership while retaining a single schema state for the
 application's compiled migrations.
 
-A foreign key between ORM models is declared through `foreign_key`:
+A foreign key between ORM models is declared through `foreign_key`.
+Its key type must match the target model's primary key: `i64` / `Uuid` or the
+nullable variants `Option<i64>` / `Option<Uuid>`.
+Use `on_delete = "set null"` only with nullable keys:
 
 ```rust
 #[derive(Model)]

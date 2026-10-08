@@ -89,6 +89,44 @@ async fn main() -> Result<(), che_orm::OrmError> {
 Managed timestamp-поля не передаются в `INSERT`: их значения создаёт SQLite.
 `updated_at` автоматически добавляется ORM в каждый update-запрос.
 
+## Первичные ключи UUIDv7
+
+Для UUID-ключа используйте `Uuid` вместо `i64`:
+
+```rust
+use che_orm::{Model, Uuid};
+
+#[derive(Debug, Model)]
+#[orm(table = "uuid_users")]
+struct User {
+    #[orm(primary_key)]
+    id: Uuid,
+    name: String,
+}
+```
+
+`database.create::<User>().set(User::NAME, "Alice").execute().await?`
+генерирует UUIDv7 в Rust, если ключ не передан. То же делает `User::insert()`
+при преобразовании в AST. Явный ключ задаётся через `.set(User::ID, uuid)`;
+`database.insert(&model)` сохраняет `model.id`. Явно переданный UUID
+сохраняется независимо от его версии.
+
+SQLite хранит UUID как `BLOB` из 16 байт, PostgreSQL DDL использует `UUID`,
+а JSON-сериализаторы возвращают UUID-строки. `get`, `update`, `delete`,
+типизированные транзакции, фильтры и загрузка связей работают с типом ключа
+модели. Внешние ключи к UUID-моделям имеют тип `Uuid` или `Option<Uuid>`;
+`on_delete = "set null"` используется только с optional-ключами.
+
+`#[derive(Model)]` задаёт ассоциированный тип `Model::PrimaryKey` автоматически.
+В ручных реализациях нужен `type PrimaryKey = i64` или `Uuid`.
+`WriteMode` по умолчанию использует целочисленный ключ; для явно типизированного
+UUID-режима записи используется `WriteMode<Uuid>`. В вызовах сериализатора
+`WriteMode::Patch { id: user.id }` тип выводится автоматически.
+
+Новые UUID-модели добавляются через миграции приложения. Замена существующего
+целочисленного ключа на UUID требует явного преобразования данных и внешних
+ключей: смена Rust-типа сама по себе не преобразует сохранённые значения.
+
 ## Enum choices
 
 Для фиксированного набора строк используйте `DbEnum`. Одно значение variant используется в JSON,

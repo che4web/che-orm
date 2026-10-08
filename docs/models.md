@@ -3,7 +3,8 @@
 ## Derive Model
 
 `#[derive(Model)]` генерирует реализацию `Model` и константы typed fields.
-Каждая модель должна иметь ровно одно поле `#[orm(primary_key)]` типа `i64`:
+Каждая модель должна иметь ровно одно поле `#[orm(primary_key)]` типа `i64`
+или `che_orm::Uuid`:
 
 ```rust
 #[derive(Model)]
@@ -23,6 +24,31 @@ struct User {
 
 `Debug` в `#[derive(Debug, Model)]` не относится к ORM. Это стандартный Rust
 derive для печати модели через `{:?}`.
+
+### UUIDv7
+
+```rust
+use che_orm::{Model, Uuid};
+
+#[derive(Debug, Model)]
+#[orm(table = "uuid_users")]
+struct User {
+    #[orm(primary_key)]
+    id: Uuid,
+    name: String,
+}
+```
+
+`database.create::<User>()` и `User::insert()` генерируют UUIDv7 в Rust при
+сборке INSERT, если ключ не задан через `.set(User::ID, uuid)`.
+`database.insert(&model)` сохраняет UUID из `model.id`. Явно переданный UUID
+сохраняется независимо от версии. SQLite хранит 16-байтовый `BLOB`, PostgreSQL
+DDL использует `UUID`, JSON-сериализаторы возвращают UUID-строку.
+
+Derive задаёт `Model::PrimaryKey` по типу поля. В ручной реализации `Model`
+укажите `type PrimaryKey = i64` или `Uuid`; методы `primary_key` и
+`primary_key_value` используют этот тип. Режим записи сериализатора использует
+тип первичного ключа модели; например, `WriteMode<Uuid>`.
 
 ## Атрибуты таблицы
 
@@ -57,7 +83,7 @@ derive для печати модели через `{:?}`.
 
 | Атрибут | Назначение |
 | --- | --- |
-| `primary_key` | Первичный ключ; `i64` получает identity/rowid поведение backend-а. |
+| `primary_key` | Первичный ключ; `i64` получает identity/rowid поведение backend-а, `Uuid` генерируется как UUIDv7 в Rust при пропущенном ключе. |
 | `db_column = "old_name"` | Физическая SQL-колонка при другом Rust-имени поля. |
 | `unique` | Уникальность одной колонки. |
 | `default = "..."` | SQL expression для `DEFAULT`. Значение не параметризуется. |
@@ -93,6 +119,7 @@ struct User {
 | Rust | SQL SQLite | Nullable |
 | --- | --- | --- |
 | `i64` | `INTEGER` | Нет |
+| `Uuid` | `BLOB` (16 байт) | Нет |
 | `String` | `TEXT` | Нет |
 | `ImageField` | `TEXT` (относительный ключ файла) | Нет |
 | `Vec<u8>` | `BLOB` | Нет |
@@ -156,7 +183,10 @@ let registry = che_orm::AppRegistry::new()
 Это разделяет ownership моделей и оставляет единое состояние схемы для
 compiled migrations приложения.
 
-Foreign key между ORM-моделями описывается через `foreign_key`:
+Foreign key между ORM-моделями описывается через `foreign_key`.
+Тип ключа должен совпадать с первичным ключом целевой модели: `i64` / `Uuid`
+или их nullable-варианты `Option<i64>` / `Option<Uuid>`.
+`on_delete = "set null"` используется только с nullable-ключами:
 
 ```rust
 #[derive(Model)]

@@ -2,6 +2,12 @@
 
 ## 0.2.3
 
+- Add UUIDv7 primary keys, 16-byte SQLite BLOB storage, UUID PostgreSQL DDL,
+  typed CRUD, relations, serializers, and migration metadata.
+- Add `Model::PrimaryKey` and `WriteMode<Key>`; hand-written model and write
+  serializer implementations must use the model's key type.
+- Require `che-orm-macros` 0.2.3 for the updated derive implementations.
+- Support generic `select_related` execution with required and nullable keys.
 - Add nullable `ImageField` storage keys with SQLite round-trip support and read-only JSON writes.
 - Document image-field models, uploads, storage paths, and cleanup in Russian and English.
 

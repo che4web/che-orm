@@ -12,11 +12,54 @@ pub enum DatabaseValue {
     Binary(Vec<u8>),
     Boolean(bool),
     DateTime(OffsetDateTime),
+    Uuid(uuid::Uuid),
     Null,
 }
 
 pub trait QueryValue<T> {
     fn into_query_value(self) -> DatabaseValue;
+}
+
+impl QueryValue<uuid::Uuid> for uuid::Uuid {
+    fn into_query_value(self) -> DatabaseValue {
+        DatabaseValue::Uuid(self)
+    }
+}
+
+/// Supported model keys, including their automatic INSERT value.
+pub trait PrimaryKey:
+    Copy + Eq + std::hash::Hash + Send + Sync + 'static + QueryValue<Self> + rusqlite::types::FromSql
+{
+    fn generated_value() -> Option<DatabaseValue>;
+}
+
+impl PrimaryKey for i64 {
+    fn generated_value() -> Option<DatabaseValue> {
+        None
+    }
+}
+
+impl PrimaryKey for uuid::Uuid {
+    fn generated_value() -> Option<DatabaseValue> {
+        Some(DatabaseValue::Uuid(Self::now_v7()))
+    }
+}
+
+/// Extracts the owner key from a required or nullable foreign-key field.
+pub trait ForeignKeyValue<Key: PrimaryKey>: Copy + Send + 'static {
+    fn owner_key(self) -> Option<Key>;
+}
+
+impl<Key: PrimaryKey> ForeignKeyValue<Key> for Key {
+    fn owner_key(self) -> Option<Key> {
+        Some(self)
+    }
+}
+
+impl<Key: PrimaryKey> ForeignKeyValue<Key> for Option<Key> {
+    fn owner_key(self) -> Option<Key> {
+        self
+    }
 }
 
 impl QueryValue<i64> for i64 {

@@ -249,6 +249,7 @@ impl QueryAst {
 
 /// Trait implemented by `#[derive(Model)]` for ORM models.
 pub trait Model: Sized {
+    type PrimaryKey: crate::PrimaryKey;
     /// Stable Rust model name used by migration state. It is deliberately
     /// independent from `table_name()` so table renames keep model identity.
     fn model_name() -> &'static str {
@@ -259,9 +260,9 @@ pub trait Model: Sized {
     }
     fn table_name() -> &'static str;
     fn columns() -> &'static [&'static str];
-    /// Returns the model's generated integer primary-key field.
-    fn primary_key() -> ModelField<Self, i64>;
-    fn primary_key_value(&self) -> i64 {
+    /// Returns the model's typed primary-key field.
+    fn primary_key() -> ModelField<Self, Self::PrimaryKey>;
+    fn primary_key_value(&self) -> Self::PrimaryKey {
         panic!("Model::primary_key_value must be implemented for eager relations")
     }
     fn schema() -> TableSchema;
@@ -468,16 +469,16 @@ impl<M: Model> SelectQuery<M> {
         }
     }
 
-    pub fn into_joined_ast<R: Model, Relation>(
+    pub fn into_joined_ast<R: Model, Relation, Key>(
         self,
-        relation: BelongsTo<M, R, Relation>,
+        relation: BelongsTo<M, R, Relation, Key>,
     ) -> Result<QueryAst, QueryBuildError> {
         self.into_joined_ast_with_kind(relation, JoinType::Inner)
     }
 
-    pub fn into_optional_joined_ast<R: Model, Relation>(
+    pub fn into_optional_joined_ast<R: Model, Relation, Key>(
         self,
-        relation: BelongsTo<M, R, Relation, Option<i64>>,
+        relation: BelongsTo<M, R, Relation, Option<Key>>,
     ) -> Result<QueryAst, QueryBuildError> {
         self.into_joined_ast_with_kind(relation, JoinType::Left)
     }
@@ -542,7 +543,13 @@ impl<M: Model> InsertQuery<M> {
             .collect();
         self
     }
-    pub fn into_ast(self) -> Result<QueryAst, QueryBuildError> {
+    pub fn into_ast(mut self) -> Result<QueryAst, QueryBuildError> {
+        let column = M::primary_key().column();
+        if !self.ast.values.iter().any(|value| value.column == column) {
+            if let Some(value) = <M::PrimaryKey as crate::PrimaryKey>::generated_value() {
+                self.ast.values.push(InsertValue { column, value });
+            }
+        }
         validate_unique_columns(self.ast.values.iter().map(|value| &value.column))?;
         Ok(QueryAst::Insert(self.ast))
     }

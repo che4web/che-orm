@@ -65,8 +65,12 @@ async fn main() -> Result<(), che_orm::OrmError> {
 }
 ```
 
-Models must have exactly one `#[orm(primary_key)]` field of type `i64`. The
-`auto_now_add` and `auto_now` fields must be `OffsetDateTime`; the ORM manages
+Models must have exactly one `#[orm(primary_key)]` field of type `i64` or
+`che_orm::Uuid`. For `Uuid`, INSERT builders generate UUIDv7 automatically when
+the key is omitted. Foreign keys must match the target model's primary-key
+type. See [the model guide](models.md#uuidv7) for details.
+The `auto_now_add` and `auto_now` fields must be `OffsetDateTime`; the ORM
+manages their values automatically.
 
 ## 3. Create and Read a Row
 

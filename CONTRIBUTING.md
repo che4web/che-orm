@@ -12,7 +12,7 @@ support that does not exist.
 1. Keep sample application models, registry, settings, and migrations in
    `che-orm-examples`; the core crate must remain application-independent.
 2. Use `#[derive(Debug, Model)]`, an explicit `#[orm(table = "...")]`, and one
-   `#[orm(primary_key)]` `i64` field per model.
+   `#[orm(primary_key)]` field of type `i64` or `che_orm::Uuid` per model.
 3. Use Atlas migrations for persisted schema changes. Review generated SQL and
    commit migration files with `che-orm-examples/migrations/atlas.sum`.
 4. Add a regression test for every behavior change. Macro behavior used by

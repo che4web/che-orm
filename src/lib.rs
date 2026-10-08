@@ -75,6 +75,7 @@ pub use query::*;
 pub use schema::*;
 pub use sql::*;
 pub use types::*;
+pub use uuid::Uuid;
 
 /// Serializes a timestamp in the RFC 3339 format used by JSON API clients.
 pub struct Rfc3339Timestamp<'a>(pub &'a time::OffsetDateTime);
@@ -101,10 +102,10 @@ impl serde::Serialize for OptionalRfc3339Timestamp<'_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteMode {
+pub enum WriteMode<Key = i64> {
     Create,
-    Update { id: i64 },
-    Patch { id: i64 },
+    Update { id: Key },
+    Patch { id: Key },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +143,7 @@ pub trait ModelWriteSerializer {
 
     fn is_valid(
         data: serde_json::Value,
-        mode: WriteMode,
+        mode: WriteMode<<Self::Model as Model>::PrimaryKey>,
     ) -> Result<ValidatedWrite<Self::Model>, ValidationErrors>;
 }
 
