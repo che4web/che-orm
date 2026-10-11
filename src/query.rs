@@ -291,6 +291,21 @@ pub trait Model: Sized {
         })
     }
     fn insert_values(&self) -> Vec<InsertValue>;
+    /// Materialized field values keyed by physical SQL column, independently of
+    /// Serde naming. Unlike insert values, these include generated keys and
+    /// managed timestamps. The derive generates a complete implementation;
+    /// manual models with managed fields should override this method.
+    fn field_values(&self) -> Vec<InsertValue> {
+        let mut values = self.insert_values();
+        let column = Self::primary_key().column();
+        if !values.iter().any(|value| value.column == column) {
+            values.push(InsertValue {
+                column,
+                value: self.primary_key_value().into_query_value(),
+            });
+        }
+        values
+    }
     fn managed_update_values() -> Vec<Assignment> {
         Vec::new()
     }

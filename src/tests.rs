@@ -995,6 +995,30 @@ fn compiles_sqlite_create_table_from_model() {
 }
 
 #[test]
+fn materialized_field_values_include_keys_timestamps_and_physical_names() {
+    let mut user = User::new("Alice".into());
+    user.id = 42;
+    let values = user.field_values();
+    assert_eq!(values.len(), User::columns().len());
+    assert_eq!(values[0].value, DatabaseValue::Integer(42));
+    assert_eq!(values[4].value, DatabaseValue::DateTime(user.created_at));
+    assert_eq!(values[5].value, DatabaseValue::DateTime(user.updated_at));
+    assert!(
+        user.insert_values()
+            .iter()
+            .all(|value| !["id", "created_at", "updated_at"].contains(&value.column.name))
+    );
+
+    let item = DbColumnItem {
+        id: 7,
+        title: "Renamed".into(),
+    };
+    let values = item.field_values();
+    assert_eq!(values[1].column.name, "display_title");
+    assert_eq!(values[1].value, DatabaseValue::Text("Renamed".into()));
+}
+
+#[test]
 fn orm_update_adds_managed_timestamp() {
     let query = User::update()
         .set(User::NAME, "Updated")

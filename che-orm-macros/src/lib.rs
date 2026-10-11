@@ -841,6 +841,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut schema_columns = Vec::with_capacity(fields.len());
     let mut row_fields = Vec::with_capacity(fields.len());
     let mut insert_values = Vec::with_capacity(fields.len());
+    let mut field_values = Vec::with_capacity(fields.len());
     let mut managed_update_values = Vec::with_capacity(fields.len());
     let mut relation_constants = Vec::new();
     let mut relation_markers = Vec::new();
@@ -1051,15 +1052,17 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             #field_name: row.get(#index + offset)?,
         });
 
+        let field_value = quote! {
+            #orm::InsertValue {
+                column: #orm::ColumnRef::new(#table, #column),
+                value: #orm::QueryValue::<#field_type>::into_query_value(
+                    self.#field_name.clone(),
+                ),
+            }
+        };
+        field_values.push(field_value.clone());
         if (!field_attributes.primary_key || is_uuid(&field_type)) && !auto_now_add && !auto_now {
-            insert_values.push(quote! {
-                #orm::InsertValue {
-                    column: #orm::ColumnRef::new(#table, #column),
-                    value: #orm::QueryValue::<#field_type>::into_query_value(
-                        self.#field_name.clone(),
-                    ),
-                }
-            });
+            insert_values.push(field_value);
         }
 
         if auto_now {
@@ -1151,6 +1154,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
             fn insert_values(&self) -> ::std::vec::Vec<#orm::InsertValue> {
                 vec![#(#insert_values),*]
+            }
+
+            fn field_values(&self) -> ::std::vec::Vec<#orm::InsertValue> {
+                vec![#(#field_values),*]
             }
 
             fn managed_update_values() -> ::std::vec::Vec<#orm::Assignment> {
