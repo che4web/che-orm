@@ -50,6 +50,14 @@ pub struct SyncReport {
     pub has_more: bool,
     /// A related immutable operation or conflict needs completion/resolution.
     pub blocked: bool,
+    /// Explicit full loading is required; pull never performs it implicitly.
+    pub load_required: Option<LoadRequired>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadRequired {
+    Initial,
+    Reset,
 }
 
 pub struct SyncEngine<T> {
@@ -85,6 +93,77 @@ impl<T: SyncTransport> SyncEngine<T> {
     pub fn client(&self) -> &SyncClient {
         &self.client
     }
+
+    async fn cycle_lock(&self) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.client
+            .cycles
+            .lock()
+            .await
+            .entry(self.model.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Receive one incremental page without sending any local operation.
+    pub async fn pull(&self) -> Result<SyncReport, OrmError> {
+        let lock = self.cycle_lock().await;
+        let _guard = lock.lock().await;
+        let mut report = SyncReport::default();
+        report.load_required = self.receive(&mut report, false).await?;
+        report.conflicts = self.client.feed_status(self.model.as_deref()).await?.0;
+        Ok(report)
+    }
+
+    /// Explicit initial load or recovery after journal retention reset.
+    pub async fn full_load(&self) -> Result<SyncReport, OrmError> {
+        let lock = self.cycle_lock().await;
+        let _guard = lock.lock().await;
+        let mut report = SyncReport::default();
+        self.load_snapshot(&mut report).await?;
+        report.conflicts = self.client.feed_status(self.model.as_deref()).await?.0;
+        Ok(report)
+    }
+
+    /// Send one durable operation. Does not pull or perform a full load.
+    /// Conflicts are resolved by a subsequent explicit pull/resolution.
+    pub async fn flush(&self) -> Result<SyncReport, OrmError> {
+        let lock = self.cycle_lock().await;
+        let _guard = lock.lock().await;
+        let mut report = SyncReport::default();
+        if let Some(pending) = self.client.pending(self.model.as_deref()).await? {
+            self.send_pending(pending, &mut report).await?;
+        } else {
+            if self.client.reset_required(self.model.as_deref()).await? {
+                report.load_required = Some(LoadRequired::Reset);
+                return Ok(report);
+            }
+            if self.client.cursor(self.model.as_deref()).await?.is_none() {
+                report.load_required = Some(LoadRequired::Initial);
+                return Ok(report);
+            }
+            let (conflicts, _, blocked) = self.client.feed_status(self.model.as_deref()).await?;
+            report.conflicts = conflicts;
+            report.blocked = blocked || conflicts > 0;
+            if !report.blocked {
+                if let Some(pending) = self
+                    .client
+                    .prepare(self.model.as_deref(), self.transport.max_mutations())
+                    .await?
+                {
+                    self.send_pending(pending, &mut report).await?;
+                }
+            }
+        }
+        let (conflicts, dirty, blocked) = self.client.feed_status(self.model.as_deref()).await?;
+        report.conflicts = conflicts;
+        report.blocked |= blocked || conflicts > 0;
+        report.has_more = dirty && !report.blocked;
+        if self.client.reset_required(self.model.as_deref()).await? {
+            report.load_required = Some(LoadRequired::Reset);
+            report.has_more = false;
+        }
+        Ok(report)
+    }
     pub fn with_page_size(mut self, size: u32) -> Result<Self, OrmError> {
         if size == 0 || size > 1000 {
             return Err(invalid("page size must be 1..=1000"));
@@ -110,7 +189,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         if let Some(pending) = pending {
             self.send_pending(pending, &mut report).await?;
         }
-        self.receive(&mut report).await?;
+        self.receive(&mut report, true).await?;
         if !report.blocked && !report.has_more {
             if let Some(pending) = self
                 .client
@@ -169,7 +248,18 @@ impl<T: SyncTransport> SyncEngine<T> {
         Ok(())
     }
 
-    async fn receive(&self, report: &mut SyncReport) -> Result<(), OrmError> {
+    async fn receive(
+        &self,
+        report: &mut SyncReport,
+        allow_full: bool,
+    ) -> Result<Option<LoadRequired>, OrmError> {
+        if self.client.reset_required(self.model.as_deref()).await? {
+            if !allow_full {
+                return Ok(Some(LoadRequired::Reset));
+            }
+            self.load_snapshot(report).await?;
+            return Ok(report.blocked.then_some(LoadRequired::Reset));
+        }
         let cursor = self.client.cursor(self.model.as_deref()).await?;
         if let Some(cursor) = cursor {
             match self
@@ -211,17 +301,37 @@ impl<T: SyncTransport> SyncEngine<T> {
                         report.blocked = true;
                     }
                     report.has_more = has_more;
-                    return Ok(());
+                    return Ok(None);
                 }
-                PullResult::ResetRequired => {}
+                PullResult::ResetRequired => {
+                    self.client.require_reset(self.model.as_deref()).await?;
+                    if !allow_full {
+                        return Ok(Some(LoadRequired::Reset));
+                    }
+                }
                 PullResult::Full(_) => {
                     return Err(invalid("unexpected full response to incremental pull"));
                 }
             }
+        } else if !allow_full {
+            return Ok(Some(LoadRequired::Initial));
         }
+        self.load_snapshot(report).await?;
+        Ok(None)
+    }
+
+    async fn load_snapshot(&self, report: &mut SyncReport) -> Result<(), OrmError> {
         let snapshot = self.transport.full_load().await?;
         if snapshot.cursor.model != self.model {
             return Err(invalid("snapshot belongs to another model feed"));
+        }
+        if snapshot.cursor.scope != self.client.scope || snapshot.cursor.sequence < 0 {
+            return Err(invalid("invalid snapshot cursor"));
+        }
+        if let Some(previous) = self.client.cursor(self.model.as_deref()).await? {
+            if previous.epoch != snapshot.cursor.epoch {
+                return Err(invalid("server database replacement is not supported"));
+            }
         }
         report.received_changes += snapshot.entities.len();
         if !self
@@ -237,6 +347,9 @@ impl<T: SyncTransport> SyncEngine<T> {
             .await?
         {
             report.blocked = true;
+            if self.client.reset_required(self.model.as_deref()).await? {
+                report.load_required = Some(LoadRequired::Reset);
+            }
         }
         report.has_more = false;
         Ok(())

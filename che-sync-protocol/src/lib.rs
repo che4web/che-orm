@@ -81,6 +81,8 @@ pub struct Cursor {
     /// None is the whole-scope feed; Some selects a model and its FK parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Persistent server-history identity retained for compatibility. Changing
+    /// it is a server replacement, not a supported client recovery operation.
     pub epoch: Uuid,
     #[serde(with = "decimal_i64")]
     pub sequence: i64,
@@ -164,6 +166,8 @@ pub enum PullResult {
         cursor: Cursor,
         has_more: bool,
     },
+    /// Journal cursor expired in the same server history. Load a snapshot;
+    /// retain pending operation identities and their idempotent retry semantics.
     ResetRequired,
 }
 

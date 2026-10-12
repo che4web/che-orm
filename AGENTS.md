@@ -135,8 +135,22 @@ include those post-trigger changes.
 
 ## Verification
 
-Sync models use UUID keys and explicit stable field mappings. Register FK parents
-before children. All writes to synchronized tables must use the sync facade.
+Sync models use UUID keys. Prefer `#[orm(sync, sync_name = "app.model")]` and
+`SchemaSet::client_model` / `server_model` for a shared business model with
+infrastructure-owned service columns. Preserve wire field names with
+`#[orm(sync_name = "stable_name")]` when renaming Rust fields. Register FK parents
+before children. ProjectState::from_app_schemas includes role-specific sync tables
+automatically; servers have no shadows. All writes to synchronized tables use
+the configured `SyncClient::database()` / `SyncServer::database()` handle or the
+explicit sync facade. Original unconfigured handles and raw SQL bypass capture.
+`SyncEngine::pull()` downloads only and reports initial/reset load requirements;
+`full_load()` is explicit. `flush()` sends only, through REST-backed transports.
+Clients target one persistent server history. Server replacement/history rewind
+is outside the sync contract; existing epoch fields are compatibility identity
+checks, not a recovery API. Journal pruning preserves revisions, tombstones and
+receipts. An expired cursor blocks new operations until full loading, but pending
+requests still retry with their original IDs. Do not retire or discard outbox
+operations as part of cursor recovery.
 Keep client writes/outbox and server writes/journal/receipts transactional.
 ImageField mappings must be server-owned; the Model derive exposes protected
 columns to sync registration. See `docs/sync.md` for ownership and scope contracts.

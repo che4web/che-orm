@@ -1,0 +1,5 @@
+error: sync service columns are infrastructure-owned
+ --> tests/ui/sync_service_field.rs:8:5
+  |
+8 |     revision: i64,
+  |     ^^^^^^^^

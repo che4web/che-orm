@@ -52,6 +52,7 @@ impl AccessPolicy for AllowAll {
 #[derive(Clone)]
 pub struct SyncServer {
     db: Database,
+    orm_db: Database,
     registry: Registry,
     scope: String,
     principal: String,
@@ -60,6 +61,15 @@ pub struct SyncServer {
 }
 
 impl SyncServer {
+    pub async fn from_schema(
+        db: Database,
+        schema: &che_orm::SchemaSet,
+        scope: impl Into<String>,
+        principal: impl Into<String>,
+        policy: Arc<dyn AccessPolicy>,
+    ) -> Result<Self, OrmError> {
+        Self::open(db, Registry::from_schema(schema)?, scope, principal, policy).await
+    }
     /// Tables must already be migrated. The principal is trusted transport
     /// context, never a field accepted from a PushRequest.
     pub async fn open(
@@ -69,6 +79,7 @@ impl SyncServer {
         principal: impl Into<String>,
         policy: Arc<dyn AccessPolicy>,
     ) -> Result<Self, OrmError> {
+        registry.require_role(che_orm::ModelRole::Server)?;
         let scope = scope.into();
         let principal = principal.into();
         if scope.is_empty() || principal.is_empty() {
@@ -76,14 +87,25 @@ impl SyncServer {
         }
         policy.authorize_scope(&principal, &scope)?;
         db.execute_sql("INSERT INTO _sync_scopes (scope, epoch, sequence) VALUES ($1,$2,0) ON CONFLICT (scope) DO NOTHING", vec![text(&scope), text(Uuid::now_v7())]).await?;
-        Ok(Self {
+        let mut server = Self {
+            orm_db: db.clone(),
             db,
             registry,
             scope,
             principal,
             policy,
             model: None,
-        })
+        };
+        server.orm_db = server
+            .db
+            .clone()
+            .with_model_runtime(Arc::new(server.clone()));
+        Ok(server)
+    }
+
+    /// Scope-bound ORM handle. Writes journal changes in the same transaction.
+    pub fn database(&self) -> &Database {
+        &self.orm_db
     }
 
     /// Bind a feed to one model. FK parents are included automatically; the
@@ -301,56 +323,7 @@ impl SyncServer {
                     return Ok((PushResult::Conflict(current), false));
                 }
                 savepoint(tx).await?;
-                let application = async {
-                    let mut plan = Vec::new();
-                    for d in server.registry.models.iter() {
-                        for m in request.operation.mutations.iter().filter(|m| m.model == d.name && m.changes.is_some()) {
-                            server.check_references(tx, d, m.changes.as_ref().unwrap(), &request.operation.mutations).await?;
-                            plan.push(m.clone());
-                        }
-                    }
-                    for d in server.registry.models.iter().rev() {
-                        for m in request.operation.mutations.iter().filter(|m| m.model == d.name && m.changes.is_none()) {
-                            plan.push(m.clone());
-                        }
-                    }
-                    let plan = Arc::new(plan);
-                    let writer = server.clone();
-                    let mutations = Arc::new(request.operation.mutations.clone());
-                    ordered(tx, plan.len(), move |tx, index| {
-                        let plan = plan.clone(); let server = writer.clone(); let mutations = mutations.clone();
-                        Box::pin(async move {
-                            let m = &plan[index];
-                            let d = server.registry.get(&m.model)?;
-                            if m.changes.is_some() { apply_patch(tx, d, m).await }
-                            else {
-                                guard_moves(tx, &server.registry, d, m.id, &mutations).await?;
-                                soft_delete(tx, &server.registry, d, m.id).await
-                            }
-                        })
-                    }).await?;
-                    let mut affected = Vec::new();
-                    for old in &before {
-                        let d = server.registry.get(&old.model)?;
-                        let new_record = read(tx, d, old.id, false).await?;
-                        if new_record != old.record || request.operation.mutations.iter().any(|m| m.model == old.model && m.id == old.id) {
-                            stamp(tx, d, old.id, old.revision.checked_add(1).ok_or_else(|| invalid("revision overflow"))?, &server.scope).await?;
-                            let next = server.entity(tx, d, old.id).await?;
-                            server.policy.validate(&server.principal, &server.scope, old, &next)?;
-                            affected.push(next);
-                        }
-                    }
-                    for e in &affected {
-                        if let Some(record) = &e.record {
-                            server.check_references(tx, server.registry.get(&e.model)?, record, &request.operation.mutations).await?;
-                        }
-                    }
-                    tx.execute_sql("UPDATE _sync_scopes SET sequence = sequence + 1 WHERE scope = $1", vec![text(&server.scope)]).await?;
-                    let cursor = server.cursor(tx).await?;
-                    let group = ChangeGroup { sequence: cursor.sequence, entities: affected.clone() };
-                    tx.execute_sql("INSERT INTO _sync_changes (scope, sequence, payload) VALUES ($1,$2,$3)", vec![text(&server.scope), D::Integer(cursor.sequence), text(encode(&group)?)]).await?;
-                    Ok::<_, OrmError>(affected)
-                }.await;
+                let application = server.apply_and_journal(tx, &request.operation.mutations, &before).await;
                 match application {
                     Ok(affected) => { release(tx).await?; PushResult::Accepted(affected) }
                     Err(error) => {
@@ -400,7 +373,9 @@ impl SyncServer {
         let server = self.clone();
         self.db.transaction_with_isolation(IsolationLevel::RepeatableRead, move |tx| Box::pin(async move {
             let current = server.cursor(tx).await?;
-            if current.epoch != cursor.epoch || cursor.sequence > current.sequence { return Ok(PullResult::ResetRequired); }
+            if current.epoch != cursor.epoch || cursor.sequence > current.sequence {
+                return Err(invalid("server database replacement or history rewind is not supported"));
+            }
             let rows = tx.query_sql("SELECT payload FROM _sync_changes WHERE scope = $1 AND sequence > $2 ORDER BY sequence LIMIT $3", vec![text(&server.scope), D::Integer(cursor.sequence), D::Integer(i64::from(request.limit))]).await?;
             let mut groups: Vec<ChangeGroup> = rows.iter().map(|row| decode(&row.get::<String>(0)?)).collect::<Result<_, _>>()?;
             let sequence = groups.last().map_or(cursor.sequence, |g| g.sequence);
@@ -816,6 +791,239 @@ impl SyncServer {
             }
         }
         Ok(())
+    }
+}
+
+impl che_orm::ModelRuntime for SyncServer {
+    fn role(&self, table: &str) -> Option<che_orm::ModelRole> {
+        self.registry
+            .models
+            .iter()
+            .any(|d| d.schema.name == table)
+            .then_some(che_orm::ModelRole::Server)
+    }
+
+    fn prepare_read(&self, ast: che_orm::QueryAst) -> che_orm::QueryAst {
+        crate::runtime::prepare_read(&self.registry, ast, Some(&self.scope))
+    }
+
+    fn authorize_read(&self, ast: &che_orm::QueryAst) -> Result<(), OrmError> {
+        if let che_orm::QueryAst::Select(select) = ast {
+            if std::iter::once(select.table.name)
+                .chain(select.joins.iter().map(|join| join.table.name))
+                .any(|table| self.registry.models.iter().any(|d| d.schema.name == table))
+            {
+                self.policy.authorize_scope(&self.principal, &self.scope)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write<'a>(
+        &'a self,
+        tx: &'a Transaction,
+        ast: che_orm::QueryAst,
+    ) -> che_orm::TransactionFuture<'a, che_orm::ModelWriteResult> {
+        Box::pin(async move {
+            self.policy.authorize_scope(&self.principal, &self.scope)?;
+            // Lock before selecting targets so journal sequences follow commits.
+            tx.execute_sql(
+                "UPDATE _sync_scopes SET sequence = sequence WHERE scope = $1",
+                vec![text(&self.scope)],
+            )
+            .await?;
+            savepoint(tx).await?;
+            let write = self.orm_write(tx, &ast).await;
+            match write {
+                Ok(result) => {
+                    release(tx).await?;
+                    Ok(result)
+                }
+                Err(error) => {
+                    rollback(tx).await?;
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
+impl SyncServer {
+    async fn orm_write(
+        &self,
+        tx: &Transaction,
+        ast: &che_orm::QueryAst,
+    ) -> Result<che_orm::ModelWriteResult, OrmError> {
+        use che_orm::QueryAst;
+        let d = crate::runtime::descriptor(&self.registry, ast)?;
+        let ids = crate::runtime::targets(tx, d, ast, Some(&self.scope)).await?;
+        if ids.is_empty() {
+            return crate::runtime::result(tx, d, ast, &ids).await;
+        }
+        let values = match ast {
+            QueryAst::Insert(ast) => ast
+                .values
+                .iter()
+                .map(|v| (v.column.name, &v.value))
+                .collect::<Vec<_>>(),
+            QueryAst::Update(ast) => ast
+                .assignments
+                .iter()
+                .map(|v| (v.column.name, &v.value))
+                .collect(),
+            _ => vec![],
+        };
+        let mut changes = Record::new();
+        for (name, value) in values {
+            let column = d
+                .schema
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .ok_or_else(|| invalid("unknown write column"))?;
+            if column.primary_key {
+                if matches!(ast, QueryAst::Update(_)) {
+                    return Err(invalid("primary key is immutable"));
+                }
+                continue;
+            }
+            if column.auto_now
+                || column.auto_now_add
+                || [d.revision, d.updated_at, d.deleted_at, d.scope].contains(&name)
+            {
+                continue;
+            }
+            let field = d.fields.iter().find(|field| field.column == name).unwrap();
+            changes.insert(field.name.into(), crate::model::from_database(value));
+        }
+        let mut before = Vec::new();
+        let mut mutations = Vec::new();
+        for id in &ids {
+            let old = self.entity(tx, d, *id).await?;
+            if matches!(ast, QueryAst::Insert(_)) && old.revision != 0 {
+                return Err(invalid("UUID already exists"));
+            }
+            let changes = if matches!(ast, QueryAst::Delete(_)) {
+                None
+            } else {
+                Some(changes.clone())
+            };
+            if let Some(changes) = &changes {
+                d.validate(changes, *id, false, false)?;
+            }
+            mutations.push(Mutation {
+                model: d.name.into(),
+                id: *id,
+                schema_version: d.version,
+                base_revision: old.revision,
+                changes,
+            });
+            before.push(old);
+        }
+        for mutation in mutations.iter().filter(|m| m.changes.is_none()) {
+            collect_dependents(tx, self, d.name, mutation.id, &mut before).await?;
+        }
+        self.apply_and_journal(tx, &mutations, &before).await?;
+        crate::runtime::result(tx, d, ast, &ids).await
+    }
+
+    /// Shared transactional application for REST/native requests and ORM writes.
+    /// Callers hold the scope lock and own a rollback savepoint.
+    async fn apply_and_journal(
+        &self,
+        tx: &Transaction,
+        mutations: &[Mutation],
+        before: &[Entity],
+    ) -> Result<Vec<Entity>, OrmError> {
+        let mut plan = Vec::new();
+        for d in self.registry.models.iter() {
+            for mutation in mutations
+                .iter()
+                .filter(|m| m.model == d.name && m.changes.is_some())
+            {
+                self.check_references(tx, d, mutation.changes.as_ref().unwrap(), mutations)
+                    .await?;
+                plan.push(mutation.clone());
+            }
+        }
+        for d in self.registry.models.iter().rev() {
+            plan.extend(
+                mutations
+                    .iter()
+                    .filter(|m| m.model == d.name && m.changes.is_none())
+                    .cloned(),
+            );
+        }
+        let plan = Arc::new(plan);
+        let writer = self.clone();
+        let owned_mutations = Arc::new(mutations.to_vec());
+        ordered(tx, plan.len(), move |tx, index| {
+            let plan = plan.clone();
+            let server = writer.clone();
+            let mutations = owned_mutations.clone();
+            Box::pin(async move {
+                let mutation = &plan[index];
+                let d = server.registry.get(&mutation.model)?;
+                if mutation.changes.is_some() {
+                    apply_patch(tx, d, mutation).await
+                } else {
+                    guard_moves(tx, &server.registry, d, mutation.id, &mutations).await?;
+                    soft_delete(tx, &server.registry, d, mutation.id).await
+                }
+            })
+        })
+        .await?;
+        let mut affected = Vec::new();
+        for old in before {
+            let descriptor = self.registry.get(&old.model)?;
+            let next_record = read(tx, descriptor, old.id, false).await?;
+            if next_record != old.record
+                || mutations
+                    .iter()
+                    .any(|m| m.model == old.model && m.id == old.id)
+            {
+                stamp(
+                    tx,
+                    descriptor,
+                    old.id,
+                    old.revision
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("revision overflow"))?,
+                    &self.scope,
+                )
+                .await?;
+                let next = self.entity(tx, descriptor, old.id).await?;
+                self.policy
+                    .validate(&self.principal, &self.scope, old, &next)?;
+                affected.push(next);
+            }
+        }
+        for entity in &affected {
+            if let Some(record) = &entity.record {
+                self.check_references(tx, self.registry.get(&entity.model)?, record, mutations)
+                    .await?;
+            }
+        }
+        tx.execute_sql(
+            "UPDATE _sync_scopes SET sequence = sequence + 1 WHERE scope = $1",
+            vec![text(&self.scope)],
+        )
+        .await?;
+        let cursor = self.cursor(tx).await?;
+        let group = ChangeGroup {
+            sequence: cursor.sequence,
+            entities: affected.clone(),
+        };
+        tx.execute_sql(
+            "INSERT INTO _sync_changes (scope, sequence, payload) VALUES ($1,$2,$3)",
+            vec![
+                text(&self.scope),
+                D::Integer(cursor.sequence),
+                text(encode(&group)?),
+            ],
+        )
+        .await?;
+        Ok(affected)
     }
 }
 

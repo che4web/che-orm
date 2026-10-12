@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "Backend-independent offline synchronization protocol for che-orm"
+repository = "https://github.com/che4web/che-orm"
+documentation = "https://docs.rs/che-sync-protocol"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

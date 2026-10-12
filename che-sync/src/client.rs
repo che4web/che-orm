@@ -16,6 +16,7 @@ pub(crate) struct Pending {
 #[derive(Clone)]
 pub struct SyncClient {
     pub(crate) db: Database,
+    orm_db: Database,
     pub(crate) registry: Registry,
     pub(crate) scope: String,
     pub(crate) replica_id: Uuid,
@@ -32,6 +33,21 @@ pub enum Resolution {
 }
 
 impl SyncClient {
+    pub async fn from_schema(
+        db: Database,
+        schema: &che_orm::SchemaSet,
+        scope: impl Into<String>,
+    ) -> Result<Self, OrmError> {
+        Self::open(db, Registry::from_schema(schema)?, scope).await
+    }
+
+    /// A model-specific feed; bind the transport to the same server endpoint.
+    pub fn model<M: SyncModel, T: crate::SyncTransport>(
+        &self,
+        transport: T,
+    ) -> Result<crate::SyncEngine<T>, OrmError> {
+        crate::SyncEngine::for_model::<M>(self.clone(), transport)
+    }
     /// Open an already migrated client database. One client owns one database
     /// and one scope. Clones share write and sync-cycle coordination.
     pub async fn open(
@@ -39,6 +55,7 @@ impl SyncClient {
         registry: Registry,
         scope: impl Into<String>,
     ) -> Result<Self, OrmError> {
+        registry.require_role(che_orm::ModelRole::Client)?;
         let scope = scope.into();
         if scope.is_empty() {
             return Err(invalid("empty scope"));
@@ -64,12 +81,20 @@ impl SyncClient {
                 })
             })
             .await?;
+        let writes = Arc::new(Mutex::new(()));
+        let orm_db = db
+            .clone()
+            .with_model_runtime(Arc::new(crate::runtime::ClientRuntime {
+                registry: registry.clone(),
+                writes: writes.clone(),
+            }));
         Ok(Self {
             db,
+            orm_db,
             registry,
             scope,
             replica_id,
-            writes: Arc::new(Mutex::new(())),
+            writes,
             cycles: Arc::new(Mutex::new(std::collections::HashMap::new())),
             operations: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
@@ -78,10 +103,9 @@ impl SyncClient {
     pub fn replica_id(&self) -> Uuid {
         self.replica_id
     }
-    /// Read through the regular ORM. Writes to synchronized models must use
-    /// this client's facade so that dirty tracking remains transactional.
+    /// Regular ORM reads and transactionally tracked writes for this client.
     pub fn database(&self) -> &Database {
-        &self.db
+        &self.orm_db
     }
 
     pub async fn transaction<T, F>(&self, action: F) -> Result<T, OrmError>
@@ -171,6 +195,23 @@ impl SyncClient {
         let key = cursor_key(model);
         self.db
             .transaction(move |tx| Box::pin(async move { meta(tx, &key).await }))
+            .await
+    }
+
+    pub(crate) async fn reset_required(&self, model: Option<&str>) -> Result<bool, OrmError> {
+        let key = format!("reset:{}", cursor_key(model));
+        self.db
+            .transaction(move |tx| {
+                Box::pin(async move { Ok(meta::<bool>(tx, &key).await?.unwrap_or(false)) })
+            })
+            .await
+    }
+
+    pub(crate) async fn require_reset(&self, model: Option<&str>) -> Result<(), OrmError> {
+        let _guard = self.writes.lock().await;
+        let key = format!("reset:{}", cursor_key(model));
+        self.db
+            .transaction(move |tx| Box::pin(async move { set_meta(tx, &key, &true).await }))
             .await
     }
 
@@ -586,6 +627,9 @@ impl SyncClient {
             let mut incoming = EntityKeys::new();
             for entity in groups.iter().flat_map(|g| &g.entities) {
                 let old = shadow(tx, registry.get(&entity.model)?, entity.id).await?;
+                if old.epoch.is_some_and(|epoch| epoch != cursor.epoch) {
+                    return Err(invalid("server database replacement is not supported"));
+                }
                 if *entity != old { incoming.insert((entity.model.clone(), entity.id)); }
             }
             let incoming_dependencies = entity_dependencies(tx, &registry, &incoming).await?;
@@ -599,7 +643,8 @@ impl SyncClient {
             let required = cursor.model.as_deref().map(|model| registry.feed_models(model)).transpose()?;
             if groups.iter().flat_map(|g| &g.entities).any(|e| allowed.as_ref().is_some_and(|a| !a.contains(&e.model))) { return Err(invalid("incoming entity outside model feed")); }
             if let Some(old) = meta::<Cursor>(tx, &key).await? {
-                if !reset && (old.epoch != cursor.epoch || cursor.sequence < old.sequence) { return Err(invalid("stale cursor")); }
+                if old.epoch != cursor.epoch { return Err(invalid("server database replacement is not supported")); }
+                if cursor.sequence < old.sequence { return Err(invalid("stale cursor")); }
             }
             if reset {
                 for d in registry.models.iter() {
@@ -619,11 +664,12 @@ impl SyncClient {
                 // Model feeds overlap on parents. A snapshot fetched before a
                 // concurrent acknowledgement must not roll its shadow back.
                 for entity in &mut group.entities { entity.epoch = Some(cursor.epoch); }
-                let updates = reconcile(tx, &registry, group.entities, reset).await?;
+                let updates = reconcile(tx, &registry, group.entities).await?;
                 apply_updates(tx, &registry, updates).await?;
             }
             retry_blocked(tx, &registry).await?;
             set_meta(tx, &key, &cursor).await?;
+            if reset { set_meta(tx, &format!("reset:{key}"), &false).await?; }
             Ok(true)
         })).await
     }
@@ -897,7 +943,7 @@ impl SyncTransaction<'_> {
     }
 }
 
-async fn save_local(
+pub(crate) async fn save_local(
     tx: &Transaction,
     d: &crate::model::Descriptor,
     id: Uuid,
@@ -913,7 +959,7 @@ async fn save_local(
     mark(tx, d.name, id).await
 }
 
-fn delete_local<'a>(
+pub(crate) fn delete_local<'a>(
     tx: &'a Transaction,
     registry: &'a Registry,
     name: &'a str,
@@ -1014,7 +1060,6 @@ async fn reconcile(
     tx: &Transaction,
     registry: &Registry,
     entities: Vec<Entity>,
-    reset: bool,
 ) -> Result<Vec<Update>, OrmError> {
     let mut updates = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1025,12 +1070,9 @@ async fn reconcile(
         let d = registry.get(&remote.model)?;
         validate_entity(d, &remote)?;
         let old = shadow(tx, d, remote.id).await?;
-        let reset = reset && old.epoch != remote.epoch;
         let existing = load_conflict(tx, d.name, remote.id).await?;
-        if !reset
-            && (remote.revision < old.revision
-                || (remote.revision == old.revision
-                    && !existing.as_ref().is_some_and(|c| c.retryable)))
+        if remote.revision < old.revision
+            || (remote.revision == old.revision && !existing.as_ref().is_some_and(|c| c.retryable))
         {
             continue;
         }
@@ -1112,7 +1154,7 @@ async fn retry_blocked(tx: &Transaction, registry: &Registry) -> Result<(), OrmE
         }
     }
     if !entities.is_empty() {
-        let updates = reconcile(tx, registry, entities, false).await?;
+        let updates = reconcile(tx, registry, entities).await?;
         apply_updates(tx, registry, updates).await?;
     }
     Ok(())

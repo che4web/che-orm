@@ -2,61 +2,15 @@ use crate::{
     invalid,
     protocol::{Record, Value},
 };
-use che_orm::{ColumnType, DatabaseValue, Model, OrmError, Row, TableSchema, Uuid};
+use che_orm::{
+    ColumnType, DatabaseValue, ModelRole, OrmError, Row, SchemaSet, SyncRegistration, TableSchema,
+    Uuid,
+};
+pub use che_orm::{SyncField as Field, SyncModel};
 use std::{collections::HashSet, sync::Arc};
 
-/// Stable wire name mapped to a physical SQL column controlled by the model.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Field {
-    pub name: &'static str,
-    pub column: &'static str,
-    pub writable: bool,
-}
-
-impl Field {
-    pub const fn writable(name: &'static str, column: &'static str) -> Self {
-        Self {
-            name,
-            column,
-            writable: true,
-        }
-    }
-    pub const fn server_owned(name: &'static str, column: &'static str) -> Self {
-        Self {
-            name,
-            column,
-            writable: false,
-        }
-    }
-}
-
-pub trait SyncModel: Model<PrimaryKey = Uuid> + Send + Sync + 'static {
-    const SYNC_NAME: &'static str;
-    const SYNC_VERSION: u32 = 1;
-    /// All physical columns, including the primary key, must be mapped.
-    fn sync_fields() -> Vec<Field>;
-    fn registered_fields() -> Vec<Field> {
-        fields::<Self>()
-    }
-    const REVISION_COLUMN: &'static str = "revision";
-    const UPDATED_AT_COLUMN: &'static str = "updated_at";
-    const DELETED_AT_COLUMN: &'static str = "deleted_at";
-    const SCOPE_COLUMN: &'static str = "sync_scope";
-}
-
 pub(crate) fn fields<M: SyncModel>() -> Vec<Field> {
-    let mut fields = M::sync_fields();
-    for (name, column) in [
-        ("revision", M::REVISION_COLUMN),
-        ("updated_at", M::UPDATED_AT_COLUMN),
-        ("deleted_at", M::DELETED_AT_COLUMN),
-        ("sync_scope", M::SCOPE_COLUMN),
-    ] {
-        if !fields.iter().any(|field| field.column == column) {
-            fields.push(Field::server_owned(name, column));
-        }
-    }
-    fields
+    M::registered_fields()
 }
 
 #[derive(Clone)]
@@ -66,7 +20,6 @@ pub(crate) struct Descriptor {
     pub schema: TableSchema,
     pub fields: Vec<Field>,
     pub primary: &'static str,
-    pub read: fn(&Row) -> Result<Record, OrmError>,
     pub revision: &'static str,
     pub updated_at: &'static str,
     pub deleted_at: &'static str,
@@ -74,6 +27,43 @@ pub(crate) struct Descriptor {
 }
 
 impl Descriptor {
+    pub fn read_row(&self, row: &Row) -> Result<Record, OrmError> {
+        let mut record = Record::new();
+        for (index, column) in self.schema.columns.iter().enumerate() {
+            macro_rules! value {
+                ($ty:ty, $variant:ident) => {
+                    row.get::<Option<$ty>>(index)?
+                        .map(Value::$variant)
+                        .unwrap_or(Value::Null)
+                };
+            }
+            let value = match column.column_type {
+                ColumnType::Integer => value!(i64, Integer),
+                ColumnType::Real => value!(f64, Real),
+                ColumnType::Text => value!(String, Text),
+                ColumnType::Binary => value!(Vec<u8>, Binary),
+                ColumnType::Boolean => value!(bool, Boolean),
+                ColumnType::DateTime => value!(che_orm::time::OffsetDateTime, DateTime),
+                ColumnType::Uuid => value!(Uuid, Uuid),
+            };
+            let field = self
+                .fields
+                .iter()
+                .find(|field| field.column == column.name)
+                .unwrap();
+            record.insert(field.name.into(), value);
+        }
+        let primary = self
+            .fields
+            .iter()
+            .find(|field| field.column == self.primary)
+            .unwrap();
+        let Some(Value::Uuid(id)) = record.get(primary.name) else {
+            return Err(invalid("invalid materialized primary key"));
+        };
+        self.validate(&record, *id, true, false)?;
+        Ok(record)
+    }
     pub fn mirror(&self) -> String {
         format!("_sync_server_{}", self.schema.name)
     }
@@ -136,14 +126,49 @@ impl Descriptor {
 #[derive(Clone, Default)]
 pub struct Registry {
     pub(crate) models: Arc<Vec<Descriptor>>,
+    pub(crate) role: Option<ModelRole>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn register<M: SyncModel>(mut self) -> Result<Self, OrmError> {
-        let schema = M::schema();
+    /// Build a registry from explicit ORM model roles. A database has one sync role.
+    pub fn from_schema(schema: &SchemaSet) -> Result<Self, OrmError> {
+        schema
+            .validate()
+            .map_err(|error| invalid(format!("{error:?}")))?;
+        let mut registry = Self::new();
+        for registration in schema.sync_models() {
+            if registry.role.is_some_and(|role| role != registration.role) {
+                return Err(invalid(
+                    "a database cannot mix client and server sync roles",
+                ));
+            }
+            registry.role = Some(registration.role);
+            registry = registry.register_descriptor(registration.clone())?;
+        }
+        Ok(registry)
+    }
+
+    pub fn role(&self) -> Option<ModelRole> {
+        self.role
+    }
+
+    pub(crate) fn require_role(&self, expected: ModelRole) -> Result<(), OrmError> {
+        if self.role.is_some_and(|role| role != expected) {
+            return Err(invalid("sync registry has the wrong database role"));
+        }
+        Ok(())
+    }
+
+    pub fn register<M: SyncModel>(self) -> Result<Self, OrmError> {
+        let role = self.role.unwrap_or(ModelRole::Client);
+        self.register_descriptor(SyncRegistration::new::<M>(role))
+    }
+
+    fn register_descriptor(mut self, registration: SyncRegistration) -> Result<Self, OrmError> {
+        let schema = registration.schema;
         schema
             .validate()
             .map_err(|error| invalid(format!("{error:?}")))?;
@@ -170,12 +195,12 @@ impl Registry {
             return Err(invalid("sync requires UUID keys"));
         }
         let primary = primary.name;
-        let fields = fields::<M>();
+        let fields = registration.fields;
         for (name, ty, nullable) in [
-            (M::REVISION_COLUMN, ColumnType::Integer, false),
-            (M::UPDATED_AT_COLUMN, ColumnType::DateTime, false),
-            (M::DELETED_AT_COLUMN, ColumnType::DateTime, true),
-            (M::SCOPE_COLUMN, ColumnType::Text, false),
+            (registration.revision, ColumnType::Integer, false),
+            (registration.updated_at, ColumnType::DateTime, false),
+            (registration.deleted_at, ColumnType::DateTime, true),
+            (registration.scope, ColumnType::Text, false),
         ] {
             let column = schema
                 .columns
@@ -206,21 +231,23 @@ impl Registry {
                 && (column.primary_key
                     || column.auto_now
                     || column.auto_now_add
-                    || M::write_protected_columns().contains(&column.name))
+                    || registration.protected_columns.contains(&column.name))
             {
                 return Err(invalid(
                     "keys, managed timestamps and protected columns must be server-owned",
                 ));
             }
         }
-        if columns.len() != schema.columns.len() || M::SYNC_NAME.is_empty() || M::SYNC_VERSION == 0
+        if columns.len() != schema.columns.len()
+            || registration.name.is_empty()
+            || registration.version == 0
         {
             return Err(invalid("invalid sync model mapping"));
         }
         if self
             .models
             .iter()
-            .any(|d| d.name == M::SYNC_NAME || d.schema.name == schema.name)
+            .any(|d| d.name == registration.name || d.schema.name == schema.name)
         {
             return Err(invalid("duplicate sync model"));
         }
@@ -239,19 +266,15 @@ impl Registry {
             }
         }
         Arc::make_mut(&mut self.models).push(Descriptor {
-            name: M::SYNC_NAME,
-            version: M::SYNC_VERSION,
+            name: registration.name,
+            version: registration.version,
             schema,
             fields,
             primary,
-            revision: M::REVISION_COLUMN,
-            updated_at: M::UPDATED_AT_COLUMN,
-            deleted_at: M::DELETED_AT_COLUMN,
-            scope: M::SCOPE_COLUMN,
-            read: |row| {
-                let model = M::from_row(row)?;
-                record::<M>(&model)
-            },
+            revision: registration.revision,
+            updated_at: registration.updated_at,
+            deleted_at: registration.deleted_at,
+            scope: registration.scope,
         });
         Ok(self)
     }
@@ -377,7 +400,8 @@ impl Registry {
     }
     pub(crate) fn typed<M: SyncModel>(&self) -> Result<&Descriptor, OrmError> {
         let d = self.get(M::SYNC_NAME)?;
-        if d.schema != M::schema() || d.version != M::SYNC_VERSION || d.fields != fields::<M>() {
+        if d.schema != M::sync_schema() || d.version != M::SYNC_VERSION || d.fields != fields::<M>()
+        {
             return Err(invalid("model registration mismatch"));
         }
         Ok(d)
@@ -392,8 +416,24 @@ pub(crate) fn record<M: SyncModel>(model: &M) -> Result<Record, OrmError> {
             let value = values
                 .iter()
                 .find(|v| v.column.name == field.column)
-                .ok_or_else(|| invalid("missing materialized field"))?;
-            Ok((field.name.into(), from_database(&value.value)))
+                .map(|value| from_database(&value.value));
+            let value = match value {
+                Some(value) => value,
+                None if M::AUTOMATIC_METADATA && field.column == M::REVISION_COLUMN => {
+                    Value::Integer(0)
+                }
+                None if M::AUTOMATIC_METADATA && field.column == M::UPDATED_AT_COLUMN => {
+                    Value::DateTime(che_orm::time::OffsetDateTime::UNIX_EPOCH)
+                }
+                None if M::AUTOMATIC_METADATA && field.column == M::DELETED_AT_COLUMN => {
+                    Value::Null
+                }
+                None if M::AUTOMATIC_METADATA && field.column == M::SCOPE_COLUMN => {
+                    Value::Text(String::new())
+                }
+                None => return Err(invalid("missing materialized field")),
+            };
+            Ok((field.name.into(), value))
         })
         .collect()
 }

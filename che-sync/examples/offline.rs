@@ -1,44 +1,23 @@
 //! Two offline clients and an in-process server. Every database is migrated
 //! before use; production applications freeze these operations in their history.
 use che_orm::{
-    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, OrmError,
-    TableState, Uuid,
+    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, ModelRole,
+    OrmError, ProjectState, SchemaSet, Uuid,
 };
-use che_sync::{
-    AllowAll, Field, Registry, SchemaRole, SyncClient, SyncEngine, SyncModel, SyncServer,
-};
+use che_sync::{AllowAll, SyncClient, SyncEngine, SyncServer};
 use std::sync::Arc;
 
 #[derive(Debug, Model)]
-#[orm(table = "notes")]
+#[orm(table = "notes", sync, sync_name = "notes.note")]
 struct Note {
     #[orm(primary_key)]
     id: Uuid,
     title: String,
     body: String,
-    #[orm(default = "0")]
-    revision: i64,
-    #[orm(auto_now)]
-    updated_at: che_orm::time::OffsetDateTime,
-    deleted_at: Option<che_orm::time::OffsetDateTime>,
-    #[orm(default = "''")]
-    sync_scope: String,
-}
-
-impl SyncModel for Note {
-    const SYNC_NAME: &'static str = "notes.note";
-    fn sync_fields() -> Vec<Field> {
-        vec![
-            Field::server_owned("id", "id"),
-            Field::writable("title", "title"),
-            Field::writable("body", "body"),
-        ]
-    }
 }
 
 async fn database(
-    registry: &Registry,
-    role: SchemaRole,
+    schema: &SchemaSet,
 ) -> Result<(Database, Option<(Database, String)>), Box<dyn std::error::Error>> {
     #[cfg(feature = "sqlite")]
     let db = Database::connect_in_memory().await?;
@@ -57,10 +36,11 @@ async fn database(
             Database::connect(format!("{url}{separator}options=-csearch_path%3D{schema}")).await?;
         (db, Some((admin, schema)))
     };
-    let mut operations = vec![MigrationOperation::CreateTable {
-        table: TableState::from(&Note::schema()),
-    }];
-    operations.extend(registry.migration_operations(role));
+    let operations = ProjectState::from_app_schemas([("notes", schema)])?
+        .models()
+        .into_iter()
+        .map(|model| MigrationOperation::CreateModel { model })
+        .collect();
     let graph = MigrationGraph::new(vec![Migration::new(
         MigrationId {
             app: "offline_example".into(),
@@ -73,11 +53,10 @@ async fn database(
     Ok((db, cleanup))
 }
 
-async fn synchronize(client: &SyncClient, server: &SyncServer) -> Result<(), OrmError> {
-    let engine = SyncEngine::new(client.clone(), server.clone());
+async fn flush(engine: &SyncEngine<SyncServer>) -> Result<(), OrmError> {
     loop {
-        let report = engine.sync_once().await?;
-        println!("Sync: {report:?}");
+        let report = engine.flush().await?;
+        println!("Outgoing changes: {report:?}");
         if !report.has_more {
             break;
         }
@@ -87,47 +66,60 @@ async fn synchronize(client: &SyncClient, server: &SyncServer) -> Result<(), Orm
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let registry = Registry::new().register::<Note>()?;
-    let (server_db, server_cleanup) = database(&registry, SchemaRole::Server).await?;
-    let (first_db, first_cleanup) = database(&registry, SchemaRole::Client).await?;
-    let (second_db, second_cleanup) = database(&registry, SchemaRole::Client).await?;
-    let server = SyncServer::open(
+    let server_schema = SchemaSet::new().server_model::<Note>();
+    let client_schema = SchemaSet::new().client_model::<Note>();
+    let (server_db, server_cleanup) = database(&server_schema).await?;
+    let (first_db, first_cleanup) = database(&client_schema).await?;
+    let (second_db, second_cleanup) = database(&client_schema).await?;
+    let server = SyncServer::from_schema(
         server_db,
-        registry.clone(),
+        &server_schema,
         "demo",
         "demo-user",
         Arc::new(AllowAll),
     )
     .await?;
-    let a = SyncClient::open(first_db, registry.clone(), "demo").await?;
-    let b = SyncClient::open(second_db, registry, "demo").await?;
+    let a = SyncClient::from_schema(first_db, &client_schema, "demo").await?;
+    let b = SyncClient::from_schema(second_db, &client_schema, "demo").await?;
+    assert_eq!(
+        server.database().model_role::<Note>(),
+        Some(ModelRole::Server)
+    );
+    assert_eq!(a.database().model_role::<Note>(), Some(ModelRole::Client));
+    let a_feed = a.model::<Note, _>(server.for_model::<Note>()?)?;
+    let b_feed = b.model::<Note, _>(server.for_model::<Note>()?)?;
 
     let note = Note {
         id: Uuid::now_v7(),
         title: "Offline note".into(),
         body: "Initial body".into(),
-        revision: 0,
-        updated_at: che_orm::time::OffsetDateTime::UNIX_EPOCH,
-        deleted_at: None,
-        sync_scope: String::new(),
     };
-    a.save(&note).await?;
+    a.database().insert(&note).await?;
     println!(
         "Created offline: {:?}",
         a.database().get::<Note>(note.id).await?
     );
-    synchronize(&a, &server).await?;
-    synchronize(&b, &server).await?;
+    // Initial loading is explicit and preserves the offline create.
+    println!("Initial pull: {:?}", a_feed.pull().await?);
+    a_feed.full_load().await?;
+    flush(&a_feed).await?;
+    b_feed.full_load().await?;
 
-    let mut a_note = a.database().get::<Note>(note.id).await?.unwrap();
-    let mut b_note = b.database().get::<Note>(note.id).await?.unwrap();
-    a_note.title = "Title from device A".into();
-    b_note.body = "Body from device B".into();
-    a.save(&a_note).await?;
-    b.save(&b_note).await?;
-    synchronize(&a, &server).await?;
-    synchronize(&b, &server).await?;
-    synchronize(&a, &server).await?;
+    a.database()
+        .update::<Note>(note.id)
+        .set(Note::TITLE, "Title from device A")
+        .execute()
+        .await?;
+    b.database()
+        .update::<Note>(note.id)
+        .set(Note::BODY, "Body from device B")
+        .execute()
+        .await?;
+    flush(&a_feed).await?;
+    // Receive without submitting device B's offline edit.
+    println!("Download only: {:?}", b_feed.pull().await?);
+    flush(&b_feed).await?;
+    a_feed.pull().await?;
     println!("Merged: {:?}", a.database().get::<Note>(note.id).await?);
     for (admin, schema) in [server_cleanup, first_cleanup, second_cleanup]
         .into_iter()

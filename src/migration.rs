@@ -266,7 +266,9 @@ impl ProjectState {
         schemas: impl IntoIterator<Item = (&'app str, &'schema SchemaSet)>,
     ) -> Result<Self, MigrationError> {
         let mut state = Self::default();
+        let mut sync_registrations = Vec::new();
         for (app, schema) in schemas {
+            sync_registrations.extend_from_slice(schema.sync_models());
             let app_state = Self::from_app_schema(app, schema);
             let mut keys: BTreeSet<_> = state.model_keys.values().cloned().collect();
             for key in app_state.model_keys.values() {
@@ -287,6 +289,9 @@ impl ProjectState {
                 state.tables.push(table);
             }
             state.model_keys.extend(app_state.model_keys);
+        }
+        for operation in crate::sync_migration_operations(&sync_registrations)? {
+            operation.state_forwards(&mut state)?;
         }
         Ok(state)
     }

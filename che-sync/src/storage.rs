@@ -185,7 +185,7 @@ pub(crate) async fn read(
             vec![D::Uuid(id)],
         )
         .await?;
-    rows.first().map(|row| (d.read)(row)).transpose()
+    rows.first().map(|row| d.read_row(row)).transpose()
 }
 
 pub(crate) async fn write(

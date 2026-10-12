@@ -70,6 +70,7 @@ mod query;
 mod row;
 mod schema;
 mod sql;
+mod sync;
 mod types;
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -81,6 +82,7 @@ pub use query::*;
 pub use row::*;
 pub use schema::*;
 pub use sql::*;
+pub use sync::*;
 pub use types::*;
 pub use uuid::Uuid;
 

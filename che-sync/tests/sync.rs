@@ -1848,7 +1848,7 @@ async fn file_database_reconnect_recovers_outbox_after_lost_reply() {
 }
 
 #[tokio::test]
-async fn each_model_resets_its_shadow_after_a_server_epoch_change() {
+async fn replacing_the_server_is_rejected_without_rebasing_local_models() {
     let old = server().await;
     let a = client().await;
     let mut parent = task("old epoch");
@@ -1880,8 +1880,43 @@ async fn each_model_resets_its_shadow_after_a_server_epoch_change() {
         })
         .await
         .unwrap();
-    drain_model::<Task>(&a, &replacement).await;
-    drain_model::<Comment>(&a, &replacement).await;
+    let parent_feed =
+        SyncEngine::for_model::<Task>(a.clone(), replacement.for_model::<Task>().unwrap()).unwrap();
+    let child_feed =
+        SyncEngine::for_model::<Comment>(a.clone(), replacement.for_model::<Comment>().unwrap())
+            .unwrap();
+    assert!(
+        parent_feed
+            .pull()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not supported")
+    );
+    assert!(
+        parent_feed
+            .full_load()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not supported")
+    );
+    assert!(
+        child_feed
+            .pull()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not supported")
+    );
+    assert!(
+        child_feed
+            .full_load()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not supported")
+    );
     assert_eq!(
         a.database()
             .get::<Task>(parent.id)
@@ -1889,7 +1924,7 @@ async fn each_model_resets_its_shadow_after_a_server_epoch_change() {
             .unwrap()
             .unwrap()
             .title,
-        "new epoch"
+        "old epoch"
     );
     let received = a
         .database()
@@ -1897,8 +1932,8 @@ async fn each_model_resets_its_shadow_after_a_server_epoch_change() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(received.body, "new child");
-    assert_eq!(received.revision, 1);
+    assert_eq!(received.body, "second child revision");
+    assert_eq!(received.revision, 2);
 }
 
 #[tokio::test]
