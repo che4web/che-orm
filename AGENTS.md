@@ -10,6 +10,8 @@ Workspace members:
 - `che-orm-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
   and `#[derive(ModelSerializer)]`.
 - `che-orm-examples`: downstream examples, sample application models, and the `manage` CLI.
+- `che-sync-protocol`: backend-independent synchronization messages and tagged values.
+- `che-sync`: native current/shadow synchronization engine, migrations, transport trait and offline example.
 
 ## Architecture
 
@@ -133,6 +135,12 @@ include those post-trigger changes.
 
 ## Verification
 
+Sync models use UUID keys and explicit stable field mappings. Register FK parents
+before children. All writes to synchronized tables must use the sync facade.
+Keep client writes/outbox and server writes/journal/receipts transactional.
+ImageField mappings must be server-owned; the Model derive exposes protected
+columns to sync registration. See `docs/sync.md` for ownership and scope contracts.
+
 Run these commands after code changes:
 
 ```bash
@@ -140,6 +148,7 @@ cargo fmt --check
 cargo test --workspace
 cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
+cargo run -p che-sync --example offline
 ```
 
 For PostgreSQL without SQLite:
@@ -147,6 +156,8 @@ For PostgreSQL without SQLite:
 ```bash
 cargo test -p che-orm --no-default-features --features postgres
 cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
+cargo test -p che-sync --no-default-features --features postgres
+cargo test -p che-sync --no-default-features --features postgres --test postgres -- --ignored
 ```
 
 The explicit runtime test requires TEST_POSTGRES_URL and a live PostgreSQL

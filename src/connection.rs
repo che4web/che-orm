@@ -413,6 +413,34 @@ pub struct Transaction {
     session: backend::Session,
 }
 impl Transaction {
+    /// Executes backend-specific SQL on this transaction with bound values.
+    pub async fn execute_sql(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<DatabaseValue>,
+    ) -> Result<ExecuteResult, OrmError> {
+        self.session
+            .execute(CompiledQuery {
+                sql: sql.into(),
+                params,
+            })
+            .await
+    }
+
+    /// Queries backend-specific SQL on this transaction with bound values.
+    pub async fn query_sql(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<DatabaseValue>,
+    ) -> Result<Vec<Row>, OrmError> {
+        self.session
+            .query(CompiledQuery {
+                sql: sql.into(),
+                params,
+            })
+            .await
+    }
+
     pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
         ast.validate()?;
         self.session

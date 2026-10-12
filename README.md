@@ -106,6 +106,8 @@ che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
 
 Подробнее: [backend и PostgreSQL](docs/backends.md).
 
+Offline-first synchronization: [che-sync](docs/sync.md).
+
 ## Первичные ключи UUIDv7
 
 Для UUID-ключа используйте `Uuid` вместо `i64`:

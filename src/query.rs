@@ -291,6 +291,13 @@ pub trait Model: Sized {
         })
     }
     fn insert_values(&self) -> Vec<InsertValue>;
+    /// Physical columns that must not accept untrusted write values. The derive
+    /// includes `ImageField` and `Option<ImageField>`; trusted ORM writes remain
+    /// available for validated uploads. External write adapters enforce this
+    /// metadata, just as ModelSerializer enforces image read-only behavior.
+    fn write_protected_columns() -> &'static [&'static str] {
+        &[]
+    }
     /// Materialized field values keyed by physical SQL column, independently of
     /// Serde naming. Unlike insert values, these include generated keys and
     /// managed timestamps. The derive generates a complete implementation;

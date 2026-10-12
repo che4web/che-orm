@@ -842,6 +842,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut row_fields = Vec::with_capacity(fields.len());
     let mut insert_values = Vec::with_capacity(fields.len());
     let mut field_values = Vec::with_capacity(fields.len());
+    let mut write_protected_columns = Vec::new();
     let mut managed_update_values = Vec::with_capacity(fields.len());
     let mut relation_constants = Vec::new();
     let mut relation_markers = Vec::new();
@@ -863,6 +864,9 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             .map(LitStr::value)
             .unwrap_or_else(|| field_column.clone());
         let constant = Ident::new(&field_column.to_uppercase(), field_name.span());
+        if is_image_field_type(&field_type) {
+            write_protected_columns.push(column.clone());
+        }
         field_columns.insert(field_column.clone(), column.clone());
 
         if !generated_constants.insert(constant.to_string()) {
@@ -1158,6 +1162,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
             fn field_values(&self) -> ::std::vec::Vec<#orm::InsertValue> {
                 vec![#(#field_values),*]
+            }
+
+            fn write_protected_columns() -> &'static [&'static str] {
+                &[#(#write_protected_columns),*]
             }
 
             fn managed_update_values() -> ::std::vec::Vec<#orm::Assignment> {

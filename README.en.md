@@ -1,5 +1,7 @@
 # che-orm
 
+Offline-first synchronization: [che-sync](docs/sync.md).
+
 **English** | [Russian](README.md)
 
 `che-orm` is an experimental typed ORM for Rust. Choose SQLite or PostgreSQL
