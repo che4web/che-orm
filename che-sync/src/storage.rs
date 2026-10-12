@@ -41,10 +41,11 @@ pub(crate) async fn dependents(
             let rows = tx
                 .query_sql(
                     format!(
-                        "SELECT {} FROM {} WHERE {} = $1",
+                        "SELECT {} FROM {} WHERE {} = $1 AND {} IS NULL",
                         quote(child.primary),
                         quote(child.schema.name),
-                        quote(column.name)
+                        quote(column.name),
+                        quote(child.deleted_at)
                     ),
                     vec![D::Uuid(id)],
                 )
@@ -176,9 +177,10 @@ pub(crate) async fn read(
     let rows = tx
         .query_sql(
             format!(
-                "SELECT {columns} FROM {} WHERE {} = $1",
+                "SELECT {columns} FROM {} WHERE {} = $1 AND {} IS NULL",
                 quote(&table),
-                quote(d.primary)
+                quote(d.primary),
+                quote(d.deleted_at)
             ),
             vec![D::Uuid(id)],
         )
@@ -236,11 +238,38 @@ pub(crate) async fn write(
 }
 
 pub(crate) async fn shadow(tx: &Transaction, d: &Descriptor, id: Uuid) -> Result<Entity, OrmError> {
-    let rows = tx.query_sql("SELECT revision, deleted FROM _sync_client_entities WHERE model = $1 AND entity_id = $2", vec![text(d.name), text(id)]).await?;
-    let (revision, deleted) = match rows.first() {
-        Some(row) => (row.get::<i64>(0)?, row.get::<i64>(1)? != 0),
-        None => (0, true),
+    let rows = tx
+        .query_sql(
+            format!(
+                "SELECT {}, {}, {}, _sync_epoch FROM {} WHERE {} = $1",
+                quote(d.revision),
+                quote(d.updated_at),
+                quote(d.deleted_at),
+                quote(&d.mirror()),
+                quote(d.primary)
+            ),
+            vec![D::Uuid(id)],
+        )
+        .await?;
+    let epoch = rows
+        .first()
+        .map(|row| row.get::<Option<String>>(3))
+        .transpose()?
+        .flatten()
+        .map(|s| {
+            s.parse::<Uuid>()
+                .map_err(|_| invalid("invalid shadow epoch"))
+        })
+        .transpose()?;
+    let (revision, updated_at, deleted_at) = match rows.first() {
+        Some(row) => (
+            row.get::<i64>(0)?,
+            row.get::<Option<che_orm::time::OffsetDateTime>>(1)?,
+            row.get::<Option<che_orm::time::OffsetDateTime>>(2)?,
+        ),
+        None => (0, None, None),
     };
+    let deleted = rows.is_empty() || deleted_at.is_some();
     let record = if deleted {
         None
     } else {
@@ -254,6 +283,9 @@ pub(crate) async fn shadow(tx: &Transaction, d: &Descriptor, id: Uuid) -> Result
         id,
         schema_version: d.version,
         revision,
+        epoch,
+        updated_at,
+        deleted_at,
         record,
     })
 }
@@ -263,8 +295,26 @@ pub(crate) async fn set_shadow(
     d: &Descriptor,
     entity: &Entity,
 ) -> Result<(), OrmError> {
-    write(tx, d, entity.id, entity.record.as_ref(), true).await?;
-    tx.execute_sql("INSERT INTO _sync_client_entities (model, entity_id, revision, deleted) VALUES ($1,$2,$3,$4) ON CONFLICT (model, entity_id) DO UPDATE SET revision = excluded.revision, deleted = excluded.deleted", vec![text(d.name), text(entity.id), D::Integer(entity.revision), D::Integer(i64::from(entity.record.is_none()))]).await?;
+    if let Some(record) = &entity.record {
+        write(tx, d, entity.id, Some(record), true).await?;
+    } else if entity.revision > 0 {
+        let now = entity
+            .deleted_at
+            .or(entity.updated_at)
+            .unwrap_or_else(che_orm::time::OffsetDateTime::now_utc);
+        tx.execute_sql(format!("INSERT INTO {} ({}, {}, {}, {}, {}) VALUES ($1,$2,$3,$4,$5) ON CONFLICT ({}) DO UPDATE SET {} = excluded.{}, {} = excluded.{}, {} = excluded.{}", quote(&d.mirror()), quote(d.primary), quote(d.revision), quote(d.updated_at), quote(d.deleted_at), quote(d.scope), quote(d.primary), quote(d.revision), quote(d.revision), quote(d.updated_at), quote(d.updated_at), quote(d.deleted_at), quote(d.deleted_at)), vec![D::Uuid(entity.id), D::Integer(entity.revision), D::DateTime(entity.updated_at.unwrap_or(now)), D::DateTime(now), text("")]).await?;
+    }
+    if let Some(epoch) = entity.epoch {
+        tx.execute_sql(
+            format!(
+                "UPDATE {} SET _sync_epoch = $1 WHERE {} = $2",
+                quote(&d.mirror()),
+                quote(d.primary)
+            ),
+            vec![text(epoch), D::Uuid(entity.id)],
+        )
+        .await?;
+    }
     Ok(())
 }
 

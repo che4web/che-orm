@@ -157,7 +157,7 @@ For PostgreSQL without SQLite:
 cargo test -p che-orm --no-default-features --features postgres
 cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
 cargo test -p che-sync --no-default-features --features postgres
-cargo test -p che-sync --no-default-features --features postgres --test postgres -- --ignored
+cargo test -p che-sync --no-default-features --features postgres --test runtime -- --ignored
 ```
 
 The explicit runtime test requires TEST_POSTGRES_URL and a live PostgreSQL

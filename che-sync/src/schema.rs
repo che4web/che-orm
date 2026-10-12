@@ -46,16 +46,6 @@ impl Registry {
                 let mut tables = vec![
                     table("_sync_meta", &[("key", T), ("value", T)], &["key"]),
                     table(
-                        "_sync_client_entities",
-                        &[
-                            ("model", T),
-                            ("entity_id", T),
-                            ("revision", I),
-                            ("deleted", I),
-                        ],
-                        &["model", "entity_id"],
-                    ),
-                    table(
                         "_sync_dirty",
                         &[("model", T), ("entity_id", T)],
                         &["model", "entity_id"],
@@ -74,9 +64,30 @@ impl Registry {
                 for d in self.models.iter() {
                     let mut mirror = TableState::from(&d.schema);
                     mirror.name = d.mirror();
+                    mirror.columns.push(ColumnState {
+                        name: "_sync_epoch".into(),
+                        field_name: "_sync_epoch".into(),
+                        column_type: T,
+                        nullable: true,
+                        primary_key: false,
+                        unique: false,
+                        default: None,
+                        check: None,
+                        choices: None,
+                        references: None,
+                        auto_now: false,
+                        auto_now_add: false,
+                    });
                     mirror.indexes.clear();
                     mirror.unique_constraints.clear();
                     for column in &mut mirror.columns {
+                        if !column.primary_key
+                            && column.name != d.revision
+                            && column.name != d.updated_at
+                            && column.name != d.scope
+                        {
+                            column.nullable = true;
+                        }
                         column.unique = false;
                         column.default = None;
                         column.check = None;
@@ -90,20 +101,14 @@ impl Registry {
             }
             SchemaRole::Server => vec![
                 table(
+                    "_sync_effects",
+                    &[("id", T), ("scope", T), ("principal", T), ("payload", T)],
+                    &["id"],
+                ),
+                table(
                     "_sync_scopes",
                     &[("scope", T), ("epoch", T), ("sequence", I)],
                     &["scope"],
-                ),
-                table(
-                    "_sync_entities",
-                    &[
-                        ("model", T),
-                        ("entity_id", T),
-                        ("scope", T),
-                        ("revision", I),
-                        ("deleted", I),
-                    ],
-                    &["model", "entity_id"],
                 ),
                 table(
                     "_sync_changes",

@@ -18,13 +18,20 @@ use std::sync::{
 struct Task {
     #[orm(primary_key)]
     id: Uuid,
-    #[orm(db_column = "task_title", unique)]
+    #[orm(db_column = "task_title")]
     title: String,
     description: String,
     #[orm(auto_now_add)]
     created: che_orm::time::OffsetDateTime,
     #[orm(auto_now)]
     updated: che_orm::time::OffsetDateTime,
+    #[orm(default = "0")]
+    revision: i64,
+    #[orm(auto_now)]
+    updated_at: che_orm::time::OffsetDateTime,
+    deleted_at: Option<che_orm::time::OffsetDateTime>,
+    #[orm(default = "''")]
+    sync_scope: String,
 }
 
 impl SyncModel for Task {
@@ -48,6 +55,13 @@ struct Comment {
     #[orm(foreign_key = Task, on_delete = "cascade")]
     task_id: Uuid,
     body: String,
+    #[orm(default = "0")]
+    revision: i64,
+    #[orm(auto_now)]
+    updated_at: che_orm::time::OffsetDateTime,
+    deleted_at: Option<che_orm::time::OffsetDateTime>,
+    #[orm(default = "''")]
+    sync_scope: String,
 }
 
 impl SyncModel for Comment {
@@ -69,6 +83,13 @@ struct OptionalComment {
     #[orm(foreign_key = Task, on_delete = "set null")]
     task_id: Option<Uuid>,
     body: String,
+    #[orm(default = "0")]
+    revision: i64,
+    #[orm(auto_now)]
+    updated_at: che_orm::time::OffsetDateTime,
+    deleted_at: Option<che_orm::time::OffsetDateTime>,
+    #[orm(default = "''")]
+    sync_scope: String,
 }
 
 impl SyncModel for OptionalComment {
@@ -93,6 +114,13 @@ struct Asset {
     count: Option<i64>,
     scheduled: Option<che_orm::time::OffsetDateTime>,
     image: Option<che_orm::ImageField>,
+    #[orm(default = "0")]
+    revision: i64,
+    #[orm(auto_now)]
+    updated_at: che_orm::time::OffsetDateTime,
+    deleted_at: Option<che_orm::time::OffsetDateTime>,
+    #[orm(default = "''")]
+    sync_scope: String,
 }
 
 impl SyncModel for Asset {
@@ -115,10 +143,17 @@ impl SyncModel for Asset {
 struct OwnedSlot {
     #[orm(primary_key)]
     id: Uuid,
-    #[orm(unique, default = "1")]
+    #[orm(default = "1")]
     slot: i64,
     title: String,
     scheduled: Option<che_orm::time::OffsetDateTime>,
+    #[orm(default = "0")]
+    revision: i64,
+    #[orm(auto_now)]
+    updated_at: che_orm::time::OffsetDateTime,
+    deleted_at: Option<che_orm::time::OffsetDateTime>,
+    #[orm(default = "''")]
+    sync_scope: String,
 }
 
 impl SyncModel for OwnedSlot {
@@ -146,6 +181,17 @@ fn registry() -> Registry {
         .register::<OwnedSlot>()
         .unwrap()
 }
+macro_rules! defaults {
+    ($model:ty, {$($field:ident: $value:expr),* $(,)?}) => {
+        impl Default for $model { fn default() -> Self { Self {
+            id: Uuid::nil(), revision: 0, updated_at: che_orm::time::OffsetDateTime::UNIX_EPOCH, deleted_at: None, sync_scope: String::new(), $($field: $value,)*
+        } } }
+    };
+}
+defaults!(Comment, {task_id: Uuid::nil(), body: String::new()});
+defaults!(OptionalComment, {task_id: None, body: String::new()});
+defaults!(OwnedSlot, {slot: 1, title: String::new(), scheduled: None});
+defaults!(Asset, {bytes: Vec::new(), enabled: false, score: 0.0, count: None, scheduled: None, image: None});
 fn task(title: &str) -> Task {
     let time = che_orm::time::OffsetDateTime::UNIX_EPOCH;
     Task {
@@ -154,7 +200,704 @@ fn task(title: &str) -> Task {
         description: "original".into(),
         created: time,
         updated: time,
+        revision: 0,
+        updated_at: time,
+        deleted_at: None,
+        sync_scope: String::new(),
     }
+}
+
+fn model_engine<M: SyncModel>(client: &SyncClient, server: &SyncServer) -> SyncEngine<SyncServer> {
+    SyncEngine::for_model::<M>(client.clone(), server.for_model::<M>().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn model_parent_pull_and_snapshot_preserve_cascade_and_set_null_effects() {
+    for snapshot in [false, true] {
+        let server = server().await;
+        let a = client().await;
+        let parent = task(if snapshot {
+            "snapshot cascade"
+        } else {
+            "pull cascade"
+        });
+        let child = Comment {
+            id: Uuid::now_v7(),
+            task_id: parent.id,
+            body: "clean child".into(),
+            ..Comment::default()
+        };
+        let optional = OptionalComment {
+            id: Uuid::now_v7(),
+            task_id: Some(parent.id),
+            body: "clean optional".into(),
+            ..OptionalComment::default()
+        };
+        a.save(&parent).await.unwrap();
+        a.save(&child).await.unwrap();
+        a.save(&optional).await.unwrap();
+        drain_model::<Comment>(&a, &server).await;
+        drain_model::<OptionalComment>(&a, &server).await;
+        if !snapshot {
+            drain_model::<Task>(&a, &server).await;
+        }
+        server.delete::<Task>(parent.id).await.unwrap();
+        drain_model::<Task>(&a, &server).await;
+        assert!(a.database().get::<Task>(parent.id).await.unwrap().is_none());
+        assert!(
+            a.database()
+                .get::<Comment>(child.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            a.database()
+                .get::<OptionalComment>(optional.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .task_id,
+            None
+        );
+        assert!(a.conflicts().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn lost_child_reply_does_not_block_an_independent_parent_create() {
+    let server = server().await;
+    let a = client().await;
+    let first = task("known parent");
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: first.id,
+        body: "child".into(),
+        ..Comment::default()
+    };
+    a.save(&first).await.unwrap();
+    a.save(&child).await.unwrap();
+    drain_model::<Comment>(&a, &server).await;
+    a.save(&Comment {
+        body: "changed".into(),
+        ..child
+    })
+    .await
+    .unwrap();
+    let engine = SyncEngine::for_model::<Comment>(
+        a.clone(),
+        LostReply {
+            server: server.for_model::<Comment>().unwrap(),
+            lose: AtomicBool::new(true),
+        },
+    )
+    .unwrap();
+    assert!(engine.sync_once().await.is_err());
+    let independent = task("independent parent");
+    a.save(&independent).await.unwrap();
+    model_engine::<Task>(&a, &server).sync_once().await.unwrap();
+    assert!(
+        server
+            .snapshot()
+            .await
+            .unwrap()
+            .entities
+            .iter()
+            .any(|e| e.id == independent.id)
+    );
+    assert_eq!(
+        a.database()
+            .query_sql("SELECT payload FROM _sync_outbox", vec![])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    drain_model::<Comment>(&a, &server).await;
+}
+
+struct WaitingTransport {
+    server: SyncServer,
+    started: Arc<tokio::sync::Notify>,
+}
+impl SyncTransport for WaitingTransport {
+    fn push(&self, _: PushRequest) -> TransportFuture<'_, PushResult> {
+        Box::pin(async move {
+            self.started.notify_one();
+            std::future::pending().await
+        })
+    }
+    fn pull(&self, request: PullRequest) -> TransportFuture<'_, PullResult> {
+        Box::pin(self.server.pull(request))
+    }
+    fn snapshot(&self) -> TransportFuture<'_, Snapshot> {
+        Box::pin(self.server.snapshot())
+    }
+}
+
+struct DelayedSnapshot {
+    server: SyncServer,
+    snapshot: Snapshot,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+impl SyncTransport for DelayedSnapshot {
+    fn push(&self, request: PushRequest) -> TransportFuture<'_, PushResult> {
+        Box::pin(self.server.push(request))
+    }
+    fn pull(&self, request: PullRequest) -> TransportFuture<'_, PullResult> {
+        Box::pin(self.server.pull(request))
+    }
+    fn snapshot(&self) -> TransportFuture<'_, Snapshot> {
+        Box::pin(async move {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(self.snapshot.clone())
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_overlapping_snapshot_does_not_undo_a_concurrent_parent_acknowledgement() {
+    let server = server().await;
+    let a = client().await;
+    let parent = task("before overlapping snapshot");
+    server.save(&parent).await.unwrap();
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: parent.id,
+        body: "remote child".into(),
+        ..Comment::default()
+    };
+    server.save(&child).await.unwrap();
+    drain_model::<Task>(&a, &server).await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let child_server = server.for_model::<Comment>().unwrap();
+    let engine = SyncEngine::for_model::<Comment>(
+        a.clone(),
+        DelayedSnapshot {
+            snapshot: child_server.snapshot().await.unwrap(),
+            server: child_server,
+            started: started.clone(),
+            release: release.clone(),
+        },
+    )
+    .unwrap();
+    let receiving = tokio::spawn(async move { engine.sync_once().await });
+    started.notified().await;
+    let mut edit = a.database().get::<Task>(parent.id).await.unwrap().unwrap();
+    edit.title = "acknowledged during child snapshot".into();
+    a.save(&edit).await.unwrap();
+    drain_model::<Task>(&a, &server).await;
+    release.notify_one();
+    receiving.await.unwrap().unwrap();
+    assert_eq!(
+        a.database()
+            .get::<Task>(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        edit.title
+    );
+    assert!(
+        a.database()
+            .get::<Comment>(child.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(a.conflicts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_waiting_network_request_does_not_lock_unrelated_model_cycles() {
+    let server = server().await;
+    let a = client().await;
+    a.save(&task("waiting network")).await.unwrap();
+    a.save(&OwnedSlot {
+        id: Uuid::now_v7(),
+        slot: 1,
+        title: "unrelated".into(),
+        scheduled: None,
+        ..OwnedSlot::default()
+    })
+    .await
+    .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let engine = SyncEngine::for_model::<Task>(
+        a.clone(),
+        WaitingTransport {
+            server: server.for_model::<Task>().unwrap(),
+            started: started.clone(),
+        },
+    )
+    .unwrap();
+    let first = tokio::spawn(async move { engine.sync_once().await });
+    started.notified().await;
+    let independent = model_engine::<OwnedSlot>(&a, &server);
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(2), independent.sync_once()).await;
+    first.abort();
+    result
+        .expect("unrelated cycle waited for another model's network")
+        .unwrap();
+    assert!(
+        server
+            .snapshot()
+            .await
+            .unwrap()
+            .entities
+            .iter()
+            .any(|e| e.model == OwnedSlot::SYNC_NAME)
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_preparation_detects_changed_cascade_rows_and_replay_is_not_a_new_commit() {
+    let server = server().await;
+    let parent = task("prepared delete");
+    server.save(&parent).await.unwrap();
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: parent.id,
+        body: "before preparation".into(),
+        ..Comment::default()
+    };
+    server.save(&child).await.unwrap();
+    let request = PushRequest {
+        protocol_version: PROTOCOL_VERSION,
+        scope: "workspace".into(),
+        replica_id: Uuid::now_v7(),
+        operation: Operation {
+            id: Uuid::now_v7(),
+            mutations: vec![Mutation {
+                model: Task::SYNC_NAME.into(),
+                id: parent.id,
+                schema_version: 1,
+                base_revision: 1,
+                changes: None,
+            }],
+        },
+    };
+    let before = server.prepare_push(&request).await.unwrap();
+    server
+        .save(&Comment {
+            body: "changed during preparation".into(),
+            ..child
+        })
+        .await
+        .unwrap();
+    let (result, committed) = server.push_prepared(request.clone(), before).await.unwrap();
+    assert!(matches!(result, PushResult::Conflict(_)));
+    assert!(!committed);
+    let before = server.prepare_push(&request).await.unwrap();
+    let (accepted, committed) = server.push_prepared(request.clone(), before).await.unwrap();
+    assert!(matches!(accepted, PushResult::Accepted(_)));
+    assert!(committed);
+    let before = server.prepare_push(&request).await.unwrap();
+    let (replay, committed) = server.push_prepared(request, before).await.unwrap();
+    assert_eq!(replay, accepted);
+    assert!(!committed);
+}
+
+async fn drain_model<M: SyncModel>(client: &SyncClient, server: &SyncServer) {
+    let engine = model_engine::<M>(client, server);
+    for _ in 0..50 {
+        let report = engine.sync_once().await.unwrap();
+        assert!(!report.blocked, "unexpected blocked model feed: {report:?}");
+        if !report.has_more {
+            return;
+        }
+    }
+    panic!("model feed did not converge");
+}
+
+#[tokio::test]
+async fn model_feed_automatically_creates_parents_and_keeps_other_queues_and_cursors_independent() {
+    let server = server().await;
+    let a = client().await;
+    let parent = task("automatic parent");
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: parent.id,
+        body: "offline child".into(),
+        ..Comment::default()
+    };
+    let unrelated = OwnedSlot {
+        id: Uuid::now_v7(),
+        slot: 1,
+        title: "independent".into(),
+        scheduled: None,
+        ..OwnedSlot::default()
+    };
+
+    a.save(&parent).await.unwrap();
+    a.save(&child).await.unwrap();
+    a.save(&unrelated).await.unwrap();
+    drain_model::<Comment>(&a, &server).await;
+    let snapshot = server.snapshot().await.unwrap();
+    assert_eq!(snapshot.entities.len(), 2);
+    assert!(snapshot.entities.iter().any(|e| e.id == parent.id));
+    assert!(snapshot.entities.iter().any(|e| e.id == child.id));
+    assert!(
+        a.database()
+            .query_sql(
+                "SELECT value FROM _sync_meta WHERE key = $1",
+                vec![che_orm::DatabaseValue::Text(
+                    "cursor:model:tasks.task".into()
+                )]
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let child_feed = server
+        .for_model::<Comment>()
+        .unwrap()
+        .snapshot()
+        .await
+        .unwrap();
+    let child_cursor = child_feed.cursor.clone();
+    assert_eq!(child_feed.cursor.model.as_deref(), Some(Comment::SYNC_NAME));
+    assert_eq!(child_feed.entities.len(), 2);
+    let parent_feed = server
+        .for_model::<Task>()
+        .unwrap()
+        .snapshot()
+        .await
+        .unwrap();
+    assert_eq!(parent_feed.entities.len(), 1);
+    assert!(
+        server
+            .for_model::<Task>()
+            .unwrap()
+            .pull(PullRequest {
+                protocol_version: PROTOCOL_VERSION,
+                cursor: Some(child_feed.cursor),
+                limit: 10
+            })
+            .await
+            .is_err()
+    );
+    drain_model::<OwnedSlot>(&a, &server).await;
+    assert_eq!(server.snapshot().await.unwrap().entities.len(), 3);
+    let PullResult::Changes { groups, cursor, .. } = server
+        .for_model::<Comment>()
+        .unwrap()
+        .pull(PullRequest {
+            protocol_version: PROTOCOL_VERSION,
+            cursor: Some(child_cursor.clone()),
+            limit: 10,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected projected page")
+    };
+    assert_eq!(groups.len(), 1);
+    assert!(groups[0].entities.is_empty());
+    assert_eq!(cursor.sequence, child_cursor.sequence + 1);
+    // A new child client loads its parents automatically but no unrelated model.
+    let b = client().await;
+    drain_model::<Comment>(&b, &server).await;
+    assert!(b.database().get::<Task>(parent.id).await.unwrap().is_some());
+    assert!(
+        b.database()
+            .get::<Comment>(child.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        b.database()
+            .get::<OwnedSlot>(unrelated.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn conflicts_in_an_existing_parent_do_not_block_child_or_unrelated_model_writes() {
+    let server = server().await;
+    let a = client().await;
+    let original = task("parent before conflict");
+    a.save(&original).await.unwrap();
+    drain_model::<Task>(&a, &server).await;
+    server
+        .save(&Task {
+            title: "remote parent edit".into(),
+            ..original.clone()
+        })
+        .await
+        .unwrap();
+    a.save(&Task {
+        title: "local parent edit".into(),
+        ..original.clone()
+    })
+    .await
+    .unwrap();
+    let report = model_engine::<Task>(&a, &server).sync_once().await.unwrap();
+    assert_eq!(report.conflicts, 1);
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: original.id,
+        body: "independent child".into(),
+        ..Comment::default()
+    };
+    a.save(&child).await.unwrap();
+    drain_model::<Comment>(&a, &server).await;
+    let unrelated = OwnedSlot {
+        id: Uuid::now_v7(),
+        slot: 1,
+        title: "independent".into(),
+        scheduled: None,
+        ..OwnedSlot::default()
+    };
+    a.save(&unrelated).await.unwrap();
+    drain_model::<OwnedSlot>(&a, &server).await;
+    assert_eq!(a.conflicts().await.unwrap().len(), 1);
+    assert!(
+        server
+            .snapshot()
+            .await
+            .unwrap()
+            .entities
+            .iter()
+            .any(|e| e.id == child.id)
+    );
+    assert!(
+        server
+            .snapshot()
+            .await
+            .unwrap()
+            .entities
+            .iter()
+            .any(|e| e.id == unrelated.id)
+    );
+}
+
+#[tokio::test]
+async fn independent_model_outbox_survives_lost_reply_and_parent_retry_is_automatic() {
+    let server = server().await;
+    let a = client().await;
+    let parent = task("lost parent reply");
+    a.save(&parent).await.unwrap();
+    let engine = SyncEngine::for_model::<Task>(
+        a.clone(),
+        LostReply {
+            server: server.for_model::<Task>().unwrap(),
+            lose: AtomicBool::new(true),
+        },
+    )
+    .unwrap();
+    assert!(engine.sync_once().await.is_err());
+    let unrelated = OwnedSlot {
+        id: Uuid::now_v7(),
+        slot: 1,
+        title: "independent during outage".into(),
+        scheduled: None,
+        ..OwnedSlot::default()
+    };
+    a.save(&unrelated).await.unwrap();
+    let slot_engine = SyncEngine::for_model::<OwnedSlot>(
+        a.clone(),
+        LostReply {
+            server: server.for_model::<OwnedSlot>().unwrap(),
+            lose: AtomicBool::new(true),
+        },
+    )
+    .unwrap();
+    assert!(slot_engine.sync_once().await.is_err());
+    assert_eq!(
+        a.database()
+            .query_sql("SELECT payload FROM _sync_outbox", vec![])
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    drop(slot_engine);
+    drain_model::<OwnedSlot>(&a, &server).await;
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: parent.id,
+        body: "retry parent first".into(),
+        ..Comment::default()
+    };
+    a.save(&child).await.unwrap();
+    // Reopen after dropping the previous owner, including its queued operation.
+    let db = a.database().clone();
+    drop(engine);
+    drop(a);
+    let a = SyncClient::open(db, registry(), "workspace").await.unwrap();
+    drain_model::<Comment>(&a, &server).await;
+    let snapshot = server.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot
+            .entities
+            .iter()
+            .find(|e| e.id == parent.id)
+            .unwrap()
+            .revision,
+        1
+    );
+    assert!(snapshot.entities.iter().any(|e| e.id == child.id));
+    assert!(
+        a.database()
+            .query_sql("SELECT payload FROM _sync_outbox", vec![])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn model_parent_delete_includes_child_moves_before_cascade() {
+    let server = server().await;
+    let a = client().await;
+    let old = task("old parent");
+    let new = task("new parent");
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: old.id,
+        body: "move before delete".into(),
+        ..Comment::default()
+    };
+    a.save(&old).await.unwrap();
+    a.save(&child).await.unwrap();
+    drain_model::<Comment>(&a, &server).await;
+    let child_id = child.id;
+    let new_id = new.id;
+    let old_id = old.id;
+    a.transaction(move |tx| {
+        Box::pin(async move {
+            tx.save(&new).await?;
+            tx.save(&Comment {
+                task_id: new.id,
+                ..child
+            })
+            .await?;
+            tx.delete::<Task>(old.id).await
+        })
+    })
+    .await
+    .unwrap();
+    drain_model::<Task>(&a, &server).await;
+    let snapshot = server.snapshot().await.unwrap();
+    let moved = snapshot
+        .entities
+        .iter()
+        .find(|e| e.id == child_id)
+        .unwrap()
+        .record
+        .as_ref()
+        .unwrap();
+    assert_eq!(moved["task"], Value::Uuid(new_id));
+    assert!(
+        snapshot
+            .entities
+            .iter()
+            .find(|e| e.id == old_id)
+            .unwrap()
+            .record
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn validated_server_writes_use_wire_mapping_defaults_and_atomic_journal() {
+    use che_orm::ValidatedWrite;
+    let server = server().await;
+    let id = Uuid::now_v7();
+    let result = server
+        .write(ValidatedWrite::Create(
+            Task::insert()
+                .set(Task::ID, id)
+                .set(Task::TITLE, "validated")
+                .set(Task::DESCRIPTION, "created"),
+        ))
+        .await
+        .unwrap();
+    let PushResult::Accepted(entities) = result else {
+        panic!("create rejected")
+    };
+    let created = entities[0].record.as_ref().unwrap();
+    assert_eq!(created["title"], Value::Text("validated".into()));
+    assert!(
+        matches!(created["created"], Value::DateTime(value) if value != che_orm::time::OffsetDateTime::UNIX_EPOCH)
+    );
+    let result = server
+        .write(ValidatedWrite::Update(
+            Task::update()
+                .filter(Task::ID.eq(id))
+                .set(Task::DESCRIPTION, "patched"),
+        ))
+        .await
+        .unwrap();
+    let PushResult::Accepted(entities) = result else {
+        panic!("update rejected")
+    };
+    assert_eq!(entities[0].revision, 2);
+    assert_eq!(
+        entities[0].record.as_ref().unwrap()["title"],
+        Value::Text("validated".into())
+    );
+    let before = server.snapshot().await.unwrap();
+    assert!(
+        server
+            .write(ValidatedWrite::Update(
+                Task::update()
+                    .filter(Task::TITLE.eq("validated"))
+                    .set(Task::DESCRIPTION, "unsafe")
+            ))
+            .await
+            .is_err()
+    );
+    assert!(
+        server
+            .write(ValidatedWrite::Create(
+                Task::insert()
+                    .set(Task::ID, id)
+                    .set(Task::TITLE, "overwrite")
+                    .set(Task::DESCRIPTION, "unsafe")
+            ))
+            .await
+            .is_err()
+    );
+    assert_eq!(server.snapshot().await.unwrap(), before);
+
+    let foreign = che_orm::ModelField::<Task, String>::new("another_table", "task_title");
+    assert!(
+        server
+            .write(ValidatedWrite::Create(
+                Task::insert()
+                    .set(foreign, "foreign column")
+                    .set(Task::DESCRIPTION, "unsafe")
+            ))
+            .await
+            .is_err()
+    );
+    assert_eq!(server.snapshot().await.unwrap(), before);
+
+    let result = server
+        .write(ValidatedWrite::Create(
+            OwnedSlot::insert()
+                .set(OwnedSlot::TITLE, "prepared")
+                .set(OwnedSlot::SLOT, 42)
+                .set(OwnedSlot::SCHEDULED, None::<che_orm::time::OffsetDateTime>),
+        ))
+        .await
+        .unwrap();
+    let PushResult::Accepted(entities) = result else {
+        panic!("trusted field rejected")
+    };
+    assert_eq!(
+        entities[0].record.as_ref().unwrap()["slot"],
+        Value::Integer(42)
+    );
 }
 
 async fn database(role: SchemaRole) -> Database {
@@ -184,6 +927,9 @@ async fn migrate(db: &Database, role: SchemaRole) {
         },
     ]);
     operations.extend(registry().migration_operations(role));
+    operations.push(MigrationOperation::RunSql {
+        forward: "CREATE UNIQUE INDEX tasks_active_title ON tasks(task_title) WHERE deleted_at IS NULL; CREATE UNIQUE INDEX owned_slots_active_slot ON owned_slots(slot) WHERE deleted_at IS NULL;".into(), reverse: None, state_operations: vec![],
+    });
     db.migrate(
         MigrationGraph::new(vec![Migration::new(
             MigrationId {
@@ -437,6 +1183,7 @@ async fn related_creates_and_cascade_deletes_are_atomic() {
         id: Uuid::now_v7(),
         task_id: t.id,
         body: "child".into(),
+        ..Comment::default()
     };
     let task_id = t.id;
     let comment_id = comment.id;
@@ -634,19 +1381,15 @@ async fn constraint_conflict_retains_local_data_and_remote_shadow() {
     b.save(&local).await.unwrap();
     sync(&b, &server).await;
     let conflicts = b.conflicts().await.unwrap();
-    // Push-first exposes the rejected local create as well as the blocked
-    // incoming row. Only the latter can be retried without explicit resolution.
-    assert_eq!(conflicts.len(), 2);
+    // Pull-first retains the incoming row as a retryable constraint conflict
+    // and does not send the competing create before the pull is reconciled.
+    assert_eq!(conflicts.len(), 1);
     assert!(
         conflicts
             .iter()
             .any(|c| c.id == remote.id && c.retryable && c.reason.is_some())
     );
-    assert!(
-        conflicts
-            .iter()
-            .any(|c| c.id == local.id && !c.retryable && c.reason.is_some())
-    );
+    assert!(!conflicts.iter().any(|c| c.id == local.id));
     assert_eq!(
         b.database()
             .get::<Task>(local.id)
@@ -659,9 +1402,6 @@ async fn constraint_conflict_retains_local_data_and_remote_shadow() {
     assert!(b.database().get::<Task>(remote.id).await.unwrap().is_none());
     local.title = "no collision".into();
     b.save(&local).await.unwrap();
-    b.resolve(Task::SYNC_NAME, local.id, Resolution::Local)
-        .await
-        .unwrap();
     // The unchanged remote row retries automatically after its UNIQUE
     // dependency is released; it is not a competing user edit.
     sync(&b, &server).await;
@@ -680,6 +1420,7 @@ async fn remote_cascade_does_not_silently_destroy_a_local_child_edit() {
         id: Uuid::now_v7(),
         task_id: id,
         body: "original".into(),
+        ..Comment::default()
     };
     let child_id = comment.id;
     a.transaction(move |tx| {
@@ -862,6 +1603,7 @@ async fn denied_policy_rolls_back_cascade_and_does_not_advance_journal() {
         id: Uuid::now_v7(),
         task_id: id,
         body: "protected".into(),
+        ..Comment::default()
     };
     let child_id = comment.id;
     a.transaction(move |tx| {
@@ -906,6 +1648,7 @@ async fn cross_scope_fk_is_rejected_without_exposing_another_scopes_data() {
         id: Uuid::now_v7(),
         task_id: parent.id,
         body: "cross scope".into(),
+        ..Comment::default()
     };
     assert!(matches!(
         two.save(&child).await.unwrap(),
@@ -927,6 +1670,7 @@ async fn nullable_fk_set_null_is_included_in_server_journal() {
         id: Uuid::now_v7(),
         task_id: Some(t.id),
         body: "remains".into(),
+        ..OptionalComment::default()
     };
     assert!(matches!(
         server.save(&child).await.unwrap(),
@@ -960,6 +1704,7 @@ async fn wire_roundtrip_preserves_types_and_server_owned_image_keys() {
         count: Some(i64::MAX),
         scheduled: Some(che_orm::time::OffsetDateTime::now_utc()),
         image: Some(che_orm::ImageField::new("uploads/trusted.png")),
+        ..Asset::default()
     };
     assert!(matches!(
         server.save(&asset).await.unwrap(),
@@ -1054,6 +1799,9 @@ async fn file_database_reconnect_recovers_outbox_after_lost_reply() {
     let mut legacy: serde_json::Value =
         serde_json::from_str(&rows[0].get::<String>(0).unwrap()).unwrap();
     legacy["bases"] = serde_json::json!([Entity {
+        epoch: None,
+        updated_at: None,
+        deleted_at: None,
         model: Task::SYNC_NAME.into(),
         id,
         schema_version: 1,
@@ -1099,6 +1847,118 @@ async fn file_database_reconnect_recovers_outbox_after_lost_reply() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[tokio::test]
+async fn each_model_resets_its_shadow_after_a_server_epoch_change() {
+    let old = server().await;
+    let a = client().await;
+    let mut parent = task("old epoch");
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: parent.id,
+        body: "old child".into(),
+        ..Comment::default()
+    };
+    old.save(&parent).await.unwrap();
+    old.save(&child).await.unwrap();
+    parent.description = "second revision".into();
+    old.save(&parent).await.unwrap();
+    old.save(&Comment {
+        body: "second child revision".into(),
+        ..child.clone()
+    })
+    .await
+    .unwrap();
+    drain_model::<Task>(&a, &old).await;
+    drain_model::<Comment>(&a, &old).await;
+    let replacement = server().await;
+    parent.title = "new epoch".into();
+    replacement.save(&parent).await.unwrap();
+    replacement
+        .save(&Comment {
+            body: "new child".into(),
+            ..child.clone()
+        })
+        .await
+        .unwrap();
+    drain_model::<Task>(&a, &replacement).await;
+    drain_model::<Comment>(&a, &replacement).await;
+    assert_eq!(
+        a.database()
+            .get::<Task>(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "new epoch"
+    );
+    let received = a
+        .database()
+        .get::<Comment>(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.body, "new child");
+    assert_eq!(received.revision, 1);
+}
+
+#[tokio::test]
+async fn immutable_pending_fk_survives_a_local_move_and_parent_deletion() {
+    let server = server().await;
+    let a = client().await;
+    let first = task("original pending parent");
+    let second = task("moved pending parent");
+    a.save(&first).await.unwrap();
+    a.save(&second).await.unwrap();
+    sync(&a, &server).await;
+    let child = Comment {
+        id: Uuid::now_v7(),
+        task_id: first.id,
+        body: "lost create reply".into(),
+        ..Comment::default()
+    };
+    a.save(&child).await.unwrap();
+    let engine = SyncEngine::for_model::<Comment>(
+        a.clone(),
+        TraceTransport {
+            server: server.clone(),
+            calls: Arc::default(),
+            lose: AtomicBool::new(true),
+        },
+    )
+    .unwrap();
+    assert!(engine.sync_once().await.is_err());
+    a.save(&Comment {
+        task_id: second.id,
+        ..child.clone()
+    })
+    .await
+    .unwrap();
+    a.delete::<Task>(first.id).await.unwrap();
+    drain_model::<Task>(&a, &server).await;
+    drain_model::<Comment>(&a, &server).await;
+    let snapshot = server.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot
+            .entities
+            .iter()
+            .find(|e| e.id == child.id)
+            .unwrap()
+            .record
+            .as_ref()
+            .unwrap()["task"],
+        Value::Uuid(second.id)
+    );
+    assert!(
+        snapshot
+            .entities
+            .iter()
+            .find(|e| e.id == first.id)
+            .unwrap()
+            .record
+            .is_none()
+    );
+}
+
 struct TraceTransport {
     server: SyncServer,
     calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
@@ -1127,7 +1987,7 @@ impl SyncTransport for TraceTransport {
 }
 
 #[tokio::test]
-async fn push_first_freezes_one_shadow_and_outbox_has_no_server_snapshot() {
+async fn pull_first_freezes_an_unknown_push_and_outbox_has_no_server_snapshot() {
     let server = server().await;
     let a = client().await;
     let mut t = task("push first base");
@@ -1146,7 +2006,7 @@ async fn push_first_freezes_one_shadow_and_outbox_has_no_server_snapshot() {
         },
     );
     assert!(engine.sync_once().await.is_err());
-    assert_eq!(*calls.lock().unwrap(), vec!["push"]);
+    assert_eq!(*calls.lock().unwrap(), vec!["pull", "push"]);
     let rows = a
         .database()
         .query_sql("SELECT payload FROM _sync_outbox", vec![])
@@ -1158,7 +2018,7 @@ async fn push_first_freezes_one_shadow_and_outbox_has_no_server_snapshot() {
     assert!(pending.get("sent").is_none());
     assert_eq!(
         pending["request"]["operation"]["mutations"][0]["base_revision"],
-        1
+        "1"
     );
     let old = a
         .database()
@@ -1170,7 +2030,7 @@ async fn push_first_freezes_one_shadow_and_outbox_has_no_server_snapshot() {
     a.save(&t).await.unwrap();
     calls.lock().unwrap().clear();
     engine.sync_once().await.unwrap();
-    assert_eq!(*calls.lock().unwrap(), vec!["push", "pull"]);
+    assert_eq!(*calls.lock().unwrap(), vec!["push", "pull", "push"]);
     assert_eq!(
         a.database().get::<Task>(t.id).await.unwrap().unwrap().title,
         "edited after loss"
@@ -1180,7 +2040,7 @@ async fn push_first_freezes_one_shadow_and_outbox_has_no_server_snapshot() {
 }
 
 #[tokio::test]
-async fn initial_offline_create_is_pushed_before_snapshot() {
+async fn initial_offline_create_is_pushed_after_full_load() {
     let server = server().await;
     let a = client().await;
     a.save(&task("initial push")).await.unwrap();
@@ -1196,7 +2056,7 @@ async fn initial_offline_create_is_pushed_before_snapshot() {
     .sync_once()
     .await
     .unwrap();
-    assert_eq!(*calls.lock().unwrap(), vec!["push", "snapshot"]);
+    assert_eq!(*calls.lock().unwrap(), vec!["snapshot", "push"]);
 }
 
 #[tokio::test]
@@ -1271,6 +2131,7 @@ async fn fk_move_waits_for_unique_release_before_parent_deletion() {
         id: Uuid::now_v7(),
         task_id: Some(source.id),
         body: "keep child".into(),
+        ..OptionalComment::default()
     };
     server.save(&child).await.unwrap();
     sync(&a, &server).await;
@@ -1330,6 +2191,7 @@ impl SyncTransport for CreateChildDuringPull {
                             id: self.child,
                             task_id: Some(self.parent),
                             body: "unsent child".into(),
+                            ..OptionalComment::default()
                         })
                         .await?;
                 } else {
@@ -1338,6 +2200,7 @@ impl SyncTransport for CreateChildDuringPull {
                             id: self.child,
                             task_id: self.parent,
                             body: "unsent child".into(),
+                            ..Comment::default()
                         })
                         .await?;
                 }
@@ -1396,8 +2259,8 @@ async fn incoming_deletion_preserves_new_children_created_during_pull() {
         let rows = a
             .database()
             .query_sql(
-                "SELECT entity_id FROM _sync_client_entities WHERE entity_id = $1",
-                vec![che_orm::DatabaseValue::Text(child_id.to_string())],
+                "SELECT id FROM _sync_server_comments WHERE id = $1",
+                vec![che_orm::DatabaseValue::Uuid(child_id)],
             )
             .await
             .unwrap();
@@ -1435,6 +2298,7 @@ async fn rejected_unsent_child_is_preserved_when_snapshot_deletes_parent() {
         id: Uuid::now_v7(),
         task_id: parent.id,
         body: "offline data".into(),
+        ..Comment::default()
     };
     a.save(&child).await.unwrap();
     server.delete::<Task>(parent.id).await.unwrap();
@@ -1542,9 +2406,6 @@ async fn explicit_delete_of_deferred_row_survives_reopen_and_is_sent() {
         let a = SyncClient::open(db, registry(), "workspace").await.unwrap();
         blocker.title = "released deletion blocker".into();
         a.save(&blocker).await.unwrap();
-        a.resolve(Task::SYNC_NAME, blocker.id, Resolution::Local)
-            .await
-            .unwrap();
         sync(&a, &server).await;
         assert!(a.database().get::<Task>(remote.id).await.unwrap().is_none());
         assert!(a.conflicts().await.unwrap().is_empty());
@@ -1599,9 +2460,6 @@ async fn rolled_back_delete_of_deferred_row_does_not_cancel_reconciliation() {
     );
     blocker.title = "released rollback blocker".into();
     a.save(&blocker).await.unwrap();
-    a.resolve(Task::SYNC_NAME, blocker.id, Resolution::Local)
-        .await
-        .unwrap();
     sync(&a, &server).await;
     assert!(a.database().get::<Task>(id).await.unwrap().is_some());
     assert!(a.conflicts().await.unwrap().is_empty());
@@ -1616,6 +2474,7 @@ async fn accepted_owned_unique_value_retries_after_older_delete_is_received() {
         slot: 1,
         title: "old".into(),
         scheduled: None,
+        ..OwnedSlot::default()
     };
     server.save(&old).await.unwrap();
     sync(&a, &server).await;
@@ -1625,6 +2484,7 @@ async fn accepted_owned_unique_value_retries_after_older_delete_is_received() {
         slot: 2,
         title: "new".into(),
         scheduled: None,
+        ..OwnedSlot::default()
     };
     a.save(&new).await.unwrap();
     let report = SyncEngine::new(a.clone(), server.clone())
@@ -1703,6 +2563,7 @@ async fn deferred_acknowledgement_preserves_in_flight_edits_and_normalization() 
         slot: 1,
         title: "old normalized slot".into(),
         scheduled: None,
+        ..OwnedSlot::default()
     };
     server.save(&old).await.unwrap();
     sync(&a, &server).await;
@@ -1714,6 +2575,7 @@ async fn deferred_acknowledgement_preserves_in_flight_edits_and_normalization() 
         scheduled: Some(
             che_orm::time::OffsetDateTime::from_unix_timestamp_nanos(1_234_567_890).unwrap(),
         ),
+        ..OwnedSlot::default()
     };
     a.save(&new).await.unwrap();
     let engine = SyncEngine::new(
@@ -1774,7 +2636,7 @@ async fn newer_remote_revision_is_not_mistaken_for_the_deferred_acknowledgement(
                 if self.lag.swap(false, Ordering::SeqCst) {
                     Ok(PullResult::Changes {
                         groups: vec![],
-                        cursor: request.cursor,
+                        cursor: request.cursor.unwrap(),
                         has_more: false,
                     })
                 } else {
@@ -1799,6 +2661,7 @@ async fn newer_remote_revision_is_not_mistaken_for_the_deferred_acknowledgement(
         slot: 1,
         title: "old anchor slot".into(),
         scheduled: None,
+        ..OwnedSlot::default()
     };
     server.save(&old).await.unwrap();
     sync(&a, &server).await;
@@ -1808,6 +2671,7 @@ async fn newer_remote_revision_is_not_mistaken_for_the_deferred_acknowledgement(
         slot: 2,
         title: "sent anchor title".into(),
         scheduled: None,
+        ..OwnedSlot::default()
     };
     a.save(&new).await.unwrap();
     let engine = SyncEngine::new(
@@ -1836,6 +2700,7 @@ async fn newer_remote_revision_is_not_mistaken_for_the_deferred_acknowledgement(
             slot: 1,
             title: "remote after acknowledgement".into(),
             scheduled: None,
+            ..OwnedSlot::default()
         })
         .await
         .unwrap();
@@ -1877,6 +2742,7 @@ async fn dependency_protection_preserves_the_original_rejection_reason() {
         id: Uuid::now_v7(),
         task_id: parent.id,
         body: "unsubmitted child".into(),
+        ..Comment::default()
     };
     a.save(&child).await.unwrap();
     server.delete::<Task>(parent.id).await.unwrap();
@@ -1913,11 +2779,14 @@ async fn dependency_protection_preserves_the_original_rejection_reason() {
     .sync_once()
     .await
     .unwrap();
-    let original_reason = reason.lock().unwrap().clone().unwrap();
+    assert!(
+        reason.lock().unwrap().is_none(),
+        "pull must detect the dependency conflict before push"
+    );
     let conflicts = a.conflicts().await.unwrap();
     let conflict = conflicts.iter().find(|c| c.id == child.id).unwrap();
-    assert_eq!(conflict.reason.as_deref(), Some(original_reason.as_str()));
-    assert!(conflict.fields.is_empty());
+    let original_reason = conflict.reason.clone().unwrap();
+    assert!(conflict.fields.contains(&"$entity".into()));
     assert!(conflict.base.is_none());
     sync(&a, &server).await;
     assert_eq!(

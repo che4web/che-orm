@@ -2,7 +2,8 @@
 
 `che-sync` is the native Rust synchronization engine for `che-orm`.
 `che-sync-protocol` contains backend-independent, versioned messages. The client
-uses SQLite; a separately built server can use SQLite or PostgreSQL.
+and server both support SQLite and PostgreSQL with the same synchronization
+algorithm and API. Select one backend per binary at build time.
 
 The client stores two representations of each synchronized model:
 
@@ -26,6 +27,13 @@ struct Note {
     id: Uuid,
     title: String,
     body: String,
+    #[orm(default = "0")]
+    revision: i64,
+    #[orm(auto_now)]
+    updated_at: che_orm::time::OffsetDateTime,
+    deleted_at: Option<che_orm::time::OffsetDateTime>,
+    #[orm(default = "''")]
+    sync_scope: String,
 }
 
 impl SyncModel for Note {
@@ -45,7 +53,11 @@ let registry = Registry::new().register::<Note>()?;
 # Ok::<(), che_orm::OrmError>(())
 ```
 
-Map every physical column exactly once. The first argument is a stable wire
+Map every business column exactly once. The service columns `revision` (i64),
+`updated_at` (OffsetDateTime), `deleted_at` (Option<OffsetDateTime>) and
+`sync_scope` (String) must exist in the actual Rust model; registration validates
+their types and adds server-owned mappings automatically. Override the
+`SyncModel::*_COLUMN` constants to use different SQL names. The first argument is a stable wire
 name, the second is a physical SQL column. Rust or `db_column` renames do not
 require changing the wire name. Keys, managed timestamps and image storage keys
 are server-owned. The Model derive exposes image columns through
@@ -84,7 +96,36 @@ are never applied silently. This version does not automatically translate old
 wire representations.
 
 Shadows omit business unique constraints, FK actions, automatic timestamp
-defaults and checks. Their primary keys and field types are preserved.
+defaults and checks. Business fields are nullable to allow tombstones without
+payloads. `_sync_epoch` identifies the server generation for each shadow row.
+The server retains business data on logical deletion; querysets should filter
+`DELETED_AT.is_null()`. The client's current table is an active-row projection;
+confirmed tombstones live in the shadow. Use partial unique indexes with
+`WHERE deleted_at IS NULL` when deleted server rows should release a business key.
+
+### Upgrading the previous metadata layout
+
+Do not recalculate an applied initial migration. Add a compiled follow-up
+migration after stopping synchronization and settling all pending operations:
+
+1. Add the four service fields to application models and their current/shadow
+   tables; make shadow business columns nullable and add nullable `_sync_epoch`.
+2. Backfill server `revision`, `sync_scope` and `deleted_at` from `_sync_entities`.
+   Restore physically deleted rows from application history or the last live
+   journal record before marking them deleted. Non-nullable business values
+   cannot be fabricated for a tombstone. Preserve UUIDs and existing revisions.
+3. Backfill shadow revisions/deletion from `_sync_client_entities`, including
+   tombstone-only shadow rows. Backfill `_sync_epoch` from persisted feed cursors.
+   Use existing managed timestamps or an explicit migration timestamp for old
+   rows; timestamps are descriptive, not synchronization cursors.
+4. Create `_sync_effects` on the server. Preserve `_sync_scopes`, journals,
+   receipts, cursors, dirty rows and conflicts. Review active-only unique indexes.
+5. Check row counts, scope ownership and FK relationships, then drop the two
+   legacy entity metadata tables in the same reviewed migration.
+
+These are application-owned data migrations: automatic schema planning cannot
+recover missing business records or infer ownership. Freeze their operations and
+checksums alongside previous history before deploying the new engine.
 
 ## Offline writes
 
@@ -94,6 +135,10 @@ let note = Note {
     id: Uuid::now_v7(),
     title: "Offline title".into(),
     body: "Offline body".into(),
+    revision: 0,
+    updated_at: che_orm::time::OffsetDateTime::UNIX_EPOCH,
+    deleted_at: None,
+    sync_scope: String::new(),
 };
 client.save(&note).await?;
 let visible = client.database().get::<Note>(note.id).await?;
@@ -165,6 +210,18 @@ boxed async `push`, `pull`, and `snapshot` methods returning `OrmError` on
 transport failures. `SyncServer` implements it directly for in-process use and
 tests. No HTTP framework is selected by the engine.
 
+The sibling `che-rest` crate provides authenticated ViewSet routes through
+`SyncViewSet` and `SyncEndpoints`. Its extension also routes ordinary ViewSet
+CRUD through the sync journal. HTTP synchronization writes use ordinary
+POST/PATCH/DELETE with serializer JSON, conditional revisions and idempotency
+headers; there is no separate HTTP push route. Sync-mode responses contain the
+canonical record/tombstone envelope. `RestSyncRequest` maps wire patches to
+serializer field names. REST transports advertise `max_mutations() == 1`;
+native transports can still batch operations. See `che-rest/docs/sync.md` and run
+`cargo run --example todo_sync` in that repository for a two-device HTTP demo.
+Trusted serializer writes can use `SyncServer::write(ValidatedWrite<M>)`;
+updates must target a single UUID primary key.
+
 Build a SQLite client with defaults. Build a PostgreSQL server with:
 
 ```toml
@@ -181,18 +238,81 @@ let engine = SyncEngine::new(client.clone(), transport);
 let report = engine.sync_once().await?;
 ```
 
-A cycle is push-first: it retries a persisted operation, or prepares one group
-of dirty changes, and sends it before requesting a pull page or the initial
-snapshot. It processes the push result atomically, then receives one page.
+The same offline example runs on either backend:
+
+```bash
+cargo run -p che-sync --example offline
+CHE_SYNC_DATABASE_URL=postgres://user:password@localhost/database cargo run -p che-sync --no-default-features --features postgres --example offline
+```
+
+SQLite uses three in-memory databases. PostgreSQL uses three disposable schemas
+in the supplied database (and removes them after a successful run). Both execute
+the same client writes, pull/merge/push cycle and two-device field merging.
+
+For independent model synchronization, bind the transport to its model and
+create a model engine:
+
+```rust,ignore
+let transport = server.for_model::<Note>()?; // Or its che-rest ViewSet endpoint.
+let engine = SyncEngine::for_model::<Note>(client.clone(), transport)?;
+let report = engine.sync_once().await?;
+```
+
+Each model engine has its own cursor and immutable outgoing operation. Use one
+SyncClient with a registry containing the related models, and clone it for the
+engines. A conflict in another model does not stop this model's writes. New local
+FK parents are automatically synchronized in separate parent steps, recursively. An
+existing parent's independent edits remain in its own queue. Parent deletions
+include required dirty child moves/deletions so a cascade cannot erase a move.
+An unresolved conflict in a required dependency blocks that dependent group.
+
+Model snapshots and pull pages include the selected model and its FK parent
+models, so remote dependencies are loaded automatically. Model-bound push
+contains only its selected model. The full registry
+is retained for cascade capture. Cursors include the selected `model`, and a
+cursor from another model is rejected. The server keeps one commit-ordered scope
+journal; model pages project its groups and may contain empty groups to preserve
+sequence continuity. A selected parent's deletion also carries the connected
+group's cascade and SET NULL effects. Snapshots containing parent tombstones
+include the related component's current rows, so reset can restore those effects
+even after journal retention. Unconnected models remain outside the feed.
+
+Client cursors use separate metadata keys; outbox payloads record their owning
+model without duplicating base or local records. A lost parent reply is retried
+with its original operation ID before sending a dependent child. Unrelated model
+operations can remain queued concurrently. Pending operations freeze overlapping
+entities and their FK dependencies until their outcome is known;
+`report.blocked` indicates this condition or a required conflict. Cycles are
+serialized per model and retries per operation ID. Network requests do not hold
+a database-wide cycle lock; unrelated models can synchronize concurrently.
+The caller controls transport timeouts. Finish a historical whole-scope pending operation
+through its original transport before switching that database to model engines.
+
+JSON encodes tagged Integer values, entity revisions, base revisions and journal
+sequences as decimal strings, preserving the entire i64 range in JavaScript.
+Decoders also accept historical integer JSON tokens, so existing local journals
+and outboxes remain readable. Generated TypeScript uses string for these values;
+use BigInt when arithmetic is needed and convert back to a decimal string before
+JSON serialization. Regenerate clients after upgrading.
+
+A cycle retries an immutable operation with unknown outcome first. It then
+pulls and merges a page (or performs a full load), and prepares a fresh patch
+against the updated shadow before pushing. Pages are drained before fresh writes.
 Call it again while `report.has_more` is true, or schedule it on connectivity
 changes. A failed push leaves the outbox intact and prevents pull from replacing
 its shadow base. Network requests never hold a local database transaction. The
 caller controls timeouts, cancellation and retry backoff.
 
-All currently dirty entities are coalesced into one atomic outgoing group.
-This preserves local multi-row transaction boundaries, but also means one
-unresolved conflict blocks unrelated pending writes in that client. There is
-currently no independent per-transaction scheduler or maximum group byte size.
+Within a model feed, currently dirty rows of one model are coalesced into an
+atomic outgoing group. FK creates and child moves use separate model operations,
+ordered before dependent writes. Local cross-model transactions are atomic only
+locally; their delivery is sequential. Server cascade effects remain atomic.
+Multi-model transports override `push_model` to route each step to its own endpoint.
+Initial loading and history recovery use the same `full_load` implementation;
+HTTP transports can request `pull` with a null cursor to receive `Full(Snapshot)`.
+The legacy `SyncEngine::new` whole-scope mode coalesces all dirty models and is
+blocked by any conflict. Neither mode has a per-transaction scheduler or maximum
+group byte size.
 
 The outbox saves only the immutable request: operation ID, base revisions and
 patches (or deletions). It does not store server-base or local-state snapshots.

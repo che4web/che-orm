@@ -122,6 +122,10 @@ mod tests {
         #[orm(primary_key)]
         id: Uuid,
         scheduled: che_orm::time::OffsetDateTime,
+        revision: i64,
+        updated_at: che_orm::time::OffsetDateTime,
+        deleted_at: Option<che_orm::time::OffsetDateTime>,
+        sync_scope: String,
     }
 
     impl SyncModel for Scheduled {

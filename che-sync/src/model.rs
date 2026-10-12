@@ -35,6 +35,28 @@ pub trait SyncModel: Model<PrimaryKey = Uuid> + Send + Sync + 'static {
     const SYNC_VERSION: u32 = 1;
     /// All physical columns, including the primary key, must be mapped.
     fn sync_fields() -> Vec<Field>;
+    fn registered_fields() -> Vec<Field> {
+        fields::<Self>()
+    }
+    const REVISION_COLUMN: &'static str = "revision";
+    const UPDATED_AT_COLUMN: &'static str = "updated_at";
+    const DELETED_AT_COLUMN: &'static str = "deleted_at";
+    const SCOPE_COLUMN: &'static str = "sync_scope";
+}
+
+pub(crate) fn fields<M: SyncModel>() -> Vec<Field> {
+    let mut fields = M::sync_fields();
+    for (name, column) in [
+        ("revision", M::REVISION_COLUMN),
+        ("updated_at", M::UPDATED_AT_COLUMN),
+        ("deleted_at", M::DELETED_AT_COLUMN),
+        ("sync_scope", M::SCOPE_COLUMN),
+    ] {
+        if !fields.iter().any(|field| field.column == column) {
+            fields.push(Field::server_owned(name, column));
+        }
+    }
+    fields
 }
 
 #[derive(Clone)]
@@ -45,6 +67,10 @@ pub(crate) struct Descriptor {
     pub fields: Vec<Field>,
     pub primary: &'static str,
     pub read: fn(&Row) -> Result<Record, OrmError>,
+    pub revision: &'static str,
+    pub updated_at: &'static str,
+    pub deleted_at: &'static str,
+    pub scope: &'static str,
 }
 
 impl Descriptor {
@@ -144,7 +170,27 @@ impl Registry {
             return Err(invalid("sync requires UUID keys"));
         }
         let primary = primary.name;
-        let fields = M::sync_fields();
+        let fields = fields::<M>();
+        for (name, ty, nullable) in [
+            (M::REVISION_COLUMN, ColumnType::Integer, false),
+            (M::UPDATED_AT_COLUMN, ColumnType::DateTime, false),
+            (M::DELETED_AT_COLUMN, ColumnType::DateTime, true),
+            (M::SCOPE_COLUMN, ColumnType::Text, false),
+        ] {
+            let column = schema
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .ok_or_else(|| invalid(format!("sync model requires column {name}")))?;
+            if column.column_type != ty
+                || column.nullable != nullable
+                || fields
+                    .iter()
+                    .any(|field| field.column == name && field.writable)
+            {
+                return Err(invalid(format!("invalid sync metadata column {name}")));
+            }
+        }
         let mut columns = HashSet::new();
         let mut names = HashSet::new();
         for field in &fields {
@@ -198,6 +244,10 @@ impl Registry {
             schema,
             fields,
             primary,
+            revision: M::REVISION_COLUMN,
+            updated_at: M::UPDATED_AT_COLUMN,
+            deleted_at: M::DELETED_AT_COLUMN,
+            scope: M::SCOPE_COLUMN,
             read: |row| {
                 let model = M::from_row(row)?;
                 record::<M>(&model)
@@ -211,9 +261,123 @@ impl Registry {
             .find(|d| d.name == name)
             .ok_or_else(|| invalid(format!("unknown model {name}")))
     }
+    /// Validate a typed registration without exposing internal descriptors.
+    pub fn check_model<M: SyncModel>(&self) -> Result<(), OrmError> {
+        self.typed::<M>().map(|_| ())
+    }
+
+    /// Predict deleted rows from a prepared operation, including cascades and
+    /// respecting explicit child moves made in the same operation.
+    pub fn deleted_in_operation(
+        &self,
+        before: &[crate::protocol::Entity],
+        operation: &crate::protocol::Operation,
+    ) -> Result<Vec<crate::protocol::Entity>, OrmError> {
+        let mut deleted = operation
+            .mutations
+            .iter()
+            .filter(|m| m.changes.is_none())
+            .map(|m| (m.model.clone(), m.id))
+            .collect::<HashSet<_>>();
+        loop {
+            let count = deleted.len();
+            for entity in before.iter().filter(|e| e.record.is_some()) {
+                let d = self.get(&entity.model)?;
+                let mut record = entity.record.clone().unwrap();
+                if let Some(patch) = operation
+                    .mutations
+                    .iter()
+                    .find(|m| m.model == entity.model && m.id == entity.id)
+                    .and_then(|m| m.changes.as_ref())
+                {
+                    record.extend(patch.clone());
+                }
+                for field in &d.fields {
+                    let column = d
+                        .schema
+                        .columns
+                        .iter()
+                        .find(|c| c.name == field.column)
+                        .unwrap();
+                    if let (Some(fk), Some(crate::protocol::Value::Uuid(id))) =
+                        (&column.references, record.get(field.name))
+                    {
+                        if fk
+                            .on_delete()
+                            .is_some_and(|action| action.eq_ignore_ascii_case("cascade"))
+                        {
+                            let parent = self
+                                .models
+                                .iter()
+                                .find(|d| d.schema.name == fk.target_parts().unwrap().0)
+                                .unwrap();
+                            if deleted.contains(&(parent.name.to_owned(), *id)) {
+                                deleted.insert((entity.model.clone(), entity.id));
+                            }
+                        }
+                    }
+                }
+            }
+            if count == deleted.len() {
+                break;
+            }
+        }
+        Ok(before
+            .iter()
+            .filter(|e| e.record.is_some() && deleted.contains(&(e.model.clone(), e.id)))
+            .cloned()
+            .collect())
+    }
+
+    pub(crate) fn feed_models(&self, model: &str) -> Result<HashSet<String>, OrmError> {
+        self.get(model)?;
+        let mut models = HashSet::from([model.to_owned()]);
+        loop {
+            let before = models.len();
+            for d in self
+                .models
+                .iter()
+                .filter(|d| models.contains(d.name))
+                .collect::<Vec<_>>()
+            {
+                for column in &d.schema.columns {
+                    if let Some(fk) = &column.references {
+                        let table = fk.target_parts().unwrap().0;
+                        let parent = self.models.iter().find(|d| d.schema.name == table).unwrap();
+                        models.insert(parent.name.into());
+                    }
+                }
+            }
+            if models.len() == before {
+                return Ok(models);
+            }
+        }
+    }
+
+    pub(crate) fn related_models(&self, model: &str) -> Result<HashSet<String>, OrmError> {
+        let mut models = self.feed_models(model)?;
+        loop {
+            let before = models.len();
+            for d in self.models.iter() {
+                for column in &d.schema.columns {
+                    if let Some(fk) = &column.references {
+                        let table = fk.target_parts().unwrap().0;
+                        let parent = self.models.iter().find(|d| d.schema.name == table).unwrap();
+                        if models.contains(d.name) || models.contains(parent.name) {
+                            models.insert(d.name.into());
+                            models.insert(parent.name.into());
+                        }
+                    }
+                }
+            }
+            if models.len() == before {
+                return Ok(models);
+            }
+        }
+    }
     pub(crate) fn typed<M: SyncModel>(&self) -> Result<&Descriptor, OrmError> {
         let d = self.get(M::SYNC_NAME)?;
-        if d.schema != M::schema() || d.version != M::SYNC_VERSION || d.fields != M::sync_fields() {
+        if d.schema != M::schema() || d.version != M::SYNC_VERSION || d.fields != fields::<M>() {
             return Err(invalid("model registration mismatch"));
         }
         Ok(d)
@@ -222,7 +386,7 @@ impl Registry {
 
 pub(crate) fn record<M: SyncModel>(model: &M) -> Result<Record, OrmError> {
     let values = model.field_values();
-    M::sync_fields()
+    fields::<M>()
         .iter()
         .map(|field| {
             let value = values
@@ -234,7 +398,7 @@ pub(crate) fn record<M: SyncModel>(model: &M) -> Result<Record, OrmError> {
         .collect()
 }
 
-fn from_database(value: &DatabaseValue) -> Value {
+pub(crate) fn from_database(value: &DatabaseValue) -> Value {
     match value {
         DatabaseValue::Integer(v) => Value::Integer(*v),
         DatabaseValue::Real(v) => Value::Real(*v),

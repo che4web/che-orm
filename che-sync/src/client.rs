@@ -9,6 +9,8 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Pending {
     pub request: PushRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -18,7 +20,8 @@ pub struct SyncClient {
     pub(crate) scope: String,
     pub(crate) replica_id: Uuid,
     pub(crate) writes: Arc<Mutex<()>>,
-    pub(crate) cycle: Arc<Mutex<()>>,
+    pub(crate) cycles: Arc<Mutex<std::collections::HashMap<Option<String>, Arc<Mutex<()>>>>>,
+    pub(crate) operations: Arc<Mutex<std::collections::HashMap<Uuid, Arc<Mutex<()>>>>>,
 }
 
 /// Explicit resolution relative to the latest persisted remote revision.
@@ -67,7 +70,8 @@ impl SyncClient {
             scope,
             replica_id,
             writes: Arc::new(Mutex::new(())),
-            cycle: Arc::new(Mutex::new(())),
+            cycles: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            operations: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -163,51 +167,151 @@ impl SyncClient {
         })).await
     }
 
-    pub(crate) async fn cursor(&self) -> Result<Option<Cursor>, OrmError> {
+    pub(crate) async fn cursor(&self, model: Option<&str>) -> Result<Option<Cursor>, OrmError> {
+        let key = cursor_key(model);
         self.db
-            .transaction(|tx| Box::pin(async move { meta(tx, "cursor").await }))
+            .transaction(move |tx| Box::pin(async move { meta(tx, &key).await }))
             .await
     }
 
-    pub(crate) async fn pending(&self) -> Result<Option<Pending>, OrmError> {
-        let rows = self
-            .db
-            .query_sql("SELECT payload FROM _sync_outbox", vec![])
-            .await?;
-        if rows.len() > 1 {
-            return Err(invalid("multiple concurrent outbox groups"));
-        }
-        rows.first()
-            .map(|r| decode(&r.get::<String>(0)?))
-            .transpose()
+    pub(crate) async fn pending(&self, model: Option<&str>) -> Result<Option<Pending>, OrmError> {
+        let model = model.map(str::to_owned);
+        let registry = self.registry.clone();
+        self.db
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    let pending = pending_operations(tx).await?;
+                    let owned = pending
+                        .iter()
+                        .filter(|p| p.model == model)
+                        .collect::<Vec<_>>();
+                    if owned.len() > 1 {
+                        return Err(invalid("multiple outbox groups for one feed"));
+                    }
+                    if let Some(owned) = owned.first() {
+                        return Ok(Some((*owned).clone()));
+                    }
+                    // A parent may already have an immutable operation (including a lost
+                    // reply). Retry that exact operation before creating a child group.
+                    if let Some(model) = &model {
+                        let selected = selected_entities(tx, &registry, Some(model)).await?;
+                        let allowed = registry.related_models(model)?;
+                        for operation in pending {
+                            let dependencies =
+                                operation_dependencies(tx, &registry, &operation.request.operation)
+                                    .await?;
+                            if operation
+                                .request
+                                .operation
+                                .mutations
+                                .iter()
+                                .all(|m| allowed.contains(&m.model))
+                                && !selected.is_disjoint(&dependencies)
+                            {
+                                return Ok(Some(operation));
+                            }
+                        }
+                    }
+                    Ok(None)
+                })
+            })
+            .await
     }
 
-    pub(crate) async fn prepare(&self) -> Result<Option<Pending>, OrmError> {
+    pub(crate) async fn prepare(
+        &self,
+        model: Option<&str>,
+        max_mutations: usize,
+    ) -> Result<Option<Pending>, OrmError> {
+        if max_mutations == 0 {
+            return Err(invalid("transport mutation limit must be positive"));
+        }
         let _guard = self.writes.lock().await;
         let registry = self.registry.clone();
         let scope = self.scope.clone();
         let replica_id = self.replica_id;
+        let model = model.map(str::to_owned);
         self.db
             .transaction(move |tx| {
                 Box::pin(async move {
-                    if !tx
-                        .query_sql("SELECT operation_id FROM _sync_outbox", vec![])
-                        .await?
-                        .is_empty()
-                    {
+                    let pending = pending_operations(tx).await?;
+                    if pending.iter().any(|p| p.model == model) {
                         return Err(invalid("outbox already prepared"));
+                    }
+                    if model.is_none() && !pending.is_empty() {
+                        return Ok(None);
+                    }
+                    let selected = selected_entities(tx, &registry, model.as_deref()).await?;
+                    let mut required_creates = EntityKeys::new();
+                    for (name, id) in &selected {
+                        let d = registry.get(name)?;
+                        if let Some(record) = read(tx, d, *id, false).await? {
+                            for field in &d.fields {
+                                let column = d
+                                    .schema
+                                    .columns
+                                    .iter()
+                                    .find(|c| c.name == field.column)
+                                    .unwrap();
+                                if let (Some(fk), Some(Value::Uuid(parent_id))) =
+                                    (&column.references, record.get(field.name))
+                                {
+                                    let parent = registry
+                                        .models
+                                        .iter()
+                                        .find(|d| d.schema.name == fk.target_parts().unwrap().0)
+                                        .unwrap();
+                                    if shadow(tx, parent, *parent_id).await?.record.is_none() {
+                                        required_creates
+                                            .insert((parent.name.to_owned(), *parent_id));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let send_model = model.as_ref().map(|root| {
+                        registry
+                            .models
+                            .iter()
+                            .find(|d| required_creates.iter().any(|(name, _)| name == d.name))
+                            .or_else(|| {
+                                registry.models.iter().find(|d| {
+                                    d.name != root
+                                        && selected.iter().any(|(name, _)| name == d.name)
+                                })
+                            })
+                            .map_or_else(|| root.clone(), |d| d.name.to_owned())
+                    });
+                    let outgoing = entity_dependencies(tx, &registry, &selected).await?;
+                    for operation in &pending {
+                        let keys: EntityKeys = operation
+                            .request
+                            .operation
+                            .mutations
+                            .iter()
+                            .map(|m| (m.model.clone(), m.id))
+                            .collect();
+                        let frozen =
+                            operation_dependencies(tx, &registry, &operation.request.operation)
+                                .await?;
+                        if !selected.is_disjoint(&frozen) || !keys.is_disjoint(&outgoing) {
+                            return Ok(None);
+                        }
                     }
                     let rows = tx
                         .query_sql("SELECT model, entity_id FROM _sync_dirty", vec![])
                         .await?;
-                    // Block the whole local group while any member is conflicted: this
-                    // preserves referential and application transaction boundaries.
-                    if !tx
-                        .query_sql("SELECT model FROM _sync_conflicts", vec![])
+                    for row in tx
+                        .query_sql("SELECT model, entity_id FROM _sync_conflicts", vec![])
                         .await?
-                        .is_empty()
                     {
-                        return Ok(None);
+                        let id: Uuid = row
+                            .get::<String>(1)?
+                            .parse()
+                            .map_err(|_| invalid("invalid conflict UUID"))?;
+                        if model.is_none() || selected.contains(&(row.get::<String>(0)?, id)) {
+                            return Ok(None);
+                        }
                     }
                     let mut mutations = Vec::new();
                     for d in registry.models.iter() {
@@ -235,6 +339,14 @@ impl SyncClient {
                                 .await?;
                                 continue;
                             }
+                            if !selected.contains(&(d.name.into(), id))
+                                || send_model.as_ref().is_some_and(|model| model != d.name)
+                                || (model.is_some()
+                                    && !required_creates.is_empty()
+                                    && !required_creates.contains(&(d.name.into(), id)))
+                            {
+                                continue;
+                            }
                             mutations.push(Mutation {
                                 model: d.name.into(),
                                 id,
@@ -247,7 +359,10 @@ impl SyncClient {
                     if mutations.is_empty() {
                         return Ok(None);
                     }
+                    mutations.sort_by_key(|mutation| mutation.changes.is_some());
+                    mutations.truncate(max_mutations);
                     let pending = Pending {
+                        model: send_model,
                         request: PushRequest {
                             protocol_version: PROTOCOL_VERSION,
                             scope,
@@ -290,7 +405,7 @@ impl SyncClient {
                         return Err(invalid("missing pending operation"));
                     }
                     let stored: Pending = decode(&rows[0].get::<String>(0)?)?;
-                    if stored.request != pending.request {
+                    if stored.request != pending.request || stored.model != pending.model {
                         return Err(invalid("pending operation contents mismatch"));
                     }
                     let (entities, accepted, rejection) = match result {
@@ -462,34 +577,302 @@ impl SyncClient {
         groups: Vec<ChangeGroup>,
         cursor: Cursor,
         reset: bool,
-    ) -> Result<(), OrmError> {
+    ) -> Result<bool, OrmError> {
         let _guard = self.writes.lock().await;
         let registry = self.registry.clone();
         let scope = self.scope.clone();
         self.db.transaction(move |tx| Box::pin(async move {
             if cursor.scope != scope || cursor.sequence < 0 { return Err(invalid("invalid cursor scope or sequence")); }
-            if !tx.query_sql("SELECT operation_id FROM _sync_outbox", vec![]).await?.is_empty() { return Err(invalid("finish pending push before pull")); }
-            if let Some(old) = meta::<Cursor>(tx, "cursor").await? {
+            let mut incoming = EntityKeys::new();
+            for entity in groups.iter().flat_map(|g| &g.entities) {
+                let old = shadow(tx, registry.get(&entity.model)?, entity.id).await?;
+                if *entity != old { incoming.insert((entity.model.clone(), entity.id)); }
+            }
+            let incoming_dependencies = entity_dependencies(tx, &registry, &incoming).await?;
+            for pending in pending_operations(tx).await? {
+                let keys: EntityKeys = pending.request.operation.mutations.iter().map(|m| (m.model.clone(), m.id)).collect();
+                let frozen = operation_dependencies(tx, &registry, &pending.request.operation).await?;
+                if !incoming.is_disjoint(&frozen) || !keys.is_disjoint(&incoming_dependencies) { return Ok(false); }
+            }
+            let key = cursor_key(cursor.model.as_deref());
+            let allowed = cursor.model.as_deref().map(|model| registry.related_models(model)).transpose()?;
+            let required = cursor.model.as_deref().map(|model| registry.feed_models(model)).transpose()?;
+            if groups.iter().flat_map(|g| &g.entities).any(|e| allowed.as_ref().is_some_and(|a| !a.contains(&e.model))) { return Err(invalid("incoming entity outside model feed")); }
+            if let Some(old) = meta::<Cursor>(tx, &key).await? {
                 if !reset && (old.epoch != cursor.epoch || cursor.sequence < old.sequence) { return Err(invalid("stale cursor")); }
             }
             if reset {
-                let known = tx.query_sql("SELECT model, entity_id FROM _sync_client_entities WHERE revision > 0", vec![]).await?;
-                for row in known {
-                    let model = row.get::<String>(0)?; let id: Uuid = row.get::<String>(1)?.parse().map_err(|_| invalid("invalid UUID"))?;
+                for d in registry.models.iter() {
+                    let known = tx.query_sql(format!("SELECT {} FROM {} WHERE {} > 0", quote(d.primary), quote(&d.mirror()), quote(d.revision)), vec![]).await?;
+                    for row in known {
+                    let model = d.name.to_owned(); let id = row.get::<Uuid>(0)?;
+                    if required.as_ref().is_some_and(|required| !required.contains(&model)) { continue; }
                     if !groups.iter().flat_map(|g| &g.entities).any(|e| e.model == model && e.id == id) {
                         return Err(invalid("snapshot omitted a known entity; scope eviction requires an explicit tombstone"));
+                    }
                     }
                 }
             }
             // Preserve committed group order rather than flattening a page.
             // Each old shadow is read before replacing it, in this transaction.
-            for group in groups {
+            for mut group in groups {
+                // Model feeds overlap on parents. A snapshot fetched before a
+                // concurrent acknowledgement must not roll its shadow back.
+                for entity in &mut group.entities { entity.epoch = Some(cursor.epoch); }
                 let updates = reconcile(tx, &registry, group.entities, reset).await?;
                 apply_updates(tx, &registry, updates).await?;
             }
             retry_blocked(tx, &registry).await?;
-            set_meta(tx, "cursor", &cursor).await
+            set_meta(tx, &key, &cursor).await?;
+            Ok(true)
         })).await
+    }
+
+    pub(crate) async fn feed_status(
+        &self,
+        model: Option<&str>,
+    ) -> Result<(usize, bool, bool), OrmError> {
+        let registry = self.registry.clone();
+        let model = model.map(str::to_owned);
+        self.db
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    let selected = selected_entities(tx, &registry, model.as_deref()).await?;
+                    let mut conflicts = 0;
+                    for row in tx
+                        .query_sql("SELECT model, entity_id FROM _sync_conflicts", vec![])
+                        .await?
+                    {
+                        let name = row.get::<String>(0)?;
+                        let id: Uuid = row
+                            .get::<String>(1)?
+                            .parse()
+                            .map_err(|_| invalid("invalid conflict UUID"))?;
+                        if model.is_none()
+                            || model.as_deref() == Some(name.as_str())
+                            || selected.contains(&(name, id))
+                        {
+                            conflicts += 1;
+                        }
+                    }
+                    let has_work = selected
+                        .iter()
+                        .any(|(name, _)| model.as_ref().is_none_or(|model| name == model));
+                    let outgoing = entity_dependencies(tx, &registry, &selected).await?;
+                    let mut blocked = false;
+                    for pending in pending_operations(tx).await? {
+                        let keys: EntityKeys = pending
+                            .request
+                            .operation
+                            .mutations
+                            .iter()
+                            .map(|m| (m.model.clone(), m.id))
+                            .collect();
+                        let frozen =
+                            operation_dependencies(tx, &registry, &pending.request.operation)
+                                .await?;
+                        blocked |= !selected.is_disjoint(&frozen) || !keys.is_disjoint(&outgoing);
+                    }
+                    Ok((conflicts, has_work, blocked))
+                })
+            })
+            .await
+    }
+}
+
+type EntityKeys = std::collections::BTreeSet<(String, Uuid)>;
+
+async fn operation_dependencies(
+    tx: &Transaction,
+    registry: &Registry,
+    operation: &Operation,
+) -> Result<EntityKeys, OrmError> {
+    let keys = operation
+        .mutations
+        .iter()
+        .map(|m| (m.model.clone(), m.id))
+        .collect();
+    let mut result = entity_dependencies(tx, registry, &keys).await?;
+    for mutation in &operation.mutations {
+        let d = registry.get(&mutation.model)?;
+        for field in &d.fields {
+            let column = d
+                .schema
+                .columns
+                .iter()
+                .find(|c| c.name == field.column)
+                .unwrap();
+            if let (Some(fk), Some(Value::Uuid(id))) = (
+                &column.references,
+                mutation
+                    .changes
+                    .as_ref()
+                    .and_then(|patch| patch.get(field.name)),
+            ) {
+                let parent = registry
+                    .models
+                    .iter()
+                    .find(|d| d.schema.name == fk.target_parts().unwrap().0)
+                    .unwrap();
+                result.insert((parent.name.into(), *id));
+            }
+        }
+    }
+    Ok(result)
+}
+
+async fn entity_dependencies(
+    tx: &Transaction,
+    registry: &Registry,
+    keys: &EntityKeys,
+) -> Result<EntityKeys, OrmError> {
+    let mut result = keys.clone();
+    for (name, id) in keys {
+        let d = registry.get(name)?;
+        let local = read(tx, d, *id, false).await?;
+        let base = shadow(tx, d, *id).await?;
+        for record in [local.as_ref(), base.record.as_ref()].into_iter().flatten() {
+            for field in &d.fields {
+                let column = d
+                    .schema
+                    .columns
+                    .iter()
+                    .find(|c| c.name == field.column)
+                    .unwrap();
+                if let (Some(fk), Some(Value::Uuid(parent))) =
+                    (&column.references, record.get(field.name))
+                {
+                    let table = fk.target_parts().unwrap().0;
+                    let parent_model = registry
+                        .models
+                        .iter()
+                        .find(|d| d.schema.name == table)
+                        .unwrap();
+                    result.insert((parent_model.name.into(), *parent));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn cursor_key(model: Option<&str>) -> String {
+    model.map_or_else(|| "cursor".into(), |model| format!("cursor:model:{model}"))
+}
+
+async fn pending_operations(tx: &Transaction) -> Result<Vec<Pending>, OrmError> {
+    tx.query_sql(
+        "SELECT payload FROM _sync_outbox ORDER BY operation_id",
+        vec![],
+    )
+    .await?
+    .iter()
+    .map(|row| decode(&row.get::<String>(0)?))
+    .collect()
+}
+
+/// Select this model's dirty rows and only necessary parent creates / child
+/// moves and deletions. Existing parent edits remain in their own model queue.
+async fn selected_entities(
+    tx: &Transaction,
+    registry: &Registry,
+    model: Option<&str>,
+) -> Result<std::collections::BTreeSet<(String, Uuid)>, OrmError> {
+    let mut dirty = std::collections::BTreeSet::new();
+    for row in tx
+        .query_sql("SELECT model, entity_id FROM _sync_dirty", vec![])
+        .await?
+    {
+        let name = row.get::<String>(0)?;
+        let id = row
+            .get::<String>(1)?
+            .parse()
+            .map_err(|_| invalid("invalid dirty UUID"))?;
+        let descriptor = registry.get(&name)?;
+        let base = shadow(tx, descriptor, id).await?;
+        let local = read(tx, descriptor, id, false).await?;
+        let patch = merge::patch(descriptor, base.record.as_ref(), local.as_ref());
+        let unchanged = match patch {
+            Some(patch) => patch.is_empty() && base.record.is_some(),
+            None => base.record.is_none(),
+        };
+        if !unchanged {
+            dirty.insert((name, id));
+        }
+    }
+    let Some(model) = model else {
+        return Ok(dirty);
+    };
+    registry.get(model)?;
+    let mut selected = dirty
+        .iter()
+        .filter(|(name, _)| name == model)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    loop {
+        let before = selected.len();
+        for (name, id) in selected.clone() {
+            let d = registry.get(&name)?;
+            if let Some(local) = read(tx, d, id, false).await? {
+                for field in &d.fields {
+                    let column = d
+                        .schema
+                        .columns
+                        .iter()
+                        .find(|c| c.name == field.column)
+                        .unwrap();
+                    let Some(fk) = &column.references else {
+                        continue;
+                    };
+                    let Some(Value::Uuid(parent_id)) = local.get(field.name) else {
+                        continue;
+                    };
+                    let table = fk.target_parts().unwrap().0;
+                    let parent = registry
+                        .models
+                        .iter()
+                        .find(|d| d.schema.name == table)
+                        .unwrap();
+                    if shadow(tx, parent, *parent_id).await?.record.is_none() {
+                        let key = (parent.name.to_owned(), *parent_id);
+                        if !dirty.contains(&key) {
+                            return Err(invalid("missing tracked local FK dependency"));
+                        }
+                        selected.insert(key);
+                    }
+                }
+            } else {
+                // A parent delete must preserve local child moves made before
+                // deletion, and send dirty dependent tombstones atomically.
+                for (child_name, child_id) in &dirty {
+                    let child = registry.get(child_name)?;
+                    let base = shadow(tx, child, *child_id).await?;
+                    let local = read(tx, child, *child_id, false).await?;
+                    for field in &child.fields {
+                        let column = child
+                            .schema
+                            .columns
+                            .iter()
+                            .find(|c| c.name == field.column)
+                            .unwrap();
+                        if column
+                            .references
+                            .as_ref()
+                            .is_some_and(|fk| fk.target_parts().unwrap().0 == d.schema.name)
+                            && [base.record.as_ref(), local.as_ref()]
+                                .into_iter()
+                                .flatten()
+                                .any(|r| r.get(field.name) == Some(&Value::Uuid(id)))
+                        {
+                            selected.insert((child_name.clone(), *child_id));
+                        }
+                    }
+                }
+            }
+        }
+        if selected.len() == before {
+            return Ok(selected);
+        }
     }
 }
 
@@ -642,6 +1025,7 @@ async fn reconcile(
         let d = registry.get(&remote.model)?;
         validate_entity(d, &remote)?;
         let old = shadow(tx, d, remote.id).await?;
+        let reset = reset && old.epoch != remote.epoch;
         let existing = load_conflict(tx, d.name, remote.id).await?;
         if !reset
             && (remote.revision < old.revision
