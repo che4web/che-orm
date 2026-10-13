@@ -77,7 +77,7 @@ impl<T: SyncTransport> SyncEngine<T> {
         }
     }
     /// Independently synchronize one model. The transport must be bound to the
-    /// same model; required FK creates are added to its outgoing group.
+    /// same model; required FK creates are delivered in separate parent steps.
     pub fn for_model<M: crate::SyncModel>(
         client: SyncClient,
         transport: T,

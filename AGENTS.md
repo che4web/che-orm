@@ -21,6 +21,7 @@ Workspace members:
 - `src/schema.rs`: column metadata, `SchemaSet`, `AppConfig`, and `AppRegistry`.
 - `src/sql.rs`: SQLite/PostgreSQL dialects and SQL compilation.
 - `src/connection.rs`: shared async Database, CRUD, transactions and relation loading.
+- `src/sync.rs`: shared `SyncModel` metadata, registration roles and infrastructure migrations.
 - `src/backend/`: the feature-selected driver, pool, binding and row adapters.
 - `src/row.rs`: backend-neutral Row, DecodeError and FromDatabaseValue.
 - `src/migration/postgres_schema.rs`: native PostgreSQL schema operations.
@@ -29,6 +30,10 @@ Workspace members:
 - `che-orm-examples/src/lib.rs`: sample application models, registry, and database path.
 - `che-orm-examples/src/bin/manage.rs`: compiled-migration CLI for the sample application.
 - `che-orm-examples/migrations/`: the sample's frozen compiled baseline SQL.
+- `che-sync/src/runtime.rs`: configured client ORM capture and role-aware read filters.
+- `che-sync/src/server.rs`: server capture, access policy, journal and operation receipts.
+- `che-sync/src/engine.rs`: independent pull/flush/full-load and compatibility sync cycle.
+- `docs/releasing.md` and `.github/workflows/release-check.yml`: release procedure and checks.
 
 ## Application Modules
 
@@ -133,7 +138,7 @@ semantics: triggers created by migrations or raw SQL may change a row after
 SQLite has produced the `RETURNING` result, so the returned model will not
 include those post-trigger changes.
 
-## Verification
+## Synchronization
 
 Sync models use UUID keys. Prefer `#[orm(sync, sync_name = "app.model")]` and
 `SchemaSet::client_model` / `server_model` for a shared business model with
@@ -143,6 +148,9 @@ before children. ProjectState::from_app_schemas includes role-specific sync tabl
 automatically; servers have no shadows. All writes to synchronized tables use
 the configured `SyncClient::database()` / `SyncServer::database()` handle or the
 explicit sync facade. Original unconfigured handles and raw SQL bypass capture.
+Configured server reads recheck scope authorization and filter scope/tombstones,
+including counts, joins, `execute(SELECT)` and reads in existing transactions.
+Preserve this behavior in every AST read path. Non-sync tables use ordinary ORM rules.
 `SyncEngine::pull()` downloads only and reports initial/reset load requirements;
 `full_load()` is explicit. `flush()` sends only, through REST-backed transports.
 Clients target one persistent server history. Server replacement/history rewind
@@ -151,9 +159,15 @@ checks, not a recovery API. Journal pruning preserves revisions, tombstones and
 receipts. An expired cursor blocks new operations until full loading, but pending
 requests still retry with their original IDs. Do not retire or discard outbox
 operations as part of cursor recovery.
+`sync_once()` is a compatibility API that can load snapshots automatically;
+the explicit loading rule applies to `pull()` and `flush()`. Both client and
+server support either backend. Clone one SyncClient to share locks; concurrent
+independent clients/processes on the same client database are unsupported.
 Keep client writes/outbox and server writes/journal/receipts transactional.
 ImageField mappings must be server-owned; the Model derive exposes protected
 columns to sync registration. See `docs/sync.md` for ownership and scope contracts.
+
+## Verification
 
 Run these commands after code changes:
 
@@ -172,11 +186,16 @@ cargo test -p che-orm --no-default-features --features postgres
 cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
 cargo test -p che-sync --no-default-features --features postgres
 cargo test -p che-sync --no-default-features --features postgres --test runtime -- --ignored
+cargo test -p che-sync --no-default-features --features postgres --test model_roles -- --ignored
 ```
 
 The explicit runtime test requires TEST_POSTGRES_URL and a live PostgreSQL
 server; absence of the variable is an error. The sample PostgreSQL build uses
 `-p che-orm-examples --no-default-features --features postgres`.
+
+For release changes, follow `docs/releasing.md`: verify Rust 1.88, both backend
+builds and all four public package archives. `che-orm-examples` is not published;
+use explicit package selection rather than `cargo package --workspace`.
 
 Run examples after applying the configured migration:
 

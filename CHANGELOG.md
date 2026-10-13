@@ -2,6 +2,18 @@
 
 ## 0.3.0
 
+- Add shared `#[orm(sync)]` models with explicit client/server registration,
+  stable wire field names and infrastructure-owned service columns.
+- Capture ordinary ORM writes through configured sync database handles and
+  generate role-specific migrations; servers do not create shadow tables.
+- Add independent `pull()`, `flush()` and explicit `full_load()` operations.
+  Retain `sync_once()` for compatibility and preserve pending request identities
+  when journal cursors expire. Server replacement/history rewind is unsupported.
+- Enforce scope authorization and scope/tombstone filtering on configured server
+  reads, including `execute(SELECT)` and queries inside existing transactions.
+- Introduce `che-sync` and `che-sync-protocol` 0.1.0; support either database on
+  both clients and servers and ordinary REST delivery through `che-rest`.
+- Add release checks for package archives, Rust 1.88 and live PostgreSQL.
 - Add a PostgreSQL runtime with TLS, pooled connections, typed CRUD, relations,
   transactions, and compiled migration execution.
 - Select exactly one backend at compile time with `sqlite` (default) or

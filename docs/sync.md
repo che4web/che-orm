@@ -253,7 +253,8 @@ Per-record read filtering and subscription eviction events are not implemented.
 Scope authorization is checked on every push, pull and snapshot.
 The configured server ORM handle also rechecks scope authorization on every
 read of a synchronized table, including counts, joins and reads inside an
-existing transaction. Revoking access invalidates previously obtained handles
+existing transaction, as well as SELECT ASTs passed to `execute()`. Revoking
+access invalidates previously obtained handles
 for subsequent sync-model queries. Ordinary non-sync tables retain their own
 application access rules.
 

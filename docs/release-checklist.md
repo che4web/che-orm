@@ -1,16 +1,19 @@
 # crates.io Release Checklist
 
-Use this checklist for every release. `che-orm-macros` must be published before
-the core crate because `che-orm` depends on its released version.
+Use this checklist for every release. [The release procedure](releasing.md)
+records the planned versions, full verification commands and publication order
+for all four public crates. `che-orm-examples` is not published.
 
 ## Prepare
 
-- [ ] Decide the version for `che-orm` and `che-orm-macros`.
-- [ ] Update both versions and the dependency requirement in `Cargo.toml`.
+- [ ] Decide versions for `che-orm`, `che-orm-macros`, `che-sync` and `che-sync-protocol`.
+- [ ] Update versions and internal dependency requirements in their manifests.
 - [ ] Update `CHANGELOG.md` with user-visible changes and migration notes.
 - [ ] Review `README.md`, `README.en.md`, and `docs/en/` for API accuracy.
 - [ ] Confirm example migration files in `che-orm-examples/migrations/` are intentional.
 - [ ] Ensure the worktree contains no local database files or `target/` changes.
+- [ ] Review the sync history contract and rehearse application-owned upgrades
+      when deploying to existing databases.
 
 ## Verify
 
@@ -19,16 +22,25 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p che-orm --no-default-features --features postgres
+cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
+cargo test -p che-sync --no-default-features --features postgres
+cargo test -p che-sync --no-default-features --features postgres --test runtime --test model_roles -- --ignored
 cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
-cargo package --manifest-path che-orm-macros/Cargo.toml
+cargo run -p che-sync --example offline
+cargo +1.88.0 check --workspace --all-targets --locked
+cargo +1.88.0 check -p che-orm -p che-sync --all-targets --locked --no-default-features --features postgres
 ```
 
-Before publishing, package both crates together so Cargo verifies the core
-against the newly packaged macros rather than an older registry version:
+The ignored PostgreSQL tests require `TEST_POSTGRES_URL` and a live database
+with permission to create isolated test schemas. Run the matching downstream
+`che-rest` sync tests as documented in [releasing.md](releasing.md).
+
+Before publishing, package all public crates together so Cargo verifies them
+against the newly packaged dependencies rather than older registry versions:
 
 ```bash
-cargo package -p che-orm-macros -p che-orm
+cargo package -p che-orm-macros -p che-orm -p che-sync-protocol -p che-sync --locked
 ```
 
 Run downstream derive and UUID regression tests from the packaged core. Until
@@ -64,7 +76,15 @@ cargo package --manifest-path che-orm-macros/Cargo.toml --list
    cargo publish
    ```
 
-4. Verify the published documentation and create the matching Git tag.
+4. Publish `che-sync-protocol`, wait for its registry availability, then publish
+   `che-sync` (which also requires the new core version):
+
+   ```bash
+   cargo publish -p che-sync-protocol
+   cargo publish -p che-sync
+   ```
+
+5. Verify the published documentation and create the matching Git tag.
 
 Do not publish if the package contents, generated SQL, or migration changes are
 not understood.

@@ -108,6 +108,13 @@ che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
 
 Offline-first synchronization: [che-sync](docs/sync.md).
 
+`che-sync` использует общие UUID-модели с `#[orm(sync)]`; роль выбирается через
+`SchemaSet::client_model` / `server_model`. Настроенные database handles
+фиксируют обычные ORM-записи. Клиент хранит current/shadow, сервер — строки
+и журнал без shadow-таблиц. `pull()` скачивает изменения, `flush()` отправляет
+их через REST, а `full_load()` явно загружает снимок. Обе роли поддерживают
+SQLite и PostgreSQL.
+
 ## Первичные ключи UUIDv7
 
 Для UUID-ключа используйте `Uuid` вместо `i64`:

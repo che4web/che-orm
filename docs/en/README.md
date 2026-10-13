@@ -13,6 +13,8 @@ the same async high-level API.
 - [SQLite runtime](sqlite.md): connections, CRUD, queries, relations, and transactions.
 - [Historical Atlas migration guide](atlas.md): retained for reference; the example now uses compiled migrations.
 - [Compile-tested API examples](api-examples.md): models, relations, serializers, and queries.
+- [Offline-first synchronization](../sync.md): shared models, client/server roles,
+  independent pull/flush, snapshots and REST delivery (English).
 
 ## Project resources
 
@@ -22,3 +24,4 @@ the same async high-level API.
 - [Runnable examples](../../che-orm-examples/)
 - [Contributing](../../CONTRIBUTING.md)
 - [Security policy](../../SECURITY.md)
+- [Release procedure](../releasing.md) and [release checklist](../release-checklist.md)

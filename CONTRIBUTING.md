@@ -17,6 +17,9 @@ schema execution belong to backend-specific modules.
 4. Add a regression test for every behavior change. Macro behavior used by
    downstream crates belongs in an integration or trybuild test.
 5. Keep SQL values parameterized. Identifiers must remain model-controlled.
+6. For synchronized UUID models, use shared `#[orm(sync)]` definitions and select
+   client/server roles at registration. Use configured sync database handles for
+   captured writes. See [the synchronization contract](docs/sync.md).
 
 ## Required Checks
 
@@ -28,8 +31,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p che-orm --no-default-features --features postgres
 cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
+cargo test -p che-sync --no-default-features --features postgres
+cargo test -p che-sync --no-default-features --features postgres --test runtime --test model_roles -- --ignored
 cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
+cargo run -p che-sync --example offline
 ```
 
 The PostgreSQL runtime command requires `TEST_POSTGRES_URL` pointing at a live
@@ -51,6 +57,9 @@ Russian guides in `docs/` are the original documentation. Keep their English
 counterparts in `docs/en/` consistent when changing public behavior. Update
 `README.md` and `README.en.md` when installation, backend status, or the main
 workflow changes.
+
+For package/archive and minimum Rust version checks, follow
+[the release procedure](docs/releasing.md).
 
 ## Pull Requests
 
