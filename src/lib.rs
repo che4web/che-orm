@@ -65,7 +65,9 @@ pub use tokio_postgres;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod backend;
 mod image;
+mod json;
 pub mod migration;
+pub use json::JsonField;
 mod query;
 mod row;
 mod schema;

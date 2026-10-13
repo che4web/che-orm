@@ -87,6 +87,8 @@ that define foreign keys to them.
 - Use `#[orm(auto_now_add)]` and `#[orm(auto_now)]` only with `OffsetDateTime`.
 - `auto_now` is updated by ORM-generated UPDATE statements. Raw SQL does not update it.
 - `Option<T>` maps to a nullable SQL column.
+- `JsonField(Value)` stores JSON as SQL TEXT and serializes as a JSON value.
+  It supports typed writes and decoding; application validation owns JSON shape.
 - `ImageField` stores a relative key in SQLite `TEXT`, not bytes or an HTTP URL. `Option<ImageField>` is nullable. `src/image.rs` implements `ColumnTypeOf`, typed query binding, SQLite read/write and string JSON serialization; do not add filesystem operations to the ORM.
 - `ModelSerializer` makes `ImageField` and `Option<ImageField>` read-only in JSON writes even without an explicit annotation. Server code sets them after a validated upload; do not accept client-supplied storage keys through CRUD.
 - Keep the user-facing walkthrough in `docs/image-field.md` and `docs/en/image-field.md` aligned with the actual `che-rest::media` APIs. Ordinary models need just `Option<ImageField>`; show `#[orm(db_column = "...")]` only for an existing SQL column with a different name. `ImageField::new` wraps a trusted key but does not validate or store a file.
