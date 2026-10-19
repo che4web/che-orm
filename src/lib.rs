@@ -5,20 +5,23 @@
 //! row decoding и insert values. SQL можно также использовать отдельно через
 //! [`SqlCompiler`].
 //!
-//! Основной рабочий сценарий:
+//! Основной рабочий сценарий для backend `sqlite`. `create_table` подходит для
+//! тестов и локальных экспериментов; для постоянной схемы используйте миграции.
 //!
-//! ```ignore
+//! ```rust
 //! use che_orm::{Database, Model};
 //!
-//! # #[derive(Debug, Model)]
-//! # #[orm(table = "users")]
-//! # struct User {
-//! #     #[orm(primary_key)]
-//! #     id: i64,
-//! #     name: String,
-//! # }
+//! #[derive(Debug, Model)]
+//! #[orm(table = "users")]
+//! struct User {
+//!     #[orm(primary_key)]
+//!     id: i64,
+//!     name: String,
+//! }
+//!
+//! # #[cfg(feature = "sqlite")]
 //! # #[tokio::main]
-//! # async fn run() -> Result<(), che_orm::OrmError> {
+//! # async fn main() -> Result<(), che_orm::OrmError> {
 //! let database = Database::connect_in_memory().await?;
 //! database.create_table::<User>().await?;
 //! let user = database
@@ -27,22 +30,30 @@
 //!     .execute()
 //!     .await?;
 //! let loaded = database.get::<User>(user.id).await?;
-//! assert!(loaded.is_some());
+//! assert_eq!(loaded.unwrap().name, "Alice");
 //! # Ok(())
 //! # }
+//! # #[cfg(not(feature = "sqlite"))]
+//! # fn main() {}
 //! ```
 //!
 //! Fixed string choices use [`DbEnum`]. It owns the JSON and database value,
 //! so a variant has one canonical representation everywhere:
 //!
-//! ```ignore
-//! # use che_orm::DbEnum;
+//! ```rust
+//! use che_orm::DbEnum;
 //! #[derive(Debug, Clone, Copy, DbEnum)]
 //! enum TaskStatus {
 //!     Draft,
 //!     #[db_enum(rename = "in_progress")]
 //!     InProgress,
 //! }
+//!
+//! assert_eq!(TaskStatus::InProgress.as_str(), "in_progress");
+//! assert_eq!(
+//!     che_orm::serde_json::to_string(&TaskStatus::InProgress).unwrap(),
+//!     "\"in_progress\"",
+//! );
 //! ```
 //!
 //! Do not derive `serde::Serialize` or `serde::Deserialize` for a `DbEnum`;

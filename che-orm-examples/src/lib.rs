@@ -3,10 +3,6 @@ use time::OffsetDateTime;
 
 pub const DATABASE_PATH: &str = "app.db";
 
-pub const fn database_path() -> &'static str {
-    DATABASE_PATH
-}
-
 pub fn database_url() -> String {
     std::env::var("CHE_ORM_DATABASE_URL").unwrap_or_else(|_| {
         #[cfg(feature = "sqlite")]
@@ -18,15 +14,6 @@ pub fn database_url() -> String {
             "postgresql://localhost/che_orm".into()
         }
     })
-}
-
-#[allow(dead_code)]
-#[derive(orm::Model)]
-#[orm(table = "aliased_models")]
-struct AliasedModel {
-    #[orm(primary_key)]
-    id: i64,
-    name: String,
 }
 
 #[derive(Debug, Model)]

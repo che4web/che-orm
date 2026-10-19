@@ -7,11 +7,11 @@ the same async high-level API.
 ## Guides
 
 - [Backends and PostgreSQL](backends.md): feature selection, transactions, migrations and the 0.3 upgrade.
-- [Tutorial](tutorial.md): create related models and use SQLite (the Atlas section is historical).
+- [Tutorial](tutorial.md): create related models, use SQLite, and adopt compiled migrations.
 - [Models and schema](models.md): model derives, fields, relations, and serializers.
 - [ImageField](image-field.md): a complete model-to-upload example, storage keys, URLs and cleanup.
 - [SQLite runtime](sqlite.md): connections, CRUD, queries, relations, and transactions.
-- [Historical Atlas migration guide](atlas.md): retained for reference; the example now uses compiled migrations.
+- [Compiled migrations](atlas.md): application-owned migration registries and the example CLI.
 - [Compile-tested API examples](api-examples.md): models, relations, serializers, and queries.
 
 ## Project resources

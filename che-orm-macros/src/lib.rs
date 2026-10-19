@@ -9,7 +9,9 @@ use syn::{
 
 fn orm_path() -> syn::Result<proc_macro2::TokenStream> {
     match crate_name("che-orm") {
-        Ok(FoundCrate::Itself) => Ok(quote!(crate)),
+        // Doctests are separate crates even when Cargo identifies this package
+        // as che-orm. The core also aliases itself as che_orm for internal derives.
+        Ok(FoundCrate::Itself) => Ok(quote!(::che_orm)),
         Ok(FoundCrate::Name(name)) => {
             let ident = Ident::new(&name, proc_macro2::Span::call_site());
             Ok(quote!(::#ident))

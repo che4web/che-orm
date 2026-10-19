@@ -480,7 +480,7 @@ mod runtime {
         let db = database().await;
         db.create_table::<User>().await.unwrap();
         db.create_table::<Post>().await.unwrap();
-        db.typed_transaction(|tx| {
+        db.transaction(|tx| {
             Box::pin(async move {
                 for index in 0..901 {
                     let user = tx
@@ -601,7 +601,7 @@ mod runtime {
         let db = database().await;
         db.create_table::<User>().await.unwrap();
         let id = db
-            .typed_transaction(|tx| {
+            .transaction(|tx| {
                 Box::pin(async move {
                     let user = tx
                         .create::<User>()
@@ -627,7 +627,7 @@ mod runtime {
             .unwrap();
         let rolled_back = Uuid::now_v7();
         let result: Result<(), che_orm::OrmError> = db
-            .typed_transaction(move |tx| {
+            .transaction(move |tx| {
                 Box::pin(async move {
                     tx.create::<User>()
                         .set(User::ID, rolled_back)

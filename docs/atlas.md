@@ -1,136 +1,54 @@
-# Миграции через Atlas
+# Compiled migrations
 
-> Архивная инструкция для прежнего CLI. Текущий пример использует frozen
-> compiled migration и не поддерживает `makemigrations` или `migrate lint`.
-> Актуальные команды см. в [README](../README.md#миграции).
+Миграции принадлежат приложению и компилируются вместе с ним. ORM применяет
+`MigrationOperation` и записывает идентичности и checksums в историю базы.
+Отдельный Atlas CLI для этого не требуется. Этот адрес руководства сохранён
+для совместимости с существующими ссылками.
 
-CLI миграций является частью example application и запускается из
-`che-orm-examples`:
+## CLI приложения-примера
+
+Из корня репозитория:
 
 ```bash
 cargo run -p che-orm-examples --bin manage -- schema
-cargo run -p che-orm-examples --bin manage -- makemigrations
 cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin manage -- migrate status
-cargo run -p che-orm-examples --bin manage -- migrate lint
 ```
 
-## Временная schema-файл
+`schema` печатает схему зарегистрированных моделей. `migrate` применяет
+миграции, а `migrate status` показывает, какие из них записаны в историю.
 
-Команда `makemigrations` не оставляет сгенерированный desired schema в рабочем
-дереве:
+`database_url()` в `che-orm-examples/src/lib.rs` читает `CHE_ORM_DATABASE_URL`.
+По умолчанию SQLite использует `app.db`, PostgreSQL - `postgresql://localhost/che_orm`.
+Для PostgreSQL добавьте `--no-default-features --features postgres` перед `--bin`.
 
-1. `manage` собирает `SchemaSet` из моделей приложения.
-2. Записывает SQL во временный файл в системном temp directory.
-3. Запускает Atlas с `--to file://<temporary-schema>`.
-4. Atlas сравнивает его с migration directory и создаёт versioned migration.
-5. `manage` удаляет временный файл независимо от результата Atlas.
+Пример содержит отдельные замороженные SQL baseline для обоих backend и
+подключает выбранный через `include_str!` в `src/bin/manage.rs`. Идентичность
+миграции - `examples:0001_initial`. Пример не поддерживает генерацию новых
+миграций: команды `makemigrations` и `migrate lint` недоступны.
 
-Это предотвращает рассинхронизацию постоянного `schema.sql` и Rust-моделей.
+## Миграции своего приложения
 
-Модели для Atlas регистрируются в `che-orm-examples/src/lib.rs`:
+Храните модели, `AppRegistry`, настройки и реестр миграций вне core-крейта.
+Создавайте миграции через `Migration::new`, указывая стабильные `MigrationId`,
+зависимости и последовательность `MigrationOperation`.
 
 ```rust
-pub fn registry() -> AppRegistry {
-    AppRegistry::new()
-        .register::<accounts::App>()
-        .register::<content::App>()
-}
+let graph = che_orm::MigrationGraph::new(application_migrations())?;
+let applied = database.migrate(graph).await?;
 ```
 
-Каждый `AppConfig` владеет собственным набором моделей. Порядок регистрации
-определяет порядок SQL DDL и должен учитывать foreign keys.
+`application_migrations()` - функция вашего приложения, возвращающая
+`Vec<Migration>`. Для расчёта изменений используйте `ProjectState::diff` и
+`operations_from_changes`, а для генерации Rust-модуля - `render_migration_rust`.
+Проверяйте полученные операции и SQL до применения. `RunSql` должен содержать
+SQL выбранного backend и соответствующие `state_operations`, если меняет схему.
 
-Путь к базе находится в `che-orm-examples/src/lib.rs` и используется example
-runtime и `manage`:
+Не изменяйте идентичности, содержимое и checksums уже применённых миграций.
+Добавляйте новые операции в новые миграции; backfill существующих данных
+планируйте явно. Например, обязательному `DbEnum` в непустой таблице нужно
+заполнить допустимое значение, сохранив его `CHECK` constraint.
 
-```rust
-pub const DATABASE_PATH: &str = "app.db";
-```
-
-В application code передайте этот путь в `Database::connect(...)`.
-
-Порядок вызова `.model::<...>()` является порядком DDL. Сначала добавляйте
-таблицы-родители, затем таблицы с foreign keys.
-
-## Команды
-
-### `schema`
-
-Печатает полный desired schema в stdout. Эта команда полезна для проверки:
-
-```bash
-cargo run -p che-orm-examples --bin manage -- schema > /tmp/schema.sql
-```
-
-### `makemigrations`
-
-Генерирует новую migration. Если имя не указано, оно создаётся автоматически
-в формате `auto_<unix_timestamp>`:
-
-```bash
-cargo run -p che-orm-examples --bin manage -- makemigrations
-cargo run -p che-orm-examples --bin manage -- makemigrations add_user_status
-```
-
-Команда использует `che-orm-examples/migrations/` и SQLite dev database
-`sqlite://dev?mode=memory`.
-
-### `migrate`
-
-Применяет pending migrations к базе:
-
-```bash
-cargo run -p che-orm-examples --bin manage -- migrate
-```
-
-Приложение не применяет migrations автоматически при старте. Это делается
-отдельным шагом deploy/CI.
-
-### `migrate status` и `migrate lint`
-
-```bash
-cargo run -p che-orm-examples --bin manage -- migrate status
-cargo run -p che-orm-examples --bin manage -- migrate lint
-```
-
-В старых и canary-версиях Atlas команда `migrate lint` может требовать
-`atlas login` или Atlas Pro. Это ограничение самого Atlas, а не wrapper-а.
-`makemigrations`, `migrate` и `migrate status` работают без этой команды.
-
-## Atlas executable
-
-По умолчанию wrapper ищет исполняемый файл `atlas` в `PATH`. Другой путь можно
-указать через `ATLAS_BIN`:
-
-```bash
-ATLAS_BIN=/opt/atlas/atlas cargo run -p che-orm-examples --bin manage -- makemigrations add_posts
-```
-
-`manage` не интерполирует аргументы через shell и возвращает ненулевой exit code
-Atlas как ошибку процесса.
-
-## Required enum columns
-
-Adding a required `DbEnum` field to a table that already has rows needs a data backfill. Review
-the generated Atlas migration and set a valid enum value while copying the old rows, for example:
-
-```sql
-INSERT INTO new_tasks_task (id, name, status)
-SELECT id, name, 'draft' FROM tasks_task;
-```
-
-The replacement table must keep the enum `CHECK` constraint. Test the migration against a copy of
-an existing database before deployment.
-
-## Production workflow
-
-1. Изменить Rust-модель.
-2. Запустить `makemigrations`.
-3. Проверить сгенерированный SQL.
-4. Запустить `migrate lint` в CI.
-5. Закоммитить migration files и `atlas.sum`.
-6. На deploy выполнить `migrate`.
-
-После перехода на Atlas не используйте `Database::create_table` для production
-инициализации схемы: этот метод предназначен для тестов и локальных сценариев.
+Применение миграций - отдельный шаг deploy/CI. `Database::create_table` оставьте
+для тестов и локальных экспериментов. Особенности блокировок, транзакций и SQL
+обоих backend описаны в [руководстве backend](backends.md#миграции).

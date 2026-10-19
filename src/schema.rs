@@ -319,7 +319,7 @@ fn validate_reference(reference: &str) -> Result<(), SchemaError> {
     validate_identifier(column)
 }
 
-/// A collection of model schemas exported as one Atlas-compatible SQL schema.
+/// A collection of model schemas exported as one SQL schema.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SchemaSet {
     tables: Vec<TableSchema>,
@@ -423,7 +423,7 @@ impl AppRegistry {
             .map(|(name, schema)| (*name, schema))
     }
 
-    /// Exports all registered models as Atlas-compatible SQL.
+    /// Exports all registered models as SQL.
     pub fn to_sql<D: crate::SqlDialect>(&self) -> String {
         self.schema.to_sql::<D>()
     }

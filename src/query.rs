@@ -180,7 +180,6 @@ pub enum QueryAst {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Errors detected while finalizing a query builder.
 pub enum QueryBuildError {
-    EmptyInsert,
     EmptyUpdate,
     PrimaryKeyUpdate,
     MissingFilter,

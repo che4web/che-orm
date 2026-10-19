@@ -57,11 +57,15 @@ fn migrations() -> Vec<Migration> {
 }
 
 async fn database() -> Result<Database, String> {
-    let path = database_url();
-    if path.is_empty() || path == ":memory:" {
+    let url = database_url();
+    if url.is_empty() {
+        return Err("database URL must not be empty".into());
+    }
+    #[cfg(feature = "sqlite")]
+    if url == ":memory:" || url == "sqlite://:memory:" {
         return Err("compiled example migrations require a SQLite file path".into());
     }
-    Database::connect(path)
+    Database::connect(url)
         .await
         .map_err(|error| error.to_string())
 }

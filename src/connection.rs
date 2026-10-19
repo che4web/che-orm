@@ -338,6 +338,8 @@ impl Database {
             }
         }
     }
+    /// Compatibility alias for [`Self::transaction`].
+    #[deprecated(since = "0.3.0", note = "use Database::transaction instead")]
     pub async fn typed_transaction<T, F>(&self, action: F) -> Result<T, OrmError>
     where
         T: Send + 'static,

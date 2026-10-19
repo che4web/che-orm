@@ -1274,12 +1274,12 @@ async fn sqlite_transaction_rolls_back_after_action_error() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn typed_transaction_rolls_back_typed_writes_after_error() {
+async fn transaction_rolls_back_typed_writes_after_error() {
     let database = crate::Database::connect_in_memory().await.unwrap();
     database.create_table::<User>().await.unwrap();
 
     let result: Result<(), crate::OrmError> = database
-        .typed_transaction(|transaction| {
+        .transaction(|transaction| {
             Box::pin(async move {
                 let user = transaction
                     .create::<User>()

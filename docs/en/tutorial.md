@@ -1,8 +1,5 @@
 # Step-by-Step Tutorial
 
-> The Atlas section below describes the former CLI; the current example uses a
-> frozen compiled migration. See the [README](../../README.en.md#quick-start).
-
 This tutorial creates two related models, stores data in SQLite, and loads
 relations. `create_table` is intended only for tests and local experiments.
 
@@ -181,7 +178,7 @@ let deleted = database.delete::<User>(user.id).await?;
 assert!(deleted);
 ```
 
-## 6. Move to Atlas Migrations
+## 6. Move to Compiled Migrations
 
 Do not use `create_table` in production. Split models into application modules,
 implement `AppConfig`, and register applications in dependency order: parent
@@ -212,17 +209,20 @@ and migrations in `che-orm-examples`:
 pub const DATABASE_PATH: &str = "app.db";
 ```
 
-Atlas must be available in `PATH`. Run these commands from the repository root:
+`database_url()` reads `CHE_ORM_DATABASE_URL`, falling back to the selected
+backend's default. Run these commands from the repository root:
 
 ```bash
 cargo run -p che-orm-examples --bin manage -- schema
-cargo run -p che-orm-examples --bin manage -- makemigrations initial_schema
 cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin manage -- migrate status
 ```
 
-Review the SQL in a new migration before applying it and commit the migration
-file together with `che-orm-examples/migrations/atlas.sum`. See [Atlas migrations](atlas.md) for details.
+The example ships a frozen `0001_initial` for each of SQLite and PostgreSQL.
+Its `manage` does not generate migrations. In your application, keep a registry
+of compiled operations, append migrations with `Migration::new`, and apply them
+through `Database::migrate`. Preserve previously applied identities and checksums.
+See [compiled migrations](atlas.md) for details.
 
 ## 7. Explore Runnable Examples
 
@@ -236,4 +236,4 @@ cargo run -p che-orm-examples --bin transactions
 ```
 
 Next reference material: [models and schema](models.md),
-[SQLite runtime](sqlite.md), and [Atlas migrations](atlas.md).
+[SQLite runtime](sqlite.md), and [compiled migrations](atlas.md).

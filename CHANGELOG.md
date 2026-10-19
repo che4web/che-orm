@@ -14,6 +14,11 @@
 - Add native PostgreSQL schema operations, stable constraint names, migration
   locking, checksum validation, and rollback on failure.
 - Preserve existing SQLite migration identities and checksums.
+- Deprecate `Database::typed_transaction` in favor of `Database::transaction`.
+- Remove the unused `QueryBuildError::EmptyInsert` variant; default-only inserts
+  remain supported.
+- Replace retired Atlas CLI instructions with the compiled migration workflow
+  and remove the unused example Atlas checksum file.
 - Require `che-orm-macros` 0.3.0 and Rust 1.88 (the current `time` dependency's
   minimum supported version).
 

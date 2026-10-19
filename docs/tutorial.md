@@ -1,10 +1,7 @@
 # Пошаговый tutorial
 
-> Раздел про Atlas ниже описывает старый CLI; актуальный пример использует
-> frozen compiled migration. Команды миграции см. в [README](../README.md#миграции).
-
 Этот tutorial создаёт две связанные модели, сохраняет данные в SQLite, загружает
-relations и показывает переход к Atlas migrations. Для первого запуска
+relations и показывает переход к compiled migrations. Для первого запуска
 используется in-memory SQLite; `create_table` предназначен только для тестов и
 локальных экспериментов.
 
@@ -186,7 +183,7 @@ let deleted = database.delete::<User>(user.id).await?;
 assert!(deleted);
 ```
 
-## 6. Перейдите к Atlas migrations
+## 6. Перейдите к compiled migrations
 
 Не используйте `create_table` в production. Разделите модели по application
 модулям, реализуйте `AppConfig` и зарегистрируйте приложения в порядке
@@ -217,17 +214,20 @@ let registry = che_orm::AppRegistry::new()
 pub const DATABASE_PATH: &str = "app.db";
 ```
 
-Atlas должен быть доступен в `PATH`. Выполните команды из корня репозитория:
+`database_url()` читает `CHE_ORM_DATABASE_URL`, а при его отсутствии использует
+настройку по умолчанию для выбранного backend. Выполните команды из корня репозитория:
 
 ```bash
 cargo run -p che-orm-examples --bin manage -- schema
-cargo run -p che-orm-examples --bin manage -- makemigrations initial_schema
 cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin manage -- migrate status
 ```
 
-Проверьте SQL новой migration до применения и закоммитьте migration-файл вместе
-с `che-orm-examples/migrations/atlas.sum`. Подробности об Atlas: [atlas.md](atlas.md).
+Пример содержит замороженный `0001_initial` отдельно для SQLite и PostgreSQL.
+Его `manage` не генерирует миграции. В своём приложении храните реестр compiled
+операций, добавляйте новые миграции через `Migration::new` и применяйте их через
+`Database::migrate`. Не меняйте идентичности и checksums уже применённых миграций.
+Подробности: [compiled migrations](atlas.md).
 
 ## 7. Изучите runnable examples
 
@@ -241,4 +241,4 @@ cargo run -p che-orm-examples --bin transactions
 ```
 
 Следующие справочные материалы: [модели и схема](models.md),
-[SQLite runtime](sqlite.md) и [Atlas migrations](atlas.md).
+[SQLite runtime](sqlite.md) и [compiled migrations](atlas.md).
