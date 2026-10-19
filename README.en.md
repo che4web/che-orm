@@ -1,5 +1,7 @@
 # che-orm
 
+Offline-first synchronization: [che-sync](docs/sync.md).
+
 **English** | [Russian](README.md)
 
 `che-orm` is an experimental typed ORM for Rust. Choose SQLite or PostgreSQL
@@ -14,6 +16,13 @@ uses `tokio-postgres` / `deadpool-postgres` with native TLS.
 
 Model fields support `f64` and `Option<f64>` as SQLite `REAL` and PostgreSQL
 `DOUBLE PRECISION`, including typed numeric filters and parameterized writes.
+
+`che-sync` shares `#[orm(sync)]` UUID models between client and server, selecting
+the role through `SchemaSet::client_model` / `server_model`. Configured database
+handles capture ordinary ORM writes. Clients have current/shadow tables; servers
+have authoritative rows and a journal without shadows. Independent `pull()` and
+`flush()` operations separate download from REST delivery; `full_load()` is
+explicit. Both roles support either backend. See [the sync guide](docs/sync.md).
 
 ## Quick Start
 

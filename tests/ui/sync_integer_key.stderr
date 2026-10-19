@@ -1,0 +1,5 @@
+error: sync models require a UUID primary key
+ --> tests/ui/sync_integer_key.rs:7:9
+  |
+7 |     id: i64,
+  |         ^^^

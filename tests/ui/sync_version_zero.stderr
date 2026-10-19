@@ -1,0 +1,5 @@
+error: sync_version must be positive
+ --> tests/ui/sync_version_zero.rs:4:30
+  |
+4 | #[orm(table = "tasks", sync, sync_version = 0)]
+  |                              ^^^^^^^^^^^^^^^^

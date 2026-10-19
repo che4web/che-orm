@@ -12,7 +12,7 @@ keywords = ["orm", "sqlite", "postgres", "database"]
 categories = ["database"]
 
 [workspace]
-members = ["che-orm-macros", "che-orm-examples"]
+members = ["che-orm-macros", "che-orm-examples", "che-sync-protocol", "che-sync"]
 
 [features]
 default = ["sqlite"]

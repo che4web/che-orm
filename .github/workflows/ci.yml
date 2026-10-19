@@ -51,6 +51,8 @@ jobs:
       - run: cargo clippy -p che-orm --no-default-features --features postgres --all-targets -- -D warnings
       - run: cargo test -p che-orm --no-default-features --features postgres
       - run: cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
+      - run: cargo test -p che-sync --no-default-features --features postgres
+      - run: cargo test -p che-sync --no-default-features --features postgres --test runtime -- --ignored
       - run: cargo check -p che-orm-examples --no-default-features --features postgres --all-targets
       - run: cargo doc -p che-orm --no-default-features --features postgres --no-deps
       - name: No SQLite driver dependency

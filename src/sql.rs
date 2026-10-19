@@ -117,10 +117,18 @@ pub type Compiler = SqlCompiler<CurrentDialect>;
 impl<D: SqlDialect> SqlCompiler<D> {
     /// Compiles a model schema, including indexes.
     pub fn compile_schema(schema: &TableSchema) -> CompiledSchema {
-        let table_ast = CreateTableAst {
-            schema: schema.clone(),
+        Self::compile_table_state(&crate::TableState::from(schema))
+    }
+
+    /// Compiles owned schema metadata with the same dialect as model schemas.
+    pub fn compile_table_state(schema: &crate::TableState) -> CompiledSchema {
+        let mut compiler = Self {
+            sql: String::new(),
+            params: Vec::new(),
+            _dialect: PhantomData,
         };
-        let table = Self::compile(&QueryAst::CreateTable(table_ast)).sql;
+        compiler.compile_owned_table(schema);
+        let table = compiler.sql;
         let indexes = schema
             .indexes
             .iter()
@@ -128,9 +136,9 @@ impl<D: SqlDialect> SqlCompiler<D> {
             .map(|(index, columns)| {
                 let mut sql = String::new();
                 sql.push_str("CREATE INDEX ");
-                D::identifier(&D::index_name(schema.name, index), &mut sql);
+                D::identifier(&D::index_name(&schema.name, index), &mut sql);
                 sql.push_str(" ON ");
-                D::identifier(schema.name, &mut sql);
+                D::identifier(&schema.name, &mut sql);
                 sql.push_str(" (");
                 for (column_index, column) in columns.iter().enumerate() {
                     if column_index != 0 {
@@ -353,16 +361,19 @@ impl<D: SqlDialect> SqlCompiler<D> {
     }
 
     fn compile_create_table(&mut self, query: &CreateTableAst) {
-        let schema = &query.schema;
+        self.compile_owned_table(&crate::TableState::from(&query.schema));
+    }
+
+    fn compile_owned_table(&mut self, schema: &crate::TableState) {
         self.sql.push_str("CREATE TABLE ");
-        self.push_identifier(schema.name);
+        self.push_identifier(&schema.name);
         self.sql.push_str(" (");
 
         for (index, column) in schema.columns.iter().enumerate() {
             if index != 0 {
                 self.sql.push_str(", ");
             }
-            self.push_identifier(column.name);
+            self.push_identifier(&column.name);
             self.sql.push(' ');
             D::column_type(column.column_type, &mut self.sql);
 
@@ -370,34 +381,34 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 D::identity_primary_key(&mut self.sql);
             }
             if column.primary_key {
-                self.push_constraint(schema.name, "pk", &[column.name]);
+                self.push_constraint(&schema.name, "pk", &[&column.name]);
                 self.sql.push_str(" PRIMARY KEY");
             }
             if !column.nullable && (!column.primary_key || column.column_type == ColumnType::Uuid) {
                 self.sql.push_str(" NOT NULL");
             }
             if column.unique {
-                self.push_constraint(schema.name, "field_unique", &[column.name]);
+                self.push_constraint(&schema.name, "field_unique", &[&column.name]);
                 self.sql.push_str(" UNIQUE");
             }
             if (column.auto_now_add || column.auto_now) && column.default.is_none() {
                 self.sql.push_str(" DEFAULT ");
                 D::timestamp_default(&mut self.sql);
             }
-            if let Some(default) = column.default {
+            if let Some(default) = &column.default {
                 self.sql.push_str(" DEFAULT ");
                 self.sql.push_str(default);
             }
-            if let Some(check) = column.check {
-                self.push_constraint(schema.name, "check", &[column.name]);
+            if let Some(check) = &column.check {
+                self.push_constraint(&schema.name, "check", &[&column.name]);
                 self.sql.push_str(" CHECK (");
                 self.sql.push_str(check);
                 self.sql.push(')');
             }
             if let Some(choices) = &column.choices {
-                self.push_constraint(schema.name, "choices", &[column.name]);
+                self.push_constraint(&schema.name, "choices", &[&column.name]);
                 self.sql.push_str(" CHECK (");
-                self.push_identifier(column.name);
+                self.push_identifier(&column.name);
                 self.sql.push_str(" IN (");
                 for (choice_index, choice) in choices.iter().enumerate() {
                     if choice_index != 0 {
@@ -410,14 +421,14 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 self.sql.push_str("))");
             }
             if let Some(reference) = &column.references {
-                self.push_constraint(schema.name, "fk", &[column.name]);
+                self.push_constraint(&schema.name, "fk", &[&column.name]);
                 self.sql.push_str(" REFERENCES ");
                 let (table, column) = reference.target_parts().expect("validated foreign key");
                 self.push_identifier(table);
                 self.sql.push('(');
                 self.push_identifier(column);
                 self.sql.push(')');
-                if let Some(on_delete) = reference.on_delete() {
+                if let Some(on_delete) = &reference.on_delete {
                     self.sql.push_str(" ON DELETE ");
                     self.sql.push_str(&on_delete.to_uppercase());
                 }
@@ -425,10 +436,11 @@ impl<D: SqlDialect> SqlCompiler<D> {
         }
 
         for columns in &schema.unique_constraints {
+            let columns = columns.iter().map(String::as_str).collect::<Vec<_>>();
             self.sql.push(',');
-            self.push_constraint(schema.name, "unique", columns);
+            self.push_constraint(&schema.name, "unique", &columns);
             self.sql.push_str(" UNIQUE (");
-            self.push_column_names(columns);
+            self.push_column_names(&columns);
             self.sql.push(')');
         }
         self.sql.push(')');
@@ -441,7 +453,7 @@ impl<D: SqlDialect> SqlCompiler<D> {
         }
     }
 
-    fn push_column_names(&mut self, columns: &[&'static str]) {
+    fn push_column_names(&mut self, columns: &[&str]) {
         for (index, column) in columns.iter().enumerate() {
             if index != 0 {
                 self.sql.push_str(", ");

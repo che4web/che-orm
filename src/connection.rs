@@ -92,9 +92,45 @@ pub struct ExecuteResult {
 #[derive(Clone)]
 pub struct Database {
     pool: backend::Pool,
+    runtime: Option<std::sync::Arc<dyn ModelRuntime>>,
 }
 
 pub type TransactionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OrmError>> + Send + 'a>>;
+
+/// Transactional extension point for registered model writes. Implementations
+/// use raw transaction methods internally to avoid recursively capturing writes.
+pub trait ModelRuntime: Send + Sync {
+    fn role(&self, table: &str) -> Option<crate::ModelRole>;
+    fn transaction_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        None
+    }
+    fn prepare_read(&self, ast: QueryAst) -> QueryAst {
+        ast
+    }
+    /// Recheck access for every query, including counts and relation loading.
+    fn authorize_read(&self, _ast: &QueryAst) -> Result<(), OrmError> {
+        Ok(())
+    }
+    fn write<'a>(
+        &'a self,
+        tx: &'a Transaction,
+        ast: QueryAst,
+    ) -> TransactionFuture<'a, ModelWriteResult>;
+}
+
+pub struct ModelWriteResult {
+    pub result: ExecuteResult,
+    pub rows: Vec<Row>,
+}
+
+fn write_table(ast: &QueryAst) -> Option<&str> {
+    match ast {
+        QueryAst::Insert(ast) => Some(ast.table.name),
+        QueryAst::Update(ast) => Some(ast.table.name),
+        QueryAst::Delete(ast) => Some(ast.table.name),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
@@ -119,6 +155,7 @@ impl Database {
     ) -> Result<Self, OrmError> {
         Ok(Self {
             pool: backend::connect(url.into(), size).await?,
+            runtime: None,
         })
     }
     #[cfg(feature = "sqlite")]
@@ -128,10 +165,42 @@ impl Database {
 
     pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
         ast.validate()?;
+        let ast = match (&self.runtime, ast) {
+            (Some(runtime), ast @ QueryAst::Select(_)) => {
+                runtime.authorize_read(&ast)?;
+                runtime.prepare_read(ast)
+            }
+            (_, ast) => ast,
+        };
+        if self.captures(&ast) {
+            return self
+                .transaction(move |tx| Box::pin(async move { tx.execute(ast).await }))
+                .await;
+        }
         backend::Session::acquire(&self.pool)
             .await?
             .execute(SqlCompiler::<CurrentDialect>::compile(&ast))
             .await
+    }
+
+    /// Bind model-aware behavior to this database handle and its transactions.
+    pub fn with_model_runtime(mut self, runtime: std::sync::Arc<dyn ModelRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    pub fn model_role<M: Model>(&self) -> Option<crate::ModelRole> {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.role(M::table_name()))
+    }
+
+    fn captures(&self, ast: &QueryAst) -> bool {
+        write_table(ast).is_some_and(|table| {
+            self.runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.role(table).is_some())
+        })
     }
     /// Executes explicitly supplied SQL with bound values. SQL syntax is backend-specific.
     pub async fn execute_sql(
@@ -212,7 +281,7 @@ impl Database {
         &self,
         query: SelectQuery<M>,
     ) -> Result<usize, OrmError> {
-        let query = count_query(query)?;
+        let query = count_query(query, self.runtime.as_deref())?;
         count_rows(
             backend::Session::acquire(&self.pool)
                 .await?
@@ -307,6 +376,14 @@ impl Database {
         T: Send + 'static,
         F: for<'a> FnOnce(&'a Transaction) -> TransactionFuture<'a, T> + Send,
     {
+        let _runtime_guard = match self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.transaction_lock())
+        {
+            Some(lock) => Some(lock.lock_owned().await),
+            None => None,
+        };
         let session = backend::Session::acquire(&self.pool).await?;
         let mut guard = TransactionGuard {
             session: session.clone(),
@@ -324,7 +401,10 @@ impl Database {
             IsolationLevel::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
         };
         session.batch(begin).await?;
-        let transaction = Transaction { session };
+        let transaction = Transaction {
+            session,
+            runtime: self.runtime.clone(),
+        };
         match action(&transaction).await {
             Ok(value) => {
                 transaction.session.commit().await?;
@@ -382,6 +462,18 @@ impl Database {
     }
     async fn rows(&self, ast: QueryAst) -> Result<Vec<Row>, OrmError> {
         ast.validate()?;
+        if self.captures(&ast) {
+            return self
+                .transaction(move |tx| Box::pin(async move { tx.rows(ast).await }))
+                .await;
+        }
+        let ast = match &self.runtime {
+            Some(runtime) => {
+                runtime.authorize_read(&ast)?;
+                runtime.prepare_read(ast)
+            }
+            None => ast,
+        };
         backend::Session::acquire(&self.pool)
             .await?
             .query(SqlCompiler::<CurrentDialect>::compile(&ast))
@@ -413,10 +505,51 @@ impl Drop for TransactionGuard {
 /// ORM operations pinned to one transaction connection on either backend.
 pub struct Transaction {
     session: backend::Session,
+    runtime: Option<std::sync::Arc<dyn ModelRuntime>>,
 }
 impl Transaction {
+    /// Executes backend-specific SQL on this transaction with bound values.
+    pub async fn execute_sql(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<DatabaseValue>,
+    ) -> Result<ExecuteResult, OrmError> {
+        self.session
+            .execute(CompiledQuery {
+                sql: sql.into(),
+                params,
+            })
+            .await
+    }
+
+    /// Queries backend-specific SQL on this transaction with bound values.
+    pub async fn query_sql(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<DatabaseValue>,
+    ) -> Result<Vec<Row>, OrmError> {
+        self.session
+            .query(CompiledQuery {
+                sql: sql.into(),
+                params,
+            })
+            .await
+    }
+
     pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
         ast.validate()?;
+        let ast = match (&self.runtime, ast) {
+            (Some(runtime), ast @ QueryAst::Select(_)) => {
+                runtime.authorize_read(&ast)?;
+                runtime.prepare_read(ast)
+            }
+            (_, ast) => ast,
+        };
+        if let Some(runtime) = &self.runtime {
+            if write_table(&ast).is_some_and(|table| runtime.role(table).is_some()) {
+                return Ok(runtime.write(self, ast).await?.result);
+            }
+        }
         self.session
             .execute(SqlCompiler::<CurrentDialect>::compile(&ast))
             .await
@@ -447,7 +580,11 @@ impl Transaction {
         self.fetch_all(M::query()).await
     }
     pub async fn count<M: Model + Send + 'static>(&self) -> Result<usize, OrmError> {
-        count_rows(self.session.query(count_query(M::query())?).await?)
+        count_rows(
+            self.session
+                .query(count_query(M::query(), self.runtime.as_deref())?)
+                .await?,
+        )
     }
     pub async fn delete<M: Model + Send + 'static>(
         &self,
@@ -507,6 +644,18 @@ impl Transaction {
     }
     async fn rows(&self, ast: QueryAst) -> Result<Vec<Row>, OrmError> {
         ast.validate()?;
+        if let Some(runtime) = &self.runtime {
+            if write_table(&ast).is_some_and(|table| runtime.role(table).is_some()) {
+                return Ok(runtime.write(self, ast).await?.rows);
+            }
+        }
+        let ast = match &self.runtime {
+            Some(runtime) => {
+                runtime.authorize_read(&ast)?;
+                runtime.prepare_read(ast)
+            }
+            None => ast,
+        };
         self.session
             .query(SqlCompiler::<CurrentDialect>::compile(&ast))
             .await
@@ -526,9 +675,19 @@ fn insert_ast<M: Model>(model: &M) -> QueryAst {
         returning: Vec::new(),
     })
 }
-fn count_query<M: Model>(query: SelectQuery<M>) -> Result<CompiledQuery, OrmError> {
-    let ast = query.into_select_ast()?;
-    let compiled = SqlCompiler::<CurrentDialect>::compile(&QueryAst::Select(ast));
+fn count_query<M: Model>(
+    query: SelectQuery<M>,
+    runtime: Option<&dyn ModelRuntime>,
+) -> Result<CompiledQuery, OrmError> {
+    let ast = QueryAst::Select(query.into_select_ast()?);
+    let ast = match runtime {
+        Some(runtime) => {
+            runtime.authorize_read(&ast)?;
+            runtime.prepare_read(ast)
+        }
+        None => ast,
+    };
+    let compiled = SqlCompiler::<CurrentDialect>::compile(&ast);
     Ok(CompiledQuery {
         sql: format!("SELECT COUNT(*) FROM ({}) AS che_count", compiled.sql),
         params: compiled.params,

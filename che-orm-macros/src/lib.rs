@@ -844,6 +844,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut row_fields = Vec::with_capacity(fields.len());
     let mut insert_values = Vec::with_capacity(fields.len());
     let mut field_values = Vec::with_capacity(fields.len());
+    let mut write_protected_columns = Vec::new();
     let mut managed_update_values = Vec::with_capacity(fields.len());
     let mut relation_constants = Vec::new();
     let mut relation_markers = Vec::new();
@@ -853,6 +854,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut primary_key_type = None;
     let mut generated_constants = HashSet::new();
     let mut field_columns = HashMap::new();
+    let mut sync_fields = Vec::new();
 
     for (index, field) in fields.into_iter().enumerate() {
         let field_name = field.ident.expect("named fields always have identifiers");
@@ -865,6 +867,47 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             .map(LitStr::value)
             .unwrap_or_else(|| field_column.clone());
         let constant = Ident::new(&field_column.to_uppercase(), field_name.span());
+        if model_attributes.sync {
+            if ["revision", "updated_at", "deleted_at", "sync_scope"].contains(&column.as_str())
+                || ["revision", "updated_at", "deleted_at", "sync_scope"]
+                    .contains(&field_column.as_str())
+            {
+                return Err(Error::new_spanned(
+                    &field_name,
+                    "sync service columns are infrastructure-owned",
+                ));
+            }
+            if field_attributes.primary_key && !is_uuid(&field_type) {
+                return Err(Error::new_spanned(
+                    &field_type,
+                    "sync models require a UUID primary key",
+                ));
+            }
+            let wire = field_attributes
+                .sync_name
+                .as_ref()
+                .map(LitStr::value)
+                .unwrap_or_else(|| field_column.clone());
+            let constructor = if field_attributes.primary_key
+                || field_attributes.server_owned
+                || field_attributes.auto_now
+                || field_attributes.auto_now_add
+                || is_image_field_type(&field_type)
+            {
+                quote!(server_owned)
+            } else {
+                quote!(writable)
+            };
+            sync_fields.push(quote!(#orm::SyncField::#constructor(#wire, #column)));
+        } else if field_attributes.sync_name.is_some() || field_attributes.server_owned {
+            return Err(Error::new_spanned(
+                &field_name,
+                "sync field attributes require #[orm(sync)]",
+            ));
+        }
+        if is_image_field_type(&field_type) {
+            write_protected_columns.push(column.clone());
+        }
         field_columns.insert(field_column.clone(), column.clone());
 
         if !generated_constants.insert(constant.to_string()) {
@@ -1109,7 +1152,28 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         quote! { vec![#(#columns),*] }
     });
 
+    let sync_impl = if model_attributes.sync {
+        let name = model_attributes.sync_name.as_ref().unwrap_or(&table);
+        let version = model_attributes.sync_version;
+        quote! {
+            impl #orm::SyncModel for #model {
+                const SYNC_NAME: &'static str = #name;
+                const SYNC_VERSION: u32 = #version;
+                const AUTOMATIC_METADATA: bool = true;
+                fn sync_fields() -> Vec<#orm::SyncField> { vec![#(#sync_fields),*] }
+            }
+            impl #model {
+                pub const REVISION: #orm::ModelField<Self, i64> = #orm::ModelField::new(#table, "revision");
+                pub const UPDATED_AT: #orm::ModelField<Self, #orm::time::OffsetDateTime> = #orm::ModelField::new(#table, "updated_at");
+                pub const DELETED_AT: #orm::ModelField<Self, Option<#orm::time::OffsetDateTime>> = #orm::ModelField::new(#table, "deleted_at");
+                pub const SYNC_SCOPE: #orm::ModelField<Self, String> = #orm::ModelField::new(#table, "sync_scope");
+            }
+        }
+    } else {
+        quote!()
+    };
     Ok(quote! {
+        #sync_impl
         #(#relation_markers)*
 
         impl #orm::Model for #model {
@@ -1162,6 +1226,10 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 vec![#(#field_values),*]
             }
 
+            fn write_protected_columns() -> &'static [&'static str] {
+                &[#(#write_protected_columns),*]
+            }
+
             fn managed_update_values() -> ::std::vec::Vec<#orm::Assignment> {
                 vec![#(#managed_update_values),*]
             }
@@ -1178,12 +1246,18 @@ struct ModelAttributes {
     table: LitStr,
     unique_constraints: Vec<Vec<LitStr>>,
     indexes: Vec<Vec<LitStr>>,
+    sync: bool,
+    sync_name: Option<LitStr>,
+    sync_version: u32,
 }
 
 fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
     let mut table = None;
     let mut unique_constraints = Vec::new();
     let mut indexes = Vec::new();
+    let mut sync = false;
+    let mut sync_name = None;
+    let mut sync_version = 1;
 
     for attribute in &input.attrs {
         if !attribute.path().is_ident("orm") {
@@ -1193,6 +1267,19 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
                 table = Some(meta.value()?.parse()?);
+                Ok(())
+            } else if meta.path.is_ident("sync") {
+                sync = true;
+                Ok(())
+            } else if meta.path.is_ident("sync_name") {
+                sync_name = Some(meta.value()?.parse()?);
+                Ok(())
+            } else if meta.path.is_ident("sync_version") {
+                let version: syn::LitInt = meta.value()?.parse()?;
+                sync_version = version.base10_parse()?;
+                if sync_version == 0 {
+                    return Err(meta.error("sync_version must be positive"));
+                }
                 Ok(())
             } else if meta.path.is_ident("unique") || meta.path.is_ident("index") {
                 let content;
@@ -1225,10 +1312,19 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
             "Model requires #[orm(table = \"table_name\")]",
         )
     })?;
+    if !sync && (sync_name.is_some() || sync_version != 1) {
+        return Err(Error::new_spanned(
+            &input.ident,
+            "sync settings require #[orm(sync)]",
+        ));
+    }
     Ok(ModelAttributes {
         table,
         unique_constraints,
         indexes,
+        sync,
+        sync_name,
+        sync_version,
     })
 }
 
@@ -1243,6 +1339,8 @@ struct FieldAttributes {
     on_delete: Option<LitStr>,
     auto_now_add: bool,
     auto_now: bool,
+    sync_name: Option<LitStr>,
+    server_owned: bool,
 }
 
 fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAttributes> {
@@ -1257,6 +1355,8 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
         on_delete: None,
         auto_now_add: false,
         auto_now: false,
+        sync_name: None,
+        server_owned: false,
     };
 
     for attribute in attributes {
@@ -1266,6 +1366,10 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<FieldAtt
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("db_column") {
                 result.db_column = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("sync_name") {
+                result.sync_name = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("server_owned") {
+                result.server_owned = true;
             } else if meta.path.is_ident("primary_key") {
                 result.primary_key = true;
             } else if meta.path.is_ident("unique") {

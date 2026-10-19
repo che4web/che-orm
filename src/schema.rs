@@ -205,6 +205,7 @@ pub enum SchemaError {
     UnknownColumn { table: String, column: String },
     InvalidForeignKey(String),
     InvalidOnDelete(String),
+    IncompatibleSyncRoles,
 }
 
 impl TableSchema {
@@ -250,6 +251,15 @@ impl TableSchema {
 impl SchemaSet {
     /// Validates every registered table and rejects duplicate table names.
     pub fn validate(&self) -> Result<(), SchemaError> {
+        if let Some(first) = self.sync_models.first() {
+            if self
+                .sync_models
+                .iter()
+                .any(|model| model.role != first.role)
+            {
+                return Err(SchemaError::IncompatibleSyncRoles);
+            }
+        }
         let mut tables = std::collections::HashSet::new();
         for table in &self.tables {
             table.validate()?;
@@ -324,6 +334,7 @@ fn validate_reference(reference: &str) -> Result<(), SchemaError> {
 pub struct SchemaSet {
     tables: Vec<TableSchema>,
     model_names: Vec<&'static str>,
+    sync_models: Vec<crate::SyncRegistration>,
 }
 
 impl SchemaSet {
@@ -349,10 +360,33 @@ impl SchemaSet {
         self
     }
 
+    /// Register the local editable projection and its confirmed server shadow.
+    pub fn client_model<M: crate::SyncModel>(self) -> Self {
+        self.sync_model::<M>(crate::ModelRole::Client)
+    }
+
+    /// Register authoritative server data, without a shadow table.
+    pub fn server_model<M: crate::SyncModel>(self) -> Self {
+        self.sync_model::<M>(crate::ModelRole::Server)
+    }
+
+    fn sync_model<M: crate::SyncModel>(mut self, role: crate::ModelRole) -> Self {
+        let registration = crate::SyncRegistration::new::<M>(role);
+        self.tables.push(registration.schema.clone());
+        self.model_names.push(M::model_name());
+        self.sync_models.push(registration);
+        self
+    }
+
+    pub fn sync_models(&self) -> &[crate::SyncRegistration] {
+        &self.sync_models
+    }
+
     /// Merges another application schema after the current tables.
     pub fn merge(mut self, other: Self) -> Self {
         self.tables.extend(other.tables);
         self.model_names.extend(other.model_names);
+        self.sync_models.extend(other.sync_models);
         self
     }
 
@@ -368,6 +402,15 @@ impl SchemaSet {
             let compiled = crate::SqlCompiler::<D>::compile_schema(table);
             statements.push(compiled.table);
             statements.extend(compiled.indexes);
+        }
+        for operation in
+            crate::sync_migration_operations(&self.sync_models).expect("validated sync roles")
+        {
+            if let crate::MigrationOperation::CreateModel { model } = operation {
+                let compiled = crate::SqlCompiler::<D>::compile_table_state(&model.table);
+                statements.push(compiled.table);
+                statements.extend(compiled.indexes);
+            }
         }
         statements.join(";\n") + if statements.is_empty() { "" } else { ";\n" }
     }

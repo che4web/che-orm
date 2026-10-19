@@ -10,6 +10,8 @@ Workspace members:
 - `che-orm-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
   and `#[derive(ModelSerializer)]`.
 - `che-orm-examples`: downstream examples, sample application models, and the `manage` CLI.
+- `che-sync-protocol`: backend-independent synchronization messages and tagged values.
+- `che-sync`: native current/shadow synchronization engine, migrations, transport trait and offline example.
 
 ## Architecture
 
@@ -19,6 +21,7 @@ Workspace members:
 - `src/schema.rs`: column metadata, `SchemaSet`, `AppConfig`, and `AppRegistry`.
 - `src/sql.rs`: SQLite/PostgreSQL dialects and SQL compilation.
 - `src/connection.rs`: shared async Database, CRUD, transactions and relation loading.
+- `src/sync.rs`: shared `SyncModel` metadata, registration roles and infrastructure migrations.
 - `src/backend/`: the feature-selected driver, pool, binding and row adapters.
 - `src/row.rs`: backend-neutral Row, DecodeError and FromDatabaseValue.
 - `src/migration/postgres_schema.rs`: native PostgreSQL schema operations.
@@ -27,6 +30,10 @@ Workspace members:
 - `che-orm-examples/src/lib.rs`: sample application models, registry, and database path.
 - `che-orm-examples/src/bin/manage.rs`: compiled-migration CLI for the sample application.
 - `che-orm-examples/migrations/`: the sample's frozen compiled baseline SQL.
+- `che-sync/src/runtime.rs`: configured client ORM capture and role-aware read filters.
+- `che-sync/src/server.rs`: server capture, access policy, journal and operation receipts.
+- `che-sync/src/engine.rs`: independent pull/flush/full-load and compatibility sync cycle.
+- `docs/releasing.md` and `.github/workflows/release-check.yml`: release procedure and checks.
 
 ## Application Modules
 
@@ -80,6 +87,8 @@ that define foreign keys to them.
 - Use `#[orm(auto_now_add)]` and `#[orm(auto_now)]` only with `OffsetDateTime`.
 - `auto_now` is updated by ORM-generated UPDATE statements. Raw SQL does not update it.
 - `Option<T>` maps to a nullable SQL column.
+- `JsonField(Value)` stores JSON as SQL TEXT and serializes as a JSON value.
+  It supports typed writes and decoding; application validation owns JSON shape.
 - `ImageField` stores a relative key in SQLite `TEXT`, not bytes or an HTTP URL. `Option<ImageField>` is nullable. `src/image.rs` implements `ColumnTypeOf`, typed query binding, SQLite read/write and string JSON serialization; do not add filesystem operations to the ORM.
 - `ModelSerializer` makes `ImageField` and `Option<ImageField>` read-only in JSON writes even without an explicit annotation. Server code sets them after a validated upload; do not accept client-supplied storage keys through CRUD.
 - Keep the user-facing walkthrough in `docs/image-field.md` and `docs/en/image-field.md` aligned with the actual `che-rest::media` APIs. Ordinary models need just `Option<ImageField>`; show `#[orm(db_column = "...")]` only for an existing SQL column with a different name. `ImageField::new` wraps a trusted key but does not validate or store a file.
@@ -131,6 +140,35 @@ semantics: triggers created by migrations or raw SQL may change a row after
 SQLite has produced the `RETURNING` result, so the returned model will not
 include those post-trigger changes.
 
+## Synchronization
+
+Sync models use UUID keys. Prefer `#[orm(sync, sync_name = "app.model")]` and
+`SchemaSet::client_model` / `server_model` for a shared business model with
+infrastructure-owned service columns. Preserve wire field names with
+`#[orm(sync_name = "stable_name")]` when renaming Rust fields. Register FK parents
+before children. ProjectState::from_app_schemas includes role-specific sync tables
+automatically; servers have no shadows. All writes to synchronized tables use
+the configured `SyncClient::database()` / `SyncServer::database()` handle or the
+explicit sync facade. Original unconfigured handles and raw SQL bypass capture.
+Configured server reads recheck scope authorization and filter scope/tombstones,
+including counts, joins, `execute(SELECT)` and reads in existing transactions.
+Preserve this behavior in every AST read path. Non-sync tables use ordinary ORM rules.
+`SyncEngine::pull()` downloads only and reports initial/reset load requirements;
+`full_load()` is explicit. `flush()` sends only, through REST-backed transports.
+Clients target one persistent server history. Server replacement/history rewind
+is outside the sync contract; existing epoch fields are compatibility identity
+checks, not a recovery API. Journal pruning preserves revisions, tombstones and
+receipts. An expired cursor blocks new operations until full loading, but pending
+requests still retry with their original IDs. Do not retire or discard outbox
+operations as part of cursor recovery.
+`sync_once()` is a compatibility API that can load snapshots automatically;
+the explicit loading rule applies to `pull()` and `flush()`. Both client and
+server support either backend. Clone one SyncClient to share locks; concurrent
+independent clients/processes on the same client database are unsupported.
+Keep client writes/outbox and server writes/journal/receipts transactional.
+ImageField mappings must be server-owned; the Model derive exposes protected
+columns to sync registration. See `docs/sync.md` for ownership and scope contracts.
+
 ## Verification
 
 Run these commands after code changes:
@@ -140,6 +178,7 @@ cargo fmt --check
 cargo test --workspace
 cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
+cargo run -p che-sync --example offline
 ```
 
 For PostgreSQL without SQLite:
@@ -147,11 +186,18 @@ For PostgreSQL without SQLite:
 ```bash
 cargo test -p che-orm --no-default-features --features postgres
 cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
+cargo test -p che-sync --no-default-features --features postgres
+cargo test -p che-sync --no-default-features --features postgres --test runtime -- --ignored
+cargo test -p che-sync --no-default-features --features postgres --test model_roles -- --ignored
 ```
 
 The explicit runtime test requires TEST_POSTGRES_URL and a live PostgreSQL
 server; absence of the variable is an error. The sample PostgreSQL build uses
 `-p che-orm-examples --no-default-features --features postgres`.
+
+For release changes, follow `docs/releasing.md`: verify Rust 1.88, both backend
+builds and all four public package archives. `che-orm-examples` is not published;
+use explicit package selection rather than `cargo package --workspace`.
 
 Run examples after applying the configured migration:
 
