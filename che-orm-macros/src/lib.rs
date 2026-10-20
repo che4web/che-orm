@@ -845,6 +845,7 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut insert_values = Vec::with_capacity(fields.len());
     let mut field_values = Vec::with_capacity(fields.len());
     let mut write_protected_columns = Vec::new();
+    let mut json_columns = Vec::new();
     let mut managed_update_values = Vec::with_capacity(fields.len());
     let mut relation_constants = Vec::new();
     let mut relation_markers = Vec::new();
@@ -907,6 +908,9 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         }
         if is_image_field_type(&field_type) {
             write_protected_columns.push(column.clone());
+        }
+        if is_named_field_type(&field_type, "JsonField") {
+            json_columns.push(column.clone());
         }
         field_columns.insert(field_column.clone(), column.clone());
 
@@ -1229,6 +1233,9 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             fn write_protected_columns() -> &'static [&'static str] {
                 &[#(#write_protected_columns),*]
             }
+            fn json_columns() -> &'static [&'static str] {
+                &[#(#json_columns),*]
+            }
 
             fn managed_update_values() -> ::std::vec::Vec<#orm::Assignment> {
                 vec![#(#managed_update_values),*]
@@ -1449,13 +1456,17 @@ fn is_option_offset_date_time(ty: &syn::Type) -> bool {
 }
 
 fn is_image_field_type(ty: &syn::Type) -> bool {
+    is_named_field_type(ty, "ImageField")
+}
+
+fn is_named_field_type(ty: &syn::Type, name: &str) -> bool {
     let syn::Type::Path(path) = ty else {
         return false;
     };
     let Some(segment) = path.path.segments.last() else {
         return false;
     };
-    if segment.ident == "ImageField" {
+    if segment.ident == name {
         return true;
     }
     if segment.ident != "Option" {
@@ -1464,7 +1475,7 @@ fn is_image_field_type(ty: &syn::Type) -> bool {
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
         return false;
     };
-    matches!(args.args.first(), Some(syn::GenericArgument::Type(ty)) if is_image_field_type(ty))
+    matches!(args.args.first(), Some(syn::GenericArgument::Type(ty)) if is_named_field_type(ty, name))
 }
 
 fn datetime_deserialize_attribute(

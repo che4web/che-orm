@@ -20,6 +20,7 @@ impl Registry {
                 schema: d.schema.clone(),
                 fields: d.fields.clone(),
                 protected_columns: vec![],
+                json_columns: d.json_columns.clone(),
                 revision: d.revision,
                 updated_at: d.updated_at,
                 deleted_at: d.deleted_at,

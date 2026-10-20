@@ -24,6 +24,7 @@ pub(crate) struct Descriptor {
     pub updated_at: &'static str,
     pub deleted_at: &'static str,
     pub scope: &'static str,
+    pub json_columns: Vec<&'static str>,
 }
 
 impl Descriptor {
@@ -275,6 +276,7 @@ impl Registry {
             updated_at: registration.updated_at,
             deleted_at: registration.deleted_at,
             scope: registration.scope,
+            json_columns: registration.json_columns,
         });
         Ok(self)
     }

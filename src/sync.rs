@@ -89,6 +89,7 @@ pub struct SyncRegistration {
     pub schema: TableSchema,
     pub fields: Vec<SyncField>,
     pub protected_columns: Vec<&'static str>,
+    pub json_columns: Vec<&'static str>,
     pub revision: &'static str,
     pub updated_at: &'static str,
     pub deleted_at: &'static str,
@@ -104,6 +105,7 @@ impl SyncRegistration {
             schema: M::sync_schema(),
             fields: M::registered_fields(),
             protected_columns: M::write_protected_columns().to_vec(),
+            json_columns: M::json_columns().to_vec(),
             revision: M::REVISION_COLUMN,
             updated_at: M::UPDATED_AT_COLUMN,
             deleted_at: M::DELETED_AT_COLUMN,
@@ -251,6 +253,32 @@ pub fn sync_migration_operations_for_role(
             });
             tables.push(shadow);
         }
+    } else {
+        // Each model owns its cursor/lock row and immutable operation journal.
+        // Legacy shared tables remain available for explicitly migrated clients.
+        for registration in registrations {
+            let mut log = table(
+                &format!("{}_sync_log", registration.schema.name),
+                &[
+                    ("id", I),
+                    ("record_id", ColumnType::Uuid),
+                    ("revision", I),
+                    ("kind", T),
+                    ("diff", T),
+                    ("created_at", ColumnType::DateTime),
+                    ("schema_version", I),
+                ],
+                &["id"],
+            );
+            log.columns[0].primary_key = true;
+            log.indexes.push(vec!["record_id".into(), "id".into()]);
+            tables.push(log);
+            tables.push(table(
+                &format!("{}_sync_log_state", registration.schema.name),
+                &[("key", I), ("sequence", I), ("history", T)],
+                &["key"],
+            ));
+        }
     }
     Ok(tables
         .into_iter()
@@ -261,7 +289,22 @@ pub fn sync_migration_operations_for_role(
                     table.name == format!("_sync_server_{}", registration.schema.name)
                 })
                 .map(|registration| format!("shadow:{}", registration.name))
-                .unwrap_or_else(|| table.name.clone());
+                .unwrap_or_else(|| {
+                    registrations
+                        .iter()
+                        .find_map(|registration| {
+                            if table.name == format!("{}_sync_log", registration.schema.name) {
+                                Some(format!("log:{}", registration.name))
+                            } else if table.name
+                                == format!("{}_sync_log_state", registration.schema.name)
+                            {
+                                Some(format!("log-state:{}", registration.name))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| table.name.clone())
+                });
             MigrationOperation::CreateModel {
                 model: ModelState {
                     key: ModelKey {

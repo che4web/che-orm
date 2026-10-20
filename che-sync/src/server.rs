@@ -58,6 +58,7 @@ pub struct SyncServer {
     principal: String,
     policy: Arc<dyn AccessPolicy>,
     model: Option<String>,
+    model_logs: bool,
 }
 
 impl SyncServer {
@@ -95,12 +96,143 @@ impl SyncServer {
             principal,
             policy,
             model: None,
+            model_logs: false,
         };
         server.orm_db = server
             .db
             .clone()
             .with_model_runtime(Arc::new(server.clone()));
         Ok(server)
+    }
+
+    /// Whole-model REST journals, without a user-supplied scope/workspace.
+    /// Apply compiled journal migrations before opening the runtime.
+    pub async fn open_model_logs(
+        db: Database,
+        registry: Registry,
+        principal: impl Into<String>,
+        policy: Arc<dyn AccessPolicy>,
+    ) -> Result<Self, OrmError> {
+        let mut server = Self::open(
+            db,
+            registry,
+            crate::model_log::MODEL_LOG_SCOPE,
+            principal,
+            policy,
+        )
+        .await?;
+        server.model_logs = true;
+        let registry = server.registry.clone();
+        server
+            .db
+            .transaction(move |tx| {
+                Box::pin(async move { crate::model_log::lock_logs(tx, &registry).await })
+            })
+            .await?;
+        server.orm_db = server
+            .db
+            .clone()
+            .with_model_runtime(Arc::new(server.clone()));
+        Ok(server)
+    }
+
+    pub async fn changes<M: SyncModel>(
+        &self,
+        after: i64,
+        limit: u32,
+    ) -> Result<crate::model_log::ModelChanges, OrmError> {
+        use crate::model_log::{ChangeKind, ModelChanges, ModelOperation};
+        if !self.model_logs || after < 0 || !(1..=1000).contains(&limit) {
+            return Err(invalid("invalid model journal request"));
+        }
+        self.policy.authorize_scope(&self.principal, &self.scope)?;
+        let d = self.registry.typed::<M>()?.clone();
+        self.db.transaction_with_isolation(IsolationLevel::RepeatableRead, move |tx| Box::pin(async move {
+            let state = tx.query_sql(format!("SELECT sequence, history FROM {} WHERE key = 0", quote(&d.log_state_table())), vec![]).await?;
+             let state = state.first().ok_or_else(|| invalid("uninitialized model log"))?;
+             if state.get::<i64>(0)? == 0 && !tx.query_sql(format!("SELECT {} FROM {} LIMIT 1", quote(d.primary), quote(d.schema.name)), vec![]).await?.is_empty() {
+                 return Err(invalid("existing records require explicit model journal backfill"));
+             }
+            if after > state.get::<i64>(0)? { return Err(invalid("model cursor is ahead of server history")); }
+            let rows = tx.query_sql(format!("SELECT id, record_id, revision, kind, diff, created_at, schema_version FROM {} WHERE id > $1 ORDER BY id LIMIT $2", quote(&d.log_table())), vec![D::Integer(after), D::Integer(i64::from(limit) + 1)]).await?;
+            let has_more = rows.len() > limit as usize;
+            let mut operations = Vec::new();
+            for row in rows.into_iter().take(limit as usize) {
+                let kind = match row.get::<String>(3)?.as_str() { "create" => ChangeKind::Create, "update" => ChangeKind::Update, "delete" => ChangeKind::Delete, _ => return Err(invalid("invalid journal operation")) };
+                operations.push(ModelOperation { id: row.get(0)?, record_id: row.get(1)?, revision: row.get(2)?, kind, diff: decode(&row.get::<String>(4)?)?, created_at: row.get(5)?, schema_version: u32::try_from(row.get::<i64>(6)?).map_err(|_| invalid("invalid schema version"))? });
+            }
+            Ok(ModelChanges { model: d.name.into(), history: state.get::<String>(1)?.parse().map_err(|_| invalid("invalid model history"))?, next_cursor: operations.last().map_or(after, |operation| operation.id), operations, has_more })
+        })).await
+    }
+
+    /// Explicit baseline for an existing, already migrated table. Never called
+    /// by server startup or ordinary GET requests. Existing revisions survive.
+    pub async fn backfill_model_log<M: SyncModel>(&self) -> Result<usize, OrmError> {
+        if !self.model_logs {
+            return Err(invalid("model journals are not enabled"));
+        }
+        self.policy.authorize_scope(&self.principal, &self.scope)?;
+        let server = self.clone();
+        self.db
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    crate::model_log::lock_logs(tx, &server.registry).await?;
+                    let d = server.registry.typed::<M>()?;
+                    if !tx
+                        .query_sql(
+                            format!("SELECT id FROM {} LIMIT 1", quote(&d.log_table())),
+                            vec![],
+                        )
+                        .await?
+                        .is_empty()
+                    {
+                        return Err(invalid("model journal already has operations"));
+                    }
+                    let rows = tx
+                        .query_sql(
+                            format!(
+                                "SELECT {} FROM {} ORDER BY {}",
+                                quote(d.primary),
+                                quote(d.schema.name),
+                                quote(d.primary)
+                            ),
+                            vec![],
+                        )
+                        .await?;
+                    for row in &rows {
+                        let id = row.get::<Uuid>(0)?;
+                        let raw = tx
+                            .query_sql(
+                                format!(
+                                    "SELECT {}, {} FROM {} WHERE {} = $1",
+                                    quote(d.revision),
+                                    quote(d.scope),
+                                    quote(d.schema.name),
+                                    quote(d.primary)
+                                ),
+                                vec![D::Uuid(id)],
+                            )
+                            .await?;
+                        let revision = raw[0].get::<i64>(0)?;
+                        let scope = raw[0].get::<String>(1)?;
+                        if !scope.is_empty() && scope != server.scope {
+                            return Err(invalid(
+                                "baseline requires an explicit legacy scope migration",
+                            ));
+                        }
+                        stamp(tx, d, id, revision.max(1), &server.scope).await?;
+                        let next = server.entity(tx, d, id).await?;
+                        let mut absent = next.clone();
+                        absent.record = None;
+                        absent.revision = 0;
+                        // Retained tombstones need an explicit deletion even if their
+                        // former business record is no longer available to a client.
+                        crate::model_log::append(tx, &server.registry, &absent, &next).await?;
+                    }
+                    Ok(rows.len())
+                })
+            })
+            .await
     }
 
     /// Scope-bound ORM handle. Writes journal changes in the same transaction.
@@ -132,7 +264,7 @@ impl SyncServer {
         request: PushRequest,
         trusted: bool,
     ) -> Result<PushResult, OrmError> {
-        self.push_transaction(request, trusted, None, vec![], None)
+        self.push_transaction(request, trusted, None, vec![], None, None)
             .await
             .map(|(result, _)| result)
     }
@@ -180,7 +312,7 @@ impl SyncServer {
         request: PushRequest,
         before: Vec<Entity>,
     ) -> Result<(PushResult, bool), OrmError> {
-        self.push_transaction(request, false, Some(before), vec![], None)
+        self.push_transaction(request, false, Some(before), vec![], None, None)
             .await
     }
 
@@ -190,7 +322,7 @@ impl SyncServer {
         before: Vec<Entity>,
         effects: Vec<PreparedEffect>,
     ) -> Result<(PushResult, bool), OrmError> {
-        self.push_transaction(request, false, Some(before), effects, None)
+        self.push_transaction(request, false, Some(before), effects, None, None)
             .await
     }
     pub async fn pending_effects(&self) -> Result<Vec<PostCommitEffect>, OrmError> {
@@ -234,9 +366,14 @@ impl SyncServer {
         effects: Vec<PreparedEffect>,
         identity: String,
     ) -> Result<PushResult, OrmError> {
-        self.push_transaction(request, true, Some(before), effects, Some(identity))
+        self.push_transaction(request, true, Some(before), effects, Some(identity), None)
             .await
             .map(|(result, _)| result)
+    }
+    /// Final serializer/domain rejection. Shares receipt locking and replay with
+    /// accepted writes, so an already committed identical request always wins.
+    pub async fn reject_rest(&self, request: PushRequest, identity: String, reason: String) -> Result<PushResult, OrmError> {
+        self.push_transaction(request, true, None, vec![], Some(identity), Some(reason)).await.map(|(result, _)| result)
     }
     pub async fn acknowledge_effect(&self, id: Uuid) -> Result<(), OrmError> {
         self.db
@@ -255,6 +392,7 @@ impl SyncServer {
         prepared: Option<Vec<Entity>>,
         effects: Vec<PreparedEffect>,
         rest_identity: Option<String>,
+        rejection: Option<String>,
     ) -> Result<(PushResult, bool), OrmError> {
         self.policy.authorize_scope(&self.principal, &self.scope)?;
         if request.protocol_version != PROTOCOL_VERSION || request.scope != self.scope {
@@ -277,7 +415,8 @@ impl SyncServer {
         // READ COMMITTED plus a scope row lock yields commit-ordered groups in
         // PostgreSQL. SQLite's write lock provides the same serialization.
         self.db.transaction_with_isolation(IsolationLevel::ReadCommitted, move |tx| Box::pin(async move {
-            tx.execute_sql("UPDATE _sync_scopes SET sequence = sequence WHERE scope = $1", vec![text(&server.scope)]).await?;
+             tx.execute_sql("UPDATE _sync_scopes SET sequence = sequence WHERE scope = $1", vec![text(&server.scope)]).await?;
+             if server.model_logs { crate::model_log::lock_logs(tx, &server.registry).await?; }
             let request_json = match &rest_identity { Some(identity) => encode(&(identity, &request))?, None => encode(&request)? };
             let receipt_replica = format!("{}:{}", server.principal.len(), server.principal) + &request.replica_id.to_string();
             let rows = tx.query_sql("SELECT request, result FROM _sync_receipts WHERE scope = $1 AND replica_id = $2 AND operation_id = $3", vec![text(&server.scope), text(&receipt_replica), text(request.operation.id)]).await?;
@@ -287,8 +426,9 @@ impl SyncServer {
                     None => decode::<PushRequest>(&row.get::<String>(0)?)? == request,
                 };
                 if !same { return Err(invalid("operation ID reused with different contents")); }
-                return Ok((decode(&row.get::<String>(1)?)?, false));
-            }
+                 return Ok((decode(&row.get::<String>(1)?)?, false));
+             }
+             if server.model_logs { crate::model_log::require_baselines(tx, &server.registry).await?; }
             let mut seen = std::collections::HashSet::new();
             let mut current = Vec::new(); let mut conflict = false;
             let checked = async {
@@ -308,7 +448,9 @@ impl SyncServer {
                 }
                 Ok::<_, OrmError>(())
             }.await;
-            let result = if let Err(error) = checked {
+             let result = if let Some(reason) = rejection {
+                 PushResult::Rejected { reason }
+             } else if let Err(error) = checked {
                 if !matches!(error, OrmError::Configuration(_)) { return Err(error); }
                 PushResult::Rejected { reason: error.to_string() }
             } else if conflict {
@@ -339,7 +481,8 @@ impl SyncServer {
             let committed = matches!(result, PushResult::Accepted(_));
             if let PushResult::Accepted(entities) = &result {
                 for effect_preparation in effects {
-                    if let Some(entity) = entities.iter().find(|entity| entity.model == effect_preparation.model && entity.id == effect_preparation.entity_id) {
+                     if let Some(entity) = entities.iter().find(|entity| entity.model == effect_preparation.model && entity.id == effect_preparation.entity_id) {
+                         if server.model_logs && prepared.as_ref().is_some_and(|before| before.iter().any(|old| old.model == entity.model && old.id == entity.id && old.revision == entity.revision)) { continue; }
                         let previous = prepared.as_ref().and_then(|before| before.iter().find(|old| old.model == entity.model && old.id == entity.id)).cloned();
                         let effect = PostCommitEffect { id: Uuid::now_v7(), previous, entity: entity.clone(), prepared: effect_preparation };
                         tx.execute_sql("INSERT INTO _sync_effects (id, scope, principal, payload) VALUES ($1,$2,$3,$4)", vec![text(effect.id), text(&server.scope), text(&server.principal), text(encode(&effect)?)]).await?;
@@ -424,6 +567,28 @@ impl SyncServer {
         &self,
         write: che_orm::ValidatedWrite<M>,
     ) -> Result<PushRequest, OrmError> {
+        self.prepare_write_at(write, None).await
+    }
+
+    /// Encode a REST write against the caller's captured revision. Existence and
+    /// revision checks run after receipt replay under the transaction scope lock,
+    /// so concurrent retries cannot fail before resolving their receipt.
+    pub async fn prepare_rest_write<M: SyncModel>(
+        &self,
+        write: che_orm::ValidatedWrite<M>,
+        revision: i64,
+    ) -> Result<PushRequest, OrmError> {
+        if revision < 0 {
+            return Err(invalid("negative base revision"));
+        }
+        self.prepare_write_at(write, Some(revision)).await
+    }
+
+    async fn prepare_write_at<M: SyncModel>(
+        &self,
+        write: che_orm::ValidatedWrite<M>,
+        revision: Option<i64>,
+    ) -> Result<PushRequest, OrmError> {
         use che_orm::{CompareOp, Expr, QueryAst, ValidatedWrite};
         let d = self.registry.typed::<M>()?;
         let (id, values, creating) = match write {
@@ -504,20 +669,25 @@ impl SyncServer {
             let field = d.fields.iter().find(|f| f.column == name).unwrap();
             changes.insert(field.name.into(), crate::model::from_database(&value));
         }
-        let descriptor = d.clone();
-        let server = self.clone();
-        let old = self
-            .db
-            .transaction(move |tx| {
-                Box::pin(async move { server.entity(tx, &descriptor, id).await })
-            })
-            .await?;
-        if creating && old.revision != 0 {
-            return Err(invalid("UUID already exists"));
-        }
-        if !creating && old.record.is_none() {
-            return Err(invalid("cannot update an absent entity"));
-        }
+        let base_revision = if let Some(revision) = revision {
+            revision
+        } else {
+            let descriptor = d.clone();
+            let server = self.clone();
+            let old = self
+                .db
+                .transaction(move |tx| {
+                    Box::pin(async move { server.entity(tx, &descriptor, id).await })
+                })
+                .await?;
+            if creating && old.revision != 0 {
+                return Err(invalid("UUID already exists"));
+            }
+            if !creating && old.record.is_none() {
+                return Err(invalid("cannot update an absent entity"));
+            }
+            old.revision
+        };
         Ok(PushRequest {
             protocol_version: PROTOCOL_VERSION,
             scope: self.scope.clone(),
@@ -528,7 +698,7 @@ impl SyncServer {
                     model: M::SYNC_NAME.into(),
                     id,
                     schema_version: M::SYNC_VERSION,
-                    base_revision: old.revision,
+                    base_revision,
                     changes: Some(changes),
                 }],
             },
@@ -832,6 +1002,10 @@ impl che_orm::ModelRuntime for SyncServer {
                 vec![text(&self.scope)],
             )
             .await?;
+            if self.model_logs {
+                crate::model_log::lock_logs(tx, &self.registry).await?;
+                crate::model_log::require_baselines(tx, &self.registry).await?;
+            }
             savepoint(tx).await?;
             let write = self.orm_write(tx, &ast).await;
             match write {
@@ -965,6 +1139,19 @@ impl SyncServer {
                 let mutation = &plan[index];
                 let d = server.registry.get(&mutation.model)?;
                 if mutation.changes.is_some() {
+                    if server.model_logs
+                        && let Some(current) = read(tx, d, mutation.id, false).await?
+                    {
+                        if mutation
+                            .changes
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .all(|(field, value)| current.get(field) == Some(value))
+                        {
+                            return Ok(());
+                        }
+                    }
                     apply_patch(tx, d, mutation).await
                 } else {
                     guard_moves(tx, &server.registry, d, mutation.id, &mutations).await?;
@@ -978,9 +1165,10 @@ impl SyncServer {
             let descriptor = self.registry.get(&old.model)?;
             let next_record = read(tx, descriptor, old.id, false).await?;
             if next_record != old.record
-                || mutations
-                    .iter()
-                    .any(|m| m.model == old.model && m.id == old.id)
+                || (!self.model_logs
+                    && mutations
+                        .iter()
+                        .any(|m| m.model == old.model && m.id == old.id))
             {
                 stamp(
                     tx,
@@ -995,6 +1183,9 @@ impl SyncServer {
                 let next = self.entity(tx, descriptor, old.id).await?;
                 self.policy
                     .validate(&self.principal, &self.scope, old, &next)?;
+                if self.model_logs {
+                    crate::model_log::append(tx, &self.registry, old, &next).await?;
+                }
                 affected.push(next);
             }
         }
@@ -1003,6 +1194,25 @@ impl SyncServer {
                 self.check_references(tx, self.registry.get(&entity.model)?, record, mutations)
                     .await?;
             }
+        }
+        if self.model_logs {
+            // A canonical no-op result acknowledges normalization without a new
+            // revision, journal event or lifecycle effect.
+            for mutation in mutations {
+                if !affected
+                    .iter()
+                    .any(|entity| entity.model == mutation.model && entity.id == mutation.id)
+                {
+                    let old = before
+                        .iter()
+                        .find(|old| old.model == mutation.model && old.id == mutation.id)
+                        .ok_or_else(|| invalid("missing no-op baseline"))?;
+                    self.policy
+                        .validate(&self.principal, &self.scope, old, old)?;
+                    affected.push(old.clone());
+                }
+            }
+            return Ok(affected);
         }
         tx.execute_sql(
             "UPDATE _sync_scopes SET sequence = sequence + 1 WHERE scope = $1",

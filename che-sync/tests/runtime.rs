@@ -400,6 +400,30 @@ async fn scenario(
         .write_rest_prepared(rest.clone(), before, vec![], identity.clone())
         .await?;
     assert!(matches!(committed, PushResult::Accepted(_)));
+    let retry = server
+        .prepare_rest_write(
+            che_orm::ValidatedWrite::Create(
+                Note::insert()
+                    .set(Note::ID, rest.operation.mutations[0].id)
+                    .set(Note::TITLE, "REST receipt")
+                    .set(Note::ENABLED, true),
+            ),
+            0,
+        )
+        .await?;
+    assert_eq!(retry.operation.mutations, rest.operation.mutations);
+    assert!(
+        server
+            .prepare_write(che_orm::ValidatedWrite::Create(
+                Note::insert()
+                    .set(Note::ID, rest.operation.mutations[0].id)
+                    .set(Note::TITLE, "REST receipt")
+                    .set(Note::ENABLED, true),
+            ))
+            .await
+            .is_err(),
+        "ordinary write preparation must still check existence"
+    );
     let sequence = server.snapshot().await?.cursor.sequence;
     assert_eq!(
         server

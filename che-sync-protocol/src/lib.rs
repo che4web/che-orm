@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+pub mod model_log;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Tagged values preserve types across JSON and between SQLite and PostgreSQL.

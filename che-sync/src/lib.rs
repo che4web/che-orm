@@ -4,6 +4,8 @@ mod client;
 mod engine;
 mod merge;
 mod model;
+pub mod model_log;
+mod model_client;
 mod runtime;
 mod schema;
 mod server;
@@ -13,6 +15,7 @@ pub use che_sync_protocol as protocol;
 pub use client::{Resolution, SyncClient, SyncTransaction};
 pub use engine::{LoadRequired, SyncEngine, SyncReport, SyncTransport, TransportFuture};
 pub use model::{Field, Registry, SyncModel};
+pub use model_client::{ModelLogClient, ModelLogEngine, ModelLogTransport};
 pub use schema::SchemaRole;
 pub use server::{AccessPolicy, AllowAll, PostCommitEffect, PreparedEffect, SyncServer};
 

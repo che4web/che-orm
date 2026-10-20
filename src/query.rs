@@ -297,6 +297,10 @@ pub trait Model: Sized {
     fn write_protected_columns() -> &'static [&'static str] {
         &[]
     }
+    /// TEXT-backed JSON columns retain their JSON type in external codecs.
+    fn json_columns() -> &'static [&'static str] {
+        &[]
+    }
     /// Materialized field values keyed by physical SQL column, independently of
     /// Serde naming. Unlike insert values, these include generated keys and
     /// managed timestamps. The derive generates a complete implementation;
