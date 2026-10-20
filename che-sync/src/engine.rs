@@ -4,16 +4,16 @@ use std::{future::Future, pin::Pin};
 
 pub type TransportFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OrmError>> + Send + 'a>>;
 
-/// Implement with an authenticated HTTP adapter, IPC, or an in-process server.
+/// Implement with a delivery adapter or an in-process server.
 /// A transport error leaves the durable operation intact for a later retry.
 pub trait SyncTransport: Send + Sync {
-    /// REST transports send one record per request; native transports may batch.
+    /// Adapters with single-record delivery set this to one; others may batch.
     fn max_mutations(&self) -> usize {
         usize::MAX
     }
     fn push(&self, request: PushRequest) -> TransportFuture<'_, PushResult>;
     /// Route a dependency to its own model endpoint. Single-model transports
-    /// may use the default; multi-model HTTP adapters must override this.
+    /// may use the default; adapters with separate model destinations override this.
     fn push_model(&self, _model: &str, request: PushRequest) -> TransportFuture<'_, PushResult> {
         self.push(request)
     }

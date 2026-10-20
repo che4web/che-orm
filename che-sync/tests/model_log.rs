@@ -941,3 +941,194 @@ async fn typed_journal_round_trips_dates_json_scalars_sql_null_and_integer_extre
         assert_eq!(saved.happened_at, timestamp);
     }
 }
+
+#[tokio::test]
+async fn native_delivery_persists_opaque_payloads_and_rejects_another_transport() {
+    opaque_delivery_scenario(false).await;
+}
+#[tokio::test]
+async fn unclaimed_legacy_payload_cannot_be_reencoded_by_another_transport() {
+    opaque_delivery_scenario(true).await;
+}
+async fn opaque_delivery_scenario(legacy: bool) {
+    use che_sync::{ModelLogClient, ModelLogTransport, TransportFuture};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Native {
+        id: &'static str,
+        codec: &'static str,
+        fail: bool,
+        prepared: Arc<AtomicUsize>,
+        delivered: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+    impl ModelLogTransport for Native {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn legacy_payload_key(&self, operation: Uuid) -> Option<String> {
+            (self.id == "native.v1").then(|| format!("old-native:{operation}"))
+        }
+        fn prepare_write(
+            &self,
+            write: &ModelWrite,
+        ) -> Result<serde_json::Value, che_orm::OrmError> {
+            self.prepared.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"codec":self.codec, "mutation":write}))
+        }
+        fn write<'a>(
+            &'a self,
+            write: &'a ModelWrite,
+            payload: &'a serde_json::Value,
+        ) -> TransportFuture<'a, ModelWriteResult> {
+            Box::pin(async move {
+                assert_eq!(payload["mutation"], serde_json::to_value(write).unwrap());
+                self.delivered.lock().unwrap().push(payload.clone());
+                if self.fail {
+                    Err(che_orm::OrmError::Interaction(
+                        "delivery interrupted".into(),
+                    ))
+                } else {
+                    Ok(ModelWriteResult::Rejected {
+                        code: "domain".into(),
+                        reason: "explicit domain rejection".into(),
+                    })
+                }
+            })
+        }
+        fn changes<'a>(&'a self, _: &'a str, _: i64, _: u32) -> TransportFuture<'a, ModelChanges> {
+            Box::pin(async { panic!("download not needed") })
+        }
+    }
+    let db = database(true).await;
+    let client = ModelLogClient::open(db.clone(), registry(true))
+        .await
+        .unwrap();
+    client
+        .apply(ModelChanges {
+            model: "tasks.task".into(),
+            history: Uuid::now_v7(),
+            operations: vec![],
+            next_cursor: 0,
+            has_more: false,
+        })
+        .await
+        .unwrap();
+    let prepared = Arc::new(AtomicUsize::new(0));
+    let delivered = Arc::new(Mutex::new(vec![]));
+    let transport = |id, codec, fail| Native {
+        id,
+        codec,
+        fail,
+        prepared: prepared.clone(),
+        delivered: delivered.clone(),
+    };
+    let id = Uuid::now_v7();
+    client
+        .save(&Task {
+            id,
+            title: "submitted".into(),
+            document: che_orm::JsonField(json!({})),
+            optional_document: None,
+            number: i64::MIN,
+        })
+        .await
+        .unwrap();
+    let engine = client.engine(transport("native.v1", "original", true));
+    assert!(engine.flush().await.is_err());
+    let stored = db
+        .query_sql(
+            "SELECT value FROM _sync_meta WHERE key LIKE 'submitted-write:%'",
+            vec![],
+        )
+        .await
+        .unwrap()[0]
+        .get::<String>(0)
+        .unwrap();
+    let submitted: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    let operation = submitted["payload"]["mutation"]["operation_id"]
+        .as_str()
+        .unwrap();
+    let stored_key = if legacy {
+        format!("old-native:{operation}")
+    } else {
+        format!("submitted-write:{operation}")
+    };
+    let stored = if legacy {
+        let payload = serde_json::to_string(&submitted["payload"]).unwrap();
+        db.execute_sql(
+            "DELETE FROM _sync_meta WHERE key LIKE 'submitted-write:%'",
+            vec![],
+        )
+        .await
+        .unwrap();
+        db.execute_sql(
+            "INSERT INTO _sync_meta (key, value) VALUES ($1,$2)",
+            vec![
+                che_orm::DatabaseValue::Text(stored_key.clone()),
+                che_orm::DatabaseValue::Text(payload.clone()),
+            ],
+        )
+        .await
+        .unwrap();
+        payload
+    } else {
+        stored
+    };
+    drop(engine);
+    drop(client);
+    let client = ModelLogClient::open(db.clone(), registry(true))
+        .await
+        .unwrap();
+    let wrong = client.engine(transport("other.v1", "changed", false));
+    assert!(
+        wrong
+            .flush()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("another transport")
+    );
+    assert_eq!(prepared.load(Ordering::SeqCst), 1);
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    assert_eq!(
+        db.query_sql(
+            "SELECT value FROM _sync_meta WHERE key = $1",
+            vec![che_orm::DatabaseValue::Text(stored_key.clone())]
+        )
+        .await
+        .unwrap()[0]
+            .get::<String>(0)
+            .unwrap(),
+        stored
+    );
+    drop(wrong);
+    let engine = client.engine(transport("native.v1", "changed", false));
+    assert_eq!(engine.flush().await.unwrap().rejected_operations, 1);
+    assert_eq!(
+        prepared.load(Ordering::SeqCst),
+        1,
+        "submitted payload was re-encoded"
+    );
+    {
+        let delivered = delivered.lock().unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0], delivered[1]);
+    }
+    assert!(
+        db.query_sql("SELECT operation_id FROM _sync_outbox", vec![])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db.query_sql(
+            "SELECT value FROM _sync_meta WHERE key LIKE 'submitted-write:%'",
+            vec![]
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+}

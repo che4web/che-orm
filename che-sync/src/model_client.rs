@@ -1,4 +1,4 @@
-//! Tauri-friendly current/confirmed storage and immutable ordinary REST writes.
+//! Current/confirmed storage and immutable transport-independent model writes.
 use crate::{
     Registry, Resolution, SyncClient, SyncModel, SyncReport, TransportFuture, invalid,
     model_log::*,
@@ -8,17 +8,39 @@ use crate::{
 use che_orm::{Database, OrmError, Uuid};
 
 pub trait ModelLogTransport: Send + Sync {
-    /// Bind serializer names and resource path once, before persisting a request.
-    fn encode_write(&self, write: RestModelWrite) -> Result<RestModelWrite, OrmError> {
-        Ok(write)
+    /// Stable payload format identity. Changing adapters must not reinterpret
+    /// already submitted payloads.
+    fn id(&self) -> &'static str;
+    /// Encode once before delivery. The engine persists the result unchanged
+    /// and treats its contents as opaque transport-owned data.
+    fn prepare_write(&self, write: &ModelWrite) -> Result<serde_json::Value, OrmError> {
+        serde_json::to_value(write).map_err(|error| invalid(error.to_string()))
     }
-    fn write<'a>(&'a self, write: &'a RestModelWrite) -> TransportFuture<'a, ModelWriteResult>;
+    /// Optional operation-suffixed compatibility key owned by this adapter.
+    /// Existing payloads are read without rewriting and removed only after
+    /// settlement. Unclaimed operation payloads block switching adapters.
+    fn legacy_payload_key(&self, _operation: Uuid) -> Option<String> {
+        None
+    }
+    /// Deliver the saved payload. Validate any embedded operation identity
+    /// against `write` before performing external side effects.
+    fn write<'a>(
+        &'a self,
+        write: &'a ModelWrite,
+        payload: &'a serde_json::Value,
+    ) -> TransportFuture<'a, ModelWriteResult>;
     fn changes<'a>(
         &'a self,
         model: &'a str,
         after: i64,
         limit: u32,
     ) -> TransportFuture<'a, ModelChanges>;
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct SubmittedWrite {
+    transport: String,
+    payload: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -130,7 +152,7 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
         Ok(report)
     }
     /// Send one coalesced object per model. Already submitted requests are always
-    /// retried first, retaining the exact persisted resource/body/identity.
+    /// retried first, retaining the exact persisted transport payload and identity.
     pub async fn flush(&self) -> Result<SyncReport, OrmError> {
         let cycle = self
             .client
@@ -146,6 +168,9 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
     }
     async fn flush_inner(&self, prepare_new: bool) -> Result<SyncReport, OrmError> {
         let mut report = SyncReport::default();
+        if self.transport.id().is_empty() {
+            return Err(invalid("empty transport identity"));
+        }
         for d in self.client.inner.registry.models.iter() {
             let pending = if let Some(pending) = self.client.inner.pending(Some(d.name)).await? {
                 Some(pending)
@@ -166,75 +191,116 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
                 .or_default()
                 .clone();
             let _operation = lock.lock().await;
-            let key = format!("rest-request:{id}");
+            let mutation = &pending.request.operation.mutations[0];
+            let descriptor = self.client.inner.registry.get(&mutation.model)?;
+            let changes = mutation
+                .changes
+                .as_ref()
+                .map(|changes| {
+                    changes
+                        .iter()
+                        .map(|(name, value)| {
+                            Ok((name.clone(), descriptor.json_value(name, value)?))
+                        })
+                        .collect::<Result<serde_json::Map<_, _>, OrmError>>()
+                })
+                .transpose()?;
+            let kind = if mutation.changes.is_none() {
+                ChangeKind::Delete
+            } else if mutation.base_revision == 0 {
+                ChangeKind::Create
+            } else {
+                ChangeKind::Update
+            };
+            let sql_null_fields = mutation
+                .changes
+                .as_ref()
+                .map(|changes| {
+                    changes
+                        .iter()
+                        .filter(|(_, value)| matches!(value, crate::protocol::Value::Null))
+                        .map(|(name, _)| name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let write = ModelWrite {
+                model: mutation.model.clone(),
+                record_id: mutation.id,
+                operation_id: id,
+                replica_id: pending.request.replica_id,
+                base_revision: mutation.base_revision,
+                schema_version: mutation.schema_version,
+                kind,
+                changes,
+                sql_null_fields,
+            };
+            let key = format!("submitted-write:{id}");
+            let legacy_key = self.transport.legacy_payload_key(id);
             let existing = self
                 .client
                 .inner
                 .db
                 .transaction({
                     let key = key.clone();
-                    move |tx| Box::pin(async move { meta::<RestModelWrite>(tx, &key).await })
+                    move |tx| {
+                        Box::pin(async move {
+                            if let Some(submitted) = meta::<SubmittedWrite>(tx, &key).await? {
+                                return Ok(Some((key, submitted, false)));
+                            }
+                            if let Some(legacy) = legacy_key
+                                && let Some(payload) =
+                                    meta::<serde_json::Value>(tx, &legacy).await?
+                            {
+                                return Ok(Some((
+                                    legacy,
+                                    SubmittedWrite {
+                                        transport: String::new(),
+                                        payload,
+                                    },
+                                    true,
+                                )));
+                            }
+                            // Older adapters own operation-suffixed cache keys.
+                            // Unclaimed submitted data must never be re-encoded.
+                            if !tx
+                                .query_sql(
+                                    "SELECT key FROM _sync_meta WHERE key LIKE $1 LIMIT 1",
+                                    vec![text(format!("%:{id}"))],
+                                )
+                                .await?
+                                .is_empty()
+                            {
+                                return Err(invalid(
+                                    "submitted payload belongs to another transport",
+                                ));
+                            }
+                            Ok(None)
+                        })
+                    }
                 })
                 .await?;
-            let write = if let Some(write) = existing {
-                write
-            } else {
-                let mutation = &pending.request.operation.mutations[0];
-                let descriptor = self.client.inner.registry.get(&mutation.model)?;
-                let body = mutation
-                    .changes
-                    .as_ref()
-                    .map(|changes| {
-                        changes
-                            .iter()
-                            .map(|(name, value)| {
-                                Ok((name.clone(), descriptor.json_value(name, value)?))
-                            })
-                            .collect::<Result<serde_json::Map<_, _>, OrmError>>()
-                    })
-                    .transpose()?
-                    .map(serde_json::Value::Object)
-                    .unwrap_or(serde_json::Value::Null);
-                let kind = if mutation.changes.is_none() {
-                    ChangeKind::Delete
-                } else if mutation.base_revision == 0 {
-                    ChangeKind::Create
-                } else {
-                    ChangeKind::Update
-                };
-                let json_null_fields = mutation.changes.as_ref().map(|changes| changes.iter().filter(|(name, value)| descriptor.field(name).is_ok_and(|field| descriptor.json_columns.contains(&field.column)) && matches!(value, crate::protocol::Value::Text(value) if value == "null")).map(|(name, _)| name.clone()).collect()).unwrap_or_default();
-                let write = self.transport.encode_write(RestModelWrite {
-                    model: mutation.model.clone(),
-                    resource: mutation.model.clone(),
-                    record_id: mutation.id,
-                    operation_id: id,
-                    replica_id: pending.request.replica_id,
-                    base_revision: mutation.base_revision,
-                    schema_version: mutation.schema_version,
-                    kind,
-                    body,
-                    json_null_fields,
-                })?;
-                if write.operation_id != id
-                    || write.record_id != mutation.id
-                    || write.base_revision != mutation.base_revision
-                    || write.kind != kind
-                    || write.model != mutation.model
-                {
-                    return Err(invalid("REST encoder changed operation identity"));
+            let (key, submitted) = if let Some((key, submitted, legacy)) = existing {
+                if !legacy && submitted.transport != self.transport.id() {
+                    return Err(invalid("submitted payload belongs to another transport"));
                 }
+                (key, submitted)
+            } else {
+                let submitted = SubmittedWrite {
+                    transport: self.transport.id().into(),
+                    payload: self.transport.prepare_write(&write)?,
+                };
                 self.client
                     .inner
                     .db
                     .transaction({
                         let key = key.clone();
-                        let write = write.clone();
-                        move |tx| Box::pin(async move { set_meta(tx, &key, &write).await })
+                        let submitted = submitted.clone();
+                        move |tx| Box::pin(async move { set_meta(tx, &key, &submitted).await })
                     })
                     .await?;
-                write
+                (key, submitted)
             };
-            let result = self.transport.write(&write).await?;
+            let result = self.transport.write(&write, &submitted.payload).await?;
             let result = match result {
                 ModelWriteResult::Accepted(states) | ModelWriteResult::Conflict(states)
                     if states.is_empty() =>

@@ -105,7 +105,7 @@ impl SyncServer {
         Ok(server)
     }
 
-    /// Whole-model REST journals, without a user-supplied scope/workspace.
+    /// Whole-model journals, without a user-supplied scope/workspace.
     /// Apply compiled journal migrations before opening the runtime.
     pub async fn open_model_logs(
         db: Database,
@@ -338,8 +338,8 @@ impl SyncServer {
             .collect()
     }
 
-    /// Replay REST receipts before serializer preparation or loading a deleted row.
-    pub async fn rest_receipt(
+    /// Replay request receipts before validation or loading a deleted row.
+    pub async fn request_receipt(
         &self,
         replica: Uuid,
         operation: Uuid,
@@ -359,7 +359,7 @@ impl SyncServer {
         }
     }
 
-    pub async fn write_rest_prepared(
+    pub async fn write_prepared_request(
         &self,
         request: PushRequest,
         before: Vec<Entity>,
@@ -372,7 +372,7 @@ impl SyncServer {
     }
     /// Final serializer/domain rejection. Shares receipt locking and replay with
     /// accepted writes, so an already committed identical request always wins.
-    pub async fn reject_rest(
+    pub async fn reject_request(
         &self,
         request: PushRequest,
         identity: String,
@@ -398,7 +398,7 @@ impl SyncServer {
         trusted: bool,
         prepared: Option<Vec<Entity>>,
         effects: Vec<PreparedEffect>,
-        rest_identity: Option<String>,
+        request_identity: Option<String>,
         rejection: Option<String>,
     ) -> Result<(PushResult, bool), OrmError> {
         self.policy.authorize_scope(&self.principal, &self.scope)?;
@@ -423,11 +423,11 @@ impl SyncServer {
         self.db.transaction_with_isolation(IsolationLevel::ReadCommitted, move |tx| Box::pin(async move {
              tx.execute_sql("UPDATE _sync_scopes SET sequence = sequence WHERE scope = $1", vec![text(&server.scope)]).await?;
              if server.model_logs { crate::model_log::lock_logs(tx, &server.registry).await?; }
-            let request_json = match &rest_identity { Some(identity) => encode(&(identity, &request))?, None => encode(&request)? };
+            let request_json = match &request_identity { Some(identity) => encode(&(identity, &request))?, None => encode(&request)? };
             let receipt_replica = format!("{}:{}", server.principal.len(), server.principal) + &request.replica_id.to_string();
             let rows = tx.query_sql("SELECT request, result FROM _sync_receipts WHERE scope = $1 AND replica_id = $2 AND operation_id = $3", vec![text(&server.scope), text(&receipt_replica), text(request.operation.id)]).await?;
             if let Some(row) = rows.first() {
-                let same = match &rest_identity {
+                let same = match &request_identity {
                     Some(identity) => decode::<(String, PushRequest)>(&row.get::<String>(0)?)?.0 == *identity,
                     None => decode::<PushRequest>(&row.get::<String>(0)?)? == request,
                 };
@@ -576,10 +576,10 @@ impl SyncServer {
         self.prepare_write_at(write, None).await
     }
 
-    /// Encode a REST write against the caller's captured revision. Existence and
+    /// Encode a conditional mutation against the caller's captured revision. Existence and
     /// revision checks run after receipt replay under the transaction scope lock,
     /// so concurrent retries cannot fail before resolving their receipt.
-    pub async fn prepare_rest_write<M: SyncModel>(
+    pub async fn prepare_conditional_write<M: SyncModel>(
         &self,
         write: che_orm::ValidatedWrite<M>,
         revision: i64,
@@ -1106,7 +1106,7 @@ impl SyncServer {
         crate::runtime::result(tx, d, ast, &ids).await
     }
 
-    /// Shared transactional application for REST/native requests and ORM writes.
+    /// Shared transactional application for prepared requests and ORM writes.
     /// Callers hold the scope lock and own a rollback savepoint.
     async fn apply_and_journal(
         &self,

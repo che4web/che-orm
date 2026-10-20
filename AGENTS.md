@@ -169,6 +169,14 @@ Keep client writes/outbox and server writes/journal/receipts transactional.
 ImageField mappings must be server-owned; the Model derive exposes protected
 columns to sync registration. See `docs/sync.md` for ownership and scope contracts.
 
+HTTP dependencies, resource paths, request bodies, headers and HTTP DTOs belong
+to che-rest. che-sync-protocol exposes transport-neutral `ModelWrite` and model
+states/results. che-sync may persist opaque adapter-owned payloads and expose a
+generic `ModelLogTransport`; it must not encode or interpret HTTP requests.
+Adapters own their stable format IDs and legacy payload-key compatibility.
+Prepared server APIs use `request_receipt`, `write_prepared_request`,
+`reject_request` and `prepare_conditional_write`; keep receipt storage compatible.
+
 `ModelLogClient` and `SyncServer::open_model_logs` implement protocol 2 with
 independent model journals and whole-model authorization. Protocol ownership,
 scope and replica metadata initialize atomically; failed opens must leave legacy

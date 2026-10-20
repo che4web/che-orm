@@ -1,4 +1,4 @@
-//! Per-model journals and ordinary REST delivery, without workspace cursors.
+//! Transport-independent per-model journals and mutation results.
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
@@ -93,12 +93,10 @@ pub enum ModelWriteResult {
     Rejected { code: String, reason: String },
 }
 
-/// Persisted once before networking. Encoding changes on an app upgrade cannot
-/// alter an already submitted request's path/body or idempotency identity.
+/// An immutable model mutation independent of its delivery transport.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RestModelWrite {
+pub struct ModelWrite {
     pub model: String,
-    pub resource: String,
     pub record_id: Uuid,
     pub operation_id: Uuid,
     pub replica_id: Uuid,
@@ -106,9 +104,9 @@ pub struct RestModelWrite {
     pub base_revision: i64,
     pub schema_version: u32,
     pub kind: ChangeKind,
-    pub body: Value,
+    pub changes: Option<Map<String, Value>>,
     #[serde(default)]
-    pub json_null_fields: Vec<String>,
+    pub sql_null_fields: Vec<String>,
 }
 
 #[cfg(test)]

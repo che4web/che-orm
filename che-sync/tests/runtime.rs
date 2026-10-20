@@ -386,38 +386,38 @@ async fn scenario(
     drain_model::<Child>(&b, &server).await?;
     assert!(b.database().get::<Child>(child.id).await?.is_none());
     assert!(b.database().get::<Note>(parent.id).await?.is_none());
-    let mut rest = server
+    let mut request = server
         .prepare_write(che_orm::ValidatedWrite::Create(
             Note::insert()
-                .set(Note::TITLE, "REST receipt")
+                .set(Note::TITLE, "prepared receipt")
                 .set(Note::ENABLED, true),
         ))
         .await?;
-    rest.replica_id = Uuid::now_v7();
-    let identity = "POST /notes/ with immutable serializer JSON".to_owned();
-    let before = server.prepare_push(&rest).await?;
+    request.replica_id = Uuid::now_v7();
+    let identity = "native.v1: immutable model mutation".to_owned();
+    let before = server.prepare_push(&request).await?;
     let committed = server
-        .write_rest_prepared(rest.clone(), before, vec![], identity.clone())
+        .write_prepared_request(request.clone(), before, vec![], identity.clone())
         .await?;
     assert!(matches!(committed, PushResult::Accepted(_)));
     let retry = server
-        .prepare_rest_write(
+        .prepare_conditional_write(
             che_orm::ValidatedWrite::Create(
                 Note::insert()
-                    .set(Note::ID, rest.operation.mutations[0].id)
-                    .set(Note::TITLE, "REST receipt")
+                    .set(Note::ID, request.operation.mutations[0].id)
+                    .set(Note::TITLE, "prepared receipt")
                     .set(Note::ENABLED, true),
             ),
             0,
         )
         .await?;
-    assert_eq!(retry.operation.mutations, rest.operation.mutations);
+    assert_eq!(retry.operation.mutations, request.operation.mutations);
     assert!(
         server
             .prepare_write(che_orm::ValidatedWrite::Create(
                 Note::insert()
-                    .set(Note::ID, rest.operation.mutations[0].id)
-                    .set(Note::TITLE, "REST receipt")
+                    .set(Note::ID, request.operation.mutations[0].id)
+                    .set(Note::TITLE, "prepared receipt")
                     .set(Note::ENABLED, true),
             ))
             .await
@@ -427,20 +427,20 @@ async fn scenario(
     let sequence = server.snapshot().await?.cursor.sequence;
     assert_eq!(
         server
-            .rest_receipt(rest.replica_id, rest.operation.id, &identity)
+            .request_receipt(request.replica_id, request.operation.id, &identity)
             .await?,
         Some(committed.clone())
     );
     assert!(
         server
-            .rest_receipt(rest.replica_id, rest.operation.id, "changed JSON")
+            .request_receipt(request.replica_id, request.operation.id, "changed mutation")
             .await
             .is_err()
     );
-    let before = server.prepare_push(&rest).await?;
+    let before = server.prepare_push(&request).await?;
     assert_eq!(
         server
-            .write_rest_prepared(rest, before, vec![], identity)
+            .write_prepared_request(request, before, vec![], identity)
             .await?,
         committed
     );
