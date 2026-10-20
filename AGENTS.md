@@ -33,6 +33,9 @@ Workspace members:
 - `che-sync/src/runtime.rs`: configured client ORM capture and role-aware read filters.
 - `che-sync/src/server.rs`: server capture, access policy, journal and operation receipts.
 - `che-sync/src/engine.rs`: independent pull/flush/full-load and compatibility sync cycle.
+- `che-sync/src/model_client.rs`: protocol-2 `ModelLogClient`, bounded model-log engine and opaque transport payload persistence.
+- `che-sync/src/model_log.rs`: protocol-2 journal/state application and model-log capture.
+- `docs/model-sync.md`: current per-model protocol, layer boundaries and downstream Tauri integration; `docs/sync.md` documents the scoped compatibility API.
 - `docs/releasing.md` and `.github/workflows/release-check.yml`: release procedure and checks.
 
 ## Application Modules
@@ -153,8 +156,9 @@ explicit sync facade. Original unconfigured handles and raw SQL bypass capture.
 Configured server reads recheck scope authorization and filter scope/tombstones,
 including counts, joins, `execute(SELECT)` and reads in existing transactions.
 Preserve this behavior in every AST read path. Non-sync tables use ordinary ORM rules.
+The following snapshot/reset rules belong to the scoped compatibility API:
 `SyncEngine::pull()` downloads only and reports initial/reset load requirements;
-`full_load()` is explicit. `flush()` sends only, through REST-backed transports.
+`full_load()` is explicit. `flush()` sends only, through the supplied transport.
 Clients target one persistent server history. Server replacement/history rewind
 is outside the sync contract; existing epoch fields are compatibility identity
 checks, not a recovery API. Journal pruning preserves revisions, tombstones and
@@ -185,6 +189,31 @@ database. Existing records require explicit `backfill_model_log`; never backfill
 at startup or GET. `che-sync/tests/model_log.rs` and `model_log_postgres.rs` cover
 the journal contract; che-rest owns HTTP, effect workers and migration guidance.
 
+Protocol 2 has no snapshot/full-load step: `pull` downloads one page per model
+from cursor zero; `flush` sends at most one coalesced record per model and retries
+already submitted operations first. `sync_once` settles pending requests, pulls
+journals, then prepares new work when caught up. Keep UI/worker cycles bounded;
+stop on `blocked`, conflicts and rejections. Never apply the legacy cursor-expiry
+and automatic full-load rules to `ModelLogEngine`.
+
+`ModelLogTransport` supplies a stable `id`, one-time `prepare_write`, immutable
+payload `write`, and journal `changes`. Validate embedded request identity in the
+adapter before side effects. Preserve pending payload namespaces and legacy
+compatibility keys; do not re-encode saved requests with new routes or codecs.
+
+The downstream `che-tauri/sync` feature wraps this engine as `TauriSync` and
+`che_model_sync`; ordinary i64 `che_api` resources remain separate. UUID CRUD
+commands write through its configured client handle. Do not add Tauri, HTTP or
+UI dependencies to this workspace. Sync database ownership includes server and
+account identity; auth/cache changes must not clear pending sync data. Cache/sync
+table overlap is currently prohibited by the downstream application contract,
+not enforced by a registration guard.
+
+The runnable server/client example is in the sibling
+`../che-tauri/examples/todo-sync` workspace, with shared models and frozen client
+and server migrations. Keep existing initial migrations unchanged; startup does
+not apply them. See its README for two-device launch and manual GUI checks.
+
 ## Verification
 
 Run these commands after code changes:
@@ -214,6 +243,20 @@ server; absence of the variable is an error. The sample PostgreSQL build uses
 For release changes, follow `docs/releasing.md`: verify Rust 1.88, both backend
 builds and all four public package archives. `che-orm-examples` is not published;
 use explicit package selection rather than `cargo package --workspace`.
+
+When changing the sync/model/serializer contracts, also verify matching sibling
+checkouts (these are not included in `cargo test --workspace`):
+
+```bash
+cargo test --manifest-path ../che-rest/Cargo.toml --features sync-http
+cargo test --manifest-path ../che-tauri/Cargo.toml --features sync
+cargo check --manifest-path ../che-tauri/examples/todo-sync/Cargo.toml --workspace
+cargo test --manifest-path ../che-tauri/examples/todo-sync/Cargo.toml -p todo-sync-server -p todo-sync-client --no-default-features
+```
+
+HTTP tests bind ephemeral loopback ports. The Todo integration uses disposable
+file databases and tests offline reopen, two-device merges, conflicts, deletion
+and invalid credentials. Desktop compilation does not imply GUI inspection.
 
 Run examples after applying the configured migration:
 

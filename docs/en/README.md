@@ -13,8 +13,10 @@ the same async high-level API.
 - [SQLite runtime](sqlite.md): connections, CRUD, queries, relations, and transactions.
 - [Compiled migrations](atlas.md): application-owned migration registries and the example CLI.
 - [Compile-tested API examples](api-examples.md): models, relations, serializers, and queries.
-- [Offline-first synchronization](../sync.md): shared models, client/server roles,
-  independent pull/flush, snapshots and REST delivery (English).
+- [Per-model synchronization](../model-sync.md): protocol-2 journals, shared UUID
+  models, transport ownership and Tauri integration (English).
+- [Scoped synchronization compatibility](../sync.md): legacy scoped feeds,
+  snapshots and explicit full loading (English).
 
 ## Project resources
 

@@ -17,10 +17,11 @@ crates explicitly rather than using `cargo package --workspace`.
 The 0.3 ORM release introduces async database access with feature-selected
 SQLite/PostgreSQL backends and role-aware synchronization. Shared models use
 `#[orm(sync)]`, with `SchemaSet::client_model` or `server_model` selecting their
-database role. `pull()`, `flush()` and explicit `full_load()` separate download,
-upload and snapshot loading. See [sync.md](sync.md) for the history contract and
-application-owned upgrade steps. Server database replacement/history rewind is
-outside that contract.
+database role. Prefer [protocol-2 model journals](model-sync.md) for new clients;
+their independent `pull`/`flush` methods have no snapshot phase. The
+[scoped compatibility API](sync.md) retains explicit `full_load` and its own
+history/upgrade rules. Both contracts require persistent server history;
+replacement/history rewind is outside them.
 
 ## Verification
 
@@ -50,11 +51,18 @@ Validate the matching downstream `che-rest` checkout with:
 
 ```bash
 cargo test --test sync --test model_sync --test sync_lifecycle
+cargo test --features sync-http
 ```
+
+The matching che-tauri client and Todo application are separate downstream
+workspaces. When changing sync contracts, also run their checks listed in the
+[protocol-2 guide](model-sync.md#verification). Desktop compilation and the
+two-client HTTP test do not replace manual GUI or deployment migration review.
 
 For an existing installation, rehearse its compiled follow-up migration on a
 copy of its database. Verify revisions, scope ownership, UUIDs, tombstones,
-receipts, cursors and pending edits as described in [sync.md](sync.md).
+receipts, cursors and pending edits as described in [sync.md](sync.md) and the
+[protocol-2 migration guidance](../../che-rest/docs/model-sync.md#rehearsing-an-existing-installations-migration).
 Fresh-database tests do not validate this application-specific upgrade.
 
 ## Publication

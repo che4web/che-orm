@@ -1,6 +1,7 @@
 # che-orm
 
-Offline-first synchronization: [che-sync](docs/sync.md).
+Offline-first synchronization: [per-model protocol 2](docs/model-sync.md) and
+[scoped compatibility protocol](docs/sync.md).
 
 **English** | [Russian](README.md)
 
@@ -20,9 +21,15 @@ Model fields support `f64` and `Option<f64>` as SQLite `REAL` and PostgreSQL
 `che-sync` shares `#[orm(sync)]` UUID models between client and server, selecting
 the role through `SchemaSet::client_model` / `server_model`. Configured database
 handles capture ordinary ORM writes. Clients have current/shadow tables; servers
-have authoritative rows and a journal without shadows. Independent `pull()` and
-`flush()` operations separate download from REST delivery; `full_load()` is
-explicit. Both roles support either backend. See [the sync guide](docs/sync.md).
+have authoritative rows and journals without shadows. Prefer `ModelLogClient`
+with independent model journals/cursors and whole-model authorization for new
+clients. Its `pull`/`flush` API has no snapshot/full-load phase. The scoped
+`SyncClient` / `SyncEngine` API retains its separate snapshot workflow.
+
+Both roles support either backend. The ORM and sync crates own data and
+transport-independent delivery; HTTP belongs to `che-rest` and Tauri invoke to
+`che-tauri`. See the [protocol-2 guide](docs/model-sync.md) and the complete
+[Todo server and desktop client](../che-tauri/examples/todo-sync/README.md).
 
 ## Quick Start
 

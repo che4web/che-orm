@@ -1,4 +1,10 @@
-# Offline-first synchronization
+# Offline-first synchronization (scoped compatibility protocol)
+
+For new per-model clients, use [protocol 2: ModelLogClient](model-sync.md).
+This page documents the existing scoped `SyncClient` / `SyncEngine` API,
+including snapshots and explicit `full_load`. Its scoped cursor/reset behavior
+does not apply to protocol 2. Keep existing databases and submitted requests on
+their original protocol until an explicit application migration is complete.
 
 `che-sync` is the native Rust synchronization engine for `che-orm`.
 `che-sync-protocol` contains backend-independent, versioned messages. The client

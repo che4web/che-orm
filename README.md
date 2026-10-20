@@ -6,6 +6,20 @@ Documentation: [English](README.en.md) | **Русский**
 при компиляции; обе БД используют одинаковые модели и высокоуровневый async API.
 Требуется Rust 1.88 или новее.
 
+## Синхронизация и приложения
+
+`che-sync` добавляет офлайн-изменения, current/shadow-таблицы, неизменяемые
+ожидающие запросы и слияние полей для UUID-моделей. Для новых клиентов используйте
+[модельные журналы протокола 2](docs/model-sync.md): `ModelLogClient`,
+`SchemaSet::client_model` / `server_model`, независимые курсоры и доступ ко всей
+модели. Scoped-протокол со snapshot/full_load остаётся
+[отдельным путём совместимости](docs/sync.md).
+
+`che-orm` отвечает за данные и транзакции, `che-sync` — за синхронизацию.
+HTTP и REST-маппинг принадлежат `che-rest`; Tauri-команды — `che-tauri`.
+Готовый [Todo-сервер и desktop-клиент](../che-tauri/examples/todo-sync/README.md)
+показывает офлайн-работу двух устройств, конфликты и явные compiled migrations.
+
 ## Возможности
 
 - `#[derive(Model)]` для генерации метаданных модели и typed fields.
@@ -106,14 +120,10 @@ che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
 
 Подробнее: [backend и PostgreSQL](docs/backends.md).
 
-Offline-first synchronization: [che-sync](docs/sync.md).
-
-`che-sync` использует общие UUID-модели с `#[orm(sync)]`; роль выбирается через
-`SchemaSet::client_model` / `server_model`. Настроенные database handles
-фиксируют обычные ORM-записи. Клиент хранит current/shadow, сервер — строки
-и журнал без shadow-таблиц. `pull()` скачивает изменения, `flush()` отправляет
-их через REST, а `full_load()` явно загружает снимок. Обе роли поддерживают
-SQLite и PostgreSQL.
+Синхронизация также поддерживает оба backend: общие UUID-модели регистрируются
+как `client_model` / `server_model`, а настроенные database handles фиксируют
+обычные ORM-записи. См. [протокол 2](docs/model-sync.md) для модельных журналов
+и [scoped API](docs/sync.md) для сохранённого snapshot/full_load-пути.
 
 ## Первичные ключи UUIDv7
 
