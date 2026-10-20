@@ -43,7 +43,7 @@ jobs:
       - run: cargo test -p che-orm --locked --no-default-features --features postgres
       - run: cargo test -p che-orm --locked --no-default-features --features postgres --test runtime -- --ignored
       - run: cargo test -p che-sync --locked --no-default-features --features postgres
-      - run: cargo test -p che-sync --locked --no-default-features --features postgres --test runtime --test model_roles -- --ignored
+      - run: cargo test -p che-sync --locked --no-default-features --features postgres --test runtime --test model_roles --test model_log_postgres -- --ignored
 
   msrv:
     runs-on: ubuntu-latest

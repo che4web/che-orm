@@ -40,7 +40,9 @@ cargo package -p che-orm-macros -p che-orm -p che-sync-protocol -p che-sync --lo
 ```
 
 Set `TEST_POSTGRES_URL` to a disposable PostgreSQL database, then run the four
-PostgreSQL commands in the workflow, including ignored runtime/model-role tests.
+PostgreSQL commands in the workflow, including ignored runtime/model-role and
+`model_log_postgres` tests. The latter verifies protocol-2 journals, concurrent
+commits, no-op suppression, deferred FK projection and SET NULL.
 For a local working tree review, packaging can use `--allow-dirty`; the release
 must include the reviewed new source and test files in its commit.
 

@@ -200,23 +200,20 @@ impl ClientRuntime {
     ) -> Result<ModelWriteResult, OrmError> {
         let d = descriptor(&self.registry, ast)?;
         let mut ids = targets(tx, d, ast, None).await?;
-        if ids.is_empty() {
-            if let QueryAst::Delete(delete) = ast {
-                if let Some(Expr::Compare {
-                    left,
-                    op: che_orm::CompareOp::Eq,
-                    right,
-                }) = &delete.filter
-                {
-                    if let (Expr::Column(column), Expr::Value(D::Uuid(id))) = (&**left, &**right) {
-                        if column.name == d.primary && shadow(tx, d, *id).await?.record.is_some() {
-                            // Known server rows may have no visible projection when
-                            // insertion was deferred by a local constraint conflict.
-                            ids.push(*id);
-                        }
-                    }
-                }
-            }
+        if ids.is_empty()
+            && let QueryAst::Delete(delete) = ast
+            && let Some(Expr::Compare {
+                left,
+                op: che_orm::CompareOp::Eq,
+                right,
+            }) = &delete.filter
+            && let (Expr::Column(column), Expr::Value(D::Uuid(id))) = (&**left, &**right)
+            && column.name == d.primary
+            && shadow(tx, d, *id).await?.record.is_some()
+        {
+            // Known server rows may have no visible projection when
+            // insertion was deferred by a local constraint conflict.
+            ids.push(*id);
         }
         match ast {
             QueryAst::Insert(insert) => {

@@ -13,6 +13,8 @@ pub(crate) struct Pending {
     pub model: Option<String>,
 }
 
+type CycleLocks = Arc<Mutex<std::collections::HashMap<Option<String>, Arc<Mutex<()>>>>>;
+
 #[derive(Clone)]
 pub struct SyncClient {
     pub(crate) db: Database,
@@ -21,7 +23,7 @@ pub struct SyncClient {
     pub(crate) scope: String,
     pub(crate) replica_id: Uuid,
     pub(crate) writes: Arc<Mutex<()>>,
-    pub(crate) cycles: Arc<Mutex<std::collections::HashMap<Option<String>, Arc<Mutex<()>>>>>,
+    pub(crate) cycles: CycleLocks,
     pub(crate) operations: Arc<Mutex<std::collections::HashMap<Uuid, Arc<Mutex<()>>>>>,
 }
 
@@ -55,8 +57,17 @@ impl SyncClient {
         registry: Registry,
         scope: impl Into<String>,
     ) -> Result<Self, OrmError> {
+        Self::open_with_protocol(db, registry, scope.into(), false).await
+    }
+
+    /// Validate protocol ownership and initialize metadata in one transaction.
+    pub(crate) async fn open_with_protocol(
+        db: Database,
+        registry: Registry,
+        scope: String,
+        model_logs: bool,
+    ) -> Result<Self, OrmError> {
         registry.require_role(che_orm::ModelRole::Client)?;
-        let scope = scope.into();
         if scope.is_empty() {
             return Err(invalid("empty scope"));
         }
@@ -64,6 +75,35 @@ impl SyncClient {
         let replica_id = db
             .transaction(move |tx| {
                 Box::pin(async move {
+                    let protocol = meta::<u32>(tx, "model_log_protocol").await?;
+                    if model_logs {
+                        use crate::model_log::MODEL_LOG_PROTOCOL;
+                        if let Some(protocol) = protocol {
+                            if protocol != MODEL_LOG_PROTOCOL {
+                                return Err(invalid("incompatible local model-log protocol"));
+                            }
+                        } else {
+                            if !tx
+                                .query_sql("SELECT operation_id FROM _sync_outbox LIMIT 1", vec![])
+                                .await?
+                                .is_empty()
+                                || !tx
+                                    .query_sql(
+                                        "SELECT key FROM _sync_meta WHERE key LIKE 'cursor%' LIMIT 1",
+                                        vec![],
+                                    )
+                                    .await?
+                                    .is_empty()
+                            {
+                                return Err(invalid(
+                                    "settle and explicitly migrate legacy sync data before switching protocols",
+                                ));
+                            }
+                            set_meta(tx, "model_log_protocol", &MODEL_LOG_PROTOCOL).await?;
+                        }
+                    } else if protocol.is_some() {
+                        return Err(invalid("client database belongs to the model-log protocol"));
+                    }
                     if let Some(existing) = meta::<String>(tx, "scope").await? {
                         if existing != expected {
                             return Err(invalid("client database belongs to another scope"));
@@ -433,7 +473,12 @@ impl SyncClient {
         self.finish_result(pending, result, false).await
     }
 
-    pub(crate) async fn finish_result(&self, pending: Pending, result: PushResult, allow_noop: bool) -> Result<(), OrmError> {
+    pub(crate) async fn finish_result(
+        &self,
+        pending: Pending,
+        result: PushResult,
+        allow_noop: bool,
+    ) -> Result<(), OrmError> {
         let _guard = self.writes.lock().await;
         let registry = self.registry.clone();
         self.db
@@ -488,7 +533,10 @@ impl SyncClient {
                         if remote.revision < current_shadow.revision {
                             return Err(invalid("stale push response"));
                         }
-                        if accepted && (remote.revision < current_shadow.revision || (!allow_noop && remote.revision == current_shadow.revision)) {
+                        if accepted
+                            && (remote.revision < current_shadow.revision
+                                || (!allow_noop && remote.revision == current_shadow.revision))
+                        {
                             return Err(invalid("accepted operation did not advance revision"));
                         }
                         // The sole shadow is frozen until this request finishes.
@@ -678,63 +726,159 @@ impl SyncClient {
         })).await
     }
 
-    pub(crate) async fn apply_model_changes(&self, page: crate::model_log::ModelChanges) -> Result<bool, OrmError> {
+    pub(crate) async fn apply_model_changes(
+        &self,
+        page: crate::model_log::ModelChanges,
+    ) -> Result<bool, OrmError> {
         use crate::model_log::{ChangeKind, ModelState};
         let _guard = self.writes.lock().await;
         let registry = self.registry.clone();
-        self.db.transaction(move |tx| Box::pin(async move {
-            let d = registry.get(&page.model)?;
-            let key = cursor_key(Some(&page.model));
-            let previous = meta::<Cursor>(tx, &key).await?;
-            let after = previous.as_ref().map_or(0, |cursor| cursor.sequence);
-            if page.next_cursor < after || previous.as_ref().is_some_and(|cursor| cursor.epoch != page.history) { return Err(invalid("model journal history changed or cursor moved backwards")); }
-            let mut last = after;
-            for operation in &page.operations {
-                if operation.id <= last || operation.schema_version != d.version || operation.revision <= 0 { return Err(invalid("invalid model journal order or version")); }
-                last = operation.id;
-            }
-            if last != page.next_cursor || (page.has_more && page.operations.is_empty()) { return Err(invalid("model cursor does not match page")); }
-            let incoming: EntityKeys = page.operations.iter().map(|operation| (page.model.clone(), operation.record_id)).collect();
-            let dependencies = entity_dependencies(tx, &registry, &incoming).await?;
-            for pending in pending_operations(tx).await? {
-                let frozen = operation_dependencies(tx, &registry, &pending.request.operation).await?;
-                let keys: EntityKeys = pending.request.operation.mutations.iter().map(|mutation| (mutation.model.clone(), mutation.id)).collect();
-                if !incoming.is_disjoint(&frozen) || !keys.is_disjoint(&dependencies) { return Ok(false); }
-            }
-            for operation in &page.operations {
-                let old = shadow(tx, d, operation.record_id).await?;
-                if operation.revision <= old.revision { continue; } // Already acknowledged by a write response.
-                let baseline = registry.model_state(&old)?;
-                if operation.kind != ChangeKind::Create && old.revision > 0 && operation.revision != old.revision + 1 { return Err(invalid("missing object revision in journal")); }
-                if operation.kind == ChangeKind::Update && baseline.values.is_none() { return Err(invalid("update journal omitted its create baseline")); }
-                let mut values = if operation.kind == ChangeKind::Create { serde_json::Map::new() } else { baseline.values.clone().unwrap_or_default() };
-                let mut nulls = baseline.sql_null_fields.clone();
-                let mut seen = std::collections::HashSet::new();
-                for change in &operation.diff {
-                    let field = d.field(&change.field)?;
-                    if d.service_column(field.column) || !seen.insert(&change.field) { return Err(invalid("duplicate or infrastructure journal field")); }
-                    if old.revision > 0 && operation.kind != ChangeKind::Create && (change.old_value.as_ref() != baseline.values.as_ref().and_then(|values| values.get(&change.field)) || change.old_sql_null != baseline.sql_null_fields.contains(&change.field)) { return Err(invalid("journal old value does not match confirmed state")); }
-                    match operation.kind {
-                        ChangeKind::Create if change.old_value.is_some() || change.new_value.is_none() => return Err(invalid("invalid create diff")),
-                        ChangeKind::Update if change.old_value.is_none() || change.new_value.is_none() => return Err(invalid("invalid update diff")),
-                        ChangeKind::Delete if change.new_value.is_some() => return Err(invalid("invalid delete diff")),
-                        _ => {}
+        self.db
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    let d = registry.get(&page.model)?;
+                    let key = cursor_key(Some(&page.model));
+                    let previous = meta::<Cursor>(tx, &key).await?;
+                    let after = previous.as_ref().map_or(0, |cursor| cursor.sequence);
+                    if page.next_cursor < after
+                        || previous
+                            .as_ref()
+                            .is_some_and(|cursor| cursor.epoch != page.history)
+                    {
+                        return Err(invalid(
+                            "model journal history changed or cursor moved backwards",
+                        ));
                     }
-                    if let Some(value) = &change.new_value { values.insert(change.field.clone(), value.clone()); }
-                    nulls.retain(|name| name != &change.field);
-                    if change.new_sql_null { nulls.push(change.field.clone()); }
-                }
-                let state = ModelState { model: page.model.clone(), record_id: operation.record_id, revision: operation.revision, schema_version: operation.schema_version,
-                    values: (operation.kind != ChangeKind::Delete).then_some(values), sql_null_fields: nulls,
-                    updated_at: Some(operation.created_at), deleted_at: (operation.kind == ChangeKind::Delete).then_some(operation.created_at) };
-                let entity = registry.model_entity(&state, Some(page.history))?;
-                let updates = reconcile(tx, &registry, vec![entity]).await?;
-                apply_updates(tx, &registry, updates).await?;
-            }
-            retry_blocked(tx, &registry).await?;
-            set_meta(tx, &key, &Cursor { scope: crate::model_log::MODEL_LOG_SCOPE.into(), model: Some(page.model), epoch: page.history, sequence: page.next_cursor }).await?;
-            Ok(true)
-        })).await
+                    let mut last = after;
+                    for operation in &page.operations {
+                        if operation.id <= last
+                            || operation.schema_version != d.version
+                            || operation.revision <= 0
+                        {
+                            return Err(invalid("invalid model journal order or version"));
+                        }
+                        last = operation.id;
+                    }
+                    if last != page.next_cursor || (page.has_more && page.operations.is_empty()) {
+                        return Err(invalid("model cursor does not match page"));
+                    }
+                    let incoming: EntityKeys = page
+                        .operations
+                        .iter()
+                        .map(|operation| (page.model.clone(), operation.record_id))
+                        .collect();
+                    let dependencies = entity_dependencies(tx, &registry, &incoming).await?;
+                    for pending in pending_operations(tx).await? {
+                        let frozen =
+                            operation_dependencies(tx, &registry, &pending.request.operation)
+                                .await?;
+                        let keys: EntityKeys = pending
+                            .request
+                            .operation
+                            .mutations
+                            .iter()
+                            .map(|mutation| (mutation.model.clone(), mutation.id))
+                            .collect();
+                        if !incoming.is_disjoint(&frozen) || !keys.is_disjoint(&dependencies) {
+                            return Ok(false);
+                        }
+                    }
+                    for operation in &page.operations {
+                        let old = shadow(tx, d, operation.record_id).await?;
+                        if operation.revision <= old.revision {
+                            continue;
+                        } // Already acknowledged by a write response.
+                        let baseline = registry.model_state(&old)?;
+                        if operation.kind != ChangeKind::Create
+                            && old.revision > 0
+                            && operation.revision != old.revision + 1
+                        {
+                            return Err(invalid("missing object revision in journal"));
+                        }
+                        if operation.kind == ChangeKind::Update && baseline.values.is_none() {
+                            return Err(invalid("update journal omitted its create baseline"));
+                        }
+                        let mut values = if operation.kind == ChangeKind::Create {
+                            serde_json::Map::new()
+                        } else {
+                            baseline.values.clone().unwrap_or_default()
+                        };
+                        let mut nulls = baseline.sql_null_fields.clone();
+                        let mut seen = std::collections::HashSet::new();
+                        for change in &operation.diff {
+                            let field = d.field(&change.field)?;
+                            if d.service_column(field.column) || !seen.insert(&change.field) {
+                                return Err(invalid("duplicate or infrastructure journal field"));
+                            }
+                            if old.revision > 0
+                                && operation.kind != ChangeKind::Create
+                                && (change.old_value.as_ref()
+                                    != baseline
+                                        .values
+                                        .as_ref()
+                                        .and_then(|values| values.get(&change.field))
+                                    || change.old_sql_null
+                                        != baseline.sql_null_fields.contains(&change.field))
+                            {
+                                return Err(invalid(
+                                    "journal old value does not match confirmed state",
+                                ));
+                            }
+                            match operation.kind {
+                                ChangeKind::Create
+                                    if change.old_value.is_some() || change.new_value.is_none() =>
+                                {
+                                    return Err(invalid("invalid create diff"));
+                                }
+                                ChangeKind::Update
+                                    if change.old_value.is_none() || change.new_value.is_none() =>
+                                {
+                                    return Err(invalid("invalid update diff"));
+                                }
+                                ChangeKind::Delete if change.new_value.is_some() => {
+                                    return Err(invalid("invalid delete diff"));
+                                }
+                                _ => {}
+                            }
+                            if let Some(value) = &change.new_value {
+                                values.insert(change.field.clone(), value.clone());
+                            }
+                            nulls.retain(|name| name != &change.field);
+                            if change.new_sql_null {
+                                nulls.push(change.field.clone());
+                            }
+                        }
+                        let state = ModelState {
+                            model: page.model.clone(),
+                            record_id: operation.record_id,
+                            revision: operation.revision,
+                            schema_version: operation.schema_version,
+                            values: (operation.kind != ChangeKind::Delete).then_some(values),
+                            sql_null_fields: nulls,
+                            updated_at: Some(operation.created_at),
+                            deleted_at: (operation.kind == ChangeKind::Delete)
+                                .then_some(operation.created_at),
+                        };
+                        let entity = registry.model_entity(&state, Some(page.history))?;
+                        let updates = reconcile(tx, &registry, vec![entity]).await?;
+                        apply_updates(tx, &registry, updates).await?;
+                    }
+                    retry_blocked(tx, &registry).await?;
+                    set_meta(
+                        tx,
+                        &key,
+                        &Cursor {
+                            scope: crate::model_log::MODEL_LOG_SCOPE.into(),
+                            model: Some(page.model),
+                            epoch: page.history,
+                            sequence: page.next_cursor,
+                        },
+                    )
+                    .await?;
+                    Ok(true)
+                })
+            })
+            .await
     }
 
     pub(crate) async fn feed_status(
@@ -1381,7 +1525,8 @@ async fn protect_dependencies(
                 index
             } else {
                 let remote = shadow(tx, registry.get(&child.model)?, child.id).await?;
-                let deferred_model_page = meta::<u32>(tx, "model_log_protocol").await? == Some(crate::model_log::MODEL_LOG_PROTOCOL)
+                let deferred_model_page = meta::<u32>(tx, "model_log_protocol").await?
+                    == Some(crate::model_log::MODEL_LOG_PROTOCOL)
                     && remote.record.as_ref() == Some(&child.record);
                 // The child may already have a field, rejection or deletion
                 // conflict. Its original base is no longer in shadow after a
@@ -1394,7 +1539,11 @@ async fn protect_dependencies(
                         base: remote.record.clone(),
                         local: Some(child.record.clone()),
                         remote: remote.clone(),
-                        fields: if deferred_model_page { vec![] } else { vec!["$entity".into()] },
+                        fields: if deferred_model_page {
+                            vec![]
+                        } else {
+                            vec!["$entity".into()]
+                        },
                         reason: Some(REFERENTIAL_CONFLICT.into()),
                         retryable: deferred_model_page,
                         acknowledgement: None,

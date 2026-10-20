@@ -545,10 +545,10 @@ impl Transaction {
             }
             (_, ast) => ast,
         };
-        if let Some(runtime) = &self.runtime {
-            if write_table(&ast).is_some_and(|table| runtime.role(table).is_some()) {
-                return Ok(runtime.write(self, ast).await?.result);
-            }
+        if let Some(runtime) = &self.runtime
+            && write_table(&ast).is_some_and(|table| runtime.role(table).is_some())
+        {
+            return Ok(runtime.write(self, ast).await?.result);
         }
         self.session
             .execute(SqlCompiler::<CurrentDialect>::compile(&ast))
@@ -644,10 +644,10 @@ impl Transaction {
     }
     async fn rows(&self, ast: QueryAst) -> Result<Vec<Row>, OrmError> {
         ast.validate()?;
-        if let Some(runtime) = &self.runtime {
-            if write_table(&ast).is_some_and(|table| runtime.role(table).is_some()) {
-                return Ok(runtime.write(self, ast).await?.rows);
-            }
+        if let Some(runtime) = &self.runtime
+            && write_table(&ast).is_some_and(|table| runtime.role(table).is_some())
+        {
+            return Ok(runtime.write(self, ast).await?.rows);
         }
         let ast = match &self.runtime {
             Some(runtime) => {

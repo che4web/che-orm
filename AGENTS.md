@@ -169,6 +169,14 @@ Keep client writes/outbox and server writes/journal/receipts transactional.
 ImageField mappings must be server-owned; the Model derive exposes protected
 columns to sync registration. See `docs/sync.md` for ownership and scope contracts.
 
+`ModelLogClient` and `SyncServer::open_model_logs` implement protocol 2 with
+independent model journals and whole-model authorization. Protocol ownership,
+scope and replica metadata initialize atomically; failed opens must leave legacy
+metadata/outbox payloads unchanged. Legacy `SyncClient` must reject a protocol-2
+database. Existing records require explicit `backfill_model_log`; never backfill
+at startup or GET. `che-sync/tests/model_log.rs` and `model_log_postgres.rs` cover
+the journal contract; che-rest owns HTTP, effect workers and migration guidance.
+
 ## Verification
 
 Run these commands after code changes:
@@ -188,7 +196,7 @@ cargo test -p che-orm --no-default-features --features postgres
 cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
 cargo test -p che-sync --no-default-features --features postgres
 cargo test -p che-sync --no-default-features --features postgres --test runtime -- --ignored
-cargo test -p che-sync --no-default-features --features postgres --test model_roles -- --ignored
+cargo test -p che-sync --no-default-features --features postgres --test model_roles --test model_log_postgres -- --ignored
 ```
 
 The explicit runtime test requires TEST_POSTGRES_URL and a live PostgreSQL

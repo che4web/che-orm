@@ -251,14 +251,13 @@ impl TableSchema {
 impl SchemaSet {
     /// Validates every registered table and rejects duplicate table names.
     pub fn validate(&self) -> Result<(), SchemaError> {
-        if let Some(first) = self.sync_models.first() {
-            if self
+        if let Some(first) = self.sync_models.first()
+            && self
                 .sync_models
                 .iter()
                 .any(|model| model.role != first.role)
-            {
-                return Err(SchemaError::IncompatibleSyncRoles);
-            }
+        {
+            return Err(SchemaError::IncompatibleSyncRoles);
         }
         let mut tables = std::collections::HashSet::new();
         for table in &self.tables {

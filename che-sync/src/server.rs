@@ -372,8 +372,15 @@ impl SyncServer {
     }
     /// Final serializer/domain rejection. Shares receipt locking and replay with
     /// accepted writes, so an already committed identical request always wins.
-    pub async fn reject_rest(&self, request: PushRequest, identity: String, reason: String) -> Result<PushResult, OrmError> {
-        self.push_transaction(request, true, None, vec![], Some(identity), Some(reason)).await.map(|(result, _)| result)
+    pub async fn reject_rest(
+        &self,
+        request: PushRequest,
+        identity: String,
+        reason: String,
+    ) -> Result<PushResult, OrmError> {
+        self.push_transaction(request, true, None, vec![], Some(identity), Some(reason))
+            .await
+            .map(|(result, _)| result)
     }
     pub async fn acknowledge_effect(&self, id: Uuid) -> Result<(), OrmError> {
         self.db
@@ -401,15 +408,14 @@ impl SyncServer {
         if request.operation.mutations.is_empty() {
             return Err(invalid("empty operation"));
         }
-        if let Some(model) = &self.model {
-            if request
+        if let Some(model) = &self.model
+            && request
                 .operation
                 .mutations
                 .iter()
                 .any(|m| &m.model != model)
-            {
-                return Err(invalid("operation contains a model outside this feed"));
-            }
+        {
+            return Err(invalid("operation contains a model outside this feed"));
         }
         let server = self.clone();
         // READ COMMITTED plus a scope row lock yields commit-ordered groups in
@@ -602,10 +608,10 @@ impl SyncServer {
                     .values
                     .iter()
                     .find_map(|v| {
-                        if v.column.name == d.primary {
-                            if let D::Uuid(id) = v.value {
-                                return Some(id);
-                            }
+                        if v.column.name == d.primary
+                            && let D::Uuid(id) = v.value
+                        {
+                            return Some(id);
                         }
                         None
                     })
@@ -978,13 +984,12 @@ impl che_orm::ModelRuntime for SyncServer {
     }
 
     fn authorize_read(&self, ast: &che_orm::QueryAst) -> Result<(), OrmError> {
-        if let che_orm::QueryAst::Select(select) = ast {
-            if std::iter::once(select.table.name)
+        if let che_orm::QueryAst::Select(select) = ast
+            && std::iter::once(select.table.name)
                 .chain(select.joins.iter().map(|join| join.table.name))
                 .any(|table| self.registry.models.iter().any(|d| d.schema.name == table))
-            {
-                self.policy.authorize_scope(&self.principal, &self.scope)?;
-            }
+        {
+            self.policy.authorize_scope(&self.principal, &self.scope)?;
         }
         Ok(())
     }
@@ -1138,19 +1143,14 @@ impl SyncServer {
             Box::pin(async move {
                 let mutation = &plan[index];
                 let d = server.registry.get(&mutation.model)?;
-                if mutation.changes.is_some() {
+                if let Some(changes) = &mutation.changes {
                     if server.model_logs
                         && let Some(current) = read(tx, d, mutation.id, false).await?
-                    {
-                        if mutation
-                            .changes
-                            .as_ref()
-                            .unwrap()
+                        && changes
                             .iter()
                             .all(|(field, value)| current.get(field) == Some(value))
-                        {
-                            return Ok(());
-                        }
+                    {
+                        return Ok(());
                     }
                     apply_patch(tx, d, mutation).await
                 } else {

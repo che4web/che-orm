@@ -39,20 +39,19 @@ impl Registry {
         self.require_role(role)
             .map_err(|error| MigrationError::InvalidState(error.to_string()))?;
         for operation in self.migration_operations(role) {
-            if let MigrationOperation::CreateModel { model } = &operation {
-                if let Some(existing) = state
+            if let MigrationOperation::CreateModel { model } = &operation
+                && let Some(existing) = state
                     .models()
                     .iter()
                     .find(|existing| existing.key == model.key)
-                {
-                    if existing != model {
-                        return Err(MigrationError::InvalidState(format!(
-                            "sync schema mismatch for {:?}",
-                            model.key
-                        )));
-                    }
-                    continue;
+            {
+                if existing != model {
+                    return Err(MigrationError::InvalidState(format!(
+                        "sync schema mismatch for {:?}",
+                        model.key
+                    )));
                 }
+                continue;
             }
             operation.state_forwards(state)?;
         }

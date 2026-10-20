@@ -144,14 +144,13 @@ impl<T: SyncTransport> SyncEngine<T> {
             let (conflicts, _, blocked) = self.client.feed_status(self.model.as_deref()).await?;
             report.conflicts = conflicts;
             report.blocked = blocked || conflicts > 0;
-            if !report.blocked {
-                if let Some(pending) = self
+            if !report.blocked
+                && let Some(pending) = self
                     .client
                     .prepare(self.model.as_deref(), self.transport.max_mutations())
                     .await?
-                {
-                    self.send_pending(pending, &mut report).await?;
-                }
+            {
+                self.send_pending(pending, &mut report).await?;
             }
         }
         let (conflicts, dirty, blocked) = self.client.feed_status(self.model.as_deref()).await?;
@@ -190,15 +189,15 @@ impl<T: SyncTransport> SyncEngine<T> {
             self.send_pending(pending, &mut report).await?;
         }
         self.receive(&mut report, true).await?;
-        if !report.blocked && !report.has_more {
-            if let Some(pending) = self
+        if !report.blocked
+            && !report.has_more
+            && let Some(pending) = self
                 .client
                 .prepare(self.model.as_deref(), self.transport.max_mutations())
                 .await?
-            {
-                self.send_pending(pending, &mut report).await?;
-                report.has_more = true;
-            }
+        {
+            self.send_pending(pending, &mut report).await?;
+            report.has_more = true;
         }
         let (conflicts, dirty, blocked) = self.client.feed_status(self.model.as_deref()).await?;
         report.conflicts = conflicts;
@@ -328,10 +327,10 @@ impl<T: SyncTransport> SyncEngine<T> {
         if snapshot.cursor.scope != self.client.scope || snapshot.cursor.sequence < 0 {
             return Err(invalid("invalid snapshot cursor"));
         }
-        if let Some(previous) = self.client.cursor(self.model.as_deref()).await? {
-            if previous.epoch != snapshot.cursor.epoch {
-                return Err(invalid("server database replacement is not supported"));
-            }
+        if let Some(previous) = self.client.cursor(self.model.as_deref()).await?
+            && previous.epoch != snapshot.cursor.epoch
+        {
+            return Err(invalid("server database replacement is not supported"));
         }
         report.received_changes += snapshot.entities.len();
         if !self

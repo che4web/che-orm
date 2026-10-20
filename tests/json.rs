@@ -1,8 +1,7 @@
 use che_orm::serde_json::json;
-use che_orm::{
-    DatabaseValue, FromDatabaseValue, JsonField, Model, ModelSerializer, ModelWriteSerializer,
-    WriteMode,
-};
+use che_orm::{DatabaseValue, FromDatabaseValue, JsonField, Model, ModelSerializer};
+#[cfg(feature = "sqlite")]
+use che_orm::{ModelWriteSerializer, WriteMode};
 
 #[derive(Debug, Model)]
 #[orm(table = "json_records")]

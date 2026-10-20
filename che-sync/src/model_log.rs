@@ -229,12 +229,41 @@ pub(crate) async fn lock_logs(tx: &Transaction, registry: &Registry) -> Result<(
     Ok(())
 }
 
-pub(crate) async fn require_baselines(tx: &Transaction, registry: &Registry) -> Result<(), OrmError> {
+pub(crate) async fn require_baselines(
+    tx: &Transaction,
+    registry: &Registry,
+) -> Result<(), OrmError> {
     for d in registry.models.iter() {
-        let state = tx.query_sql(format!("SELECT sequence FROM {} WHERE key = 0", quote(&d.log_state_table())), vec![]).await?;
-        if state.first().ok_or_else(|| invalid("uninitialized model log"))?.get::<i64>(0)? == 0
-            && !tx.query_sql(format!("SELECT {} FROM {} LIMIT 1", quote(d.primary), quote(d.schema.name)), vec![]).await?.is_empty() {
-            return Err(invalid(format!("{} requires explicit model journal backfill", d.name)));
+        let state = tx
+            .query_sql(
+                format!(
+                    "SELECT sequence FROM {} WHERE key = 0",
+                    quote(&d.log_state_table())
+                ),
+                vec![],
+            )
+            .await?;
+        if state
+            .first()
+            .ok_or_else(|| invalid("uninitialized model log"))?
+            .get::<i64>(0)?
+            == 0
+            && !tx
+                .query_sql(
+                    format!(
+                        "SELECT {} FROM {} LIMIT 1",
+                        quote(d.primary),
+                        quote(d.schema.name)
+                    ),
+                    vec![],
+                )
+                .await?
+                .is_empty()
+        {
+            return Err(invalid(format!(
+                "{} requires explicit model journal backfill",
+                d.name
+            )));
         }
     }
     Ok(())

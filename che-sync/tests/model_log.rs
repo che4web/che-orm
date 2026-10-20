@@ -237,3 +237,707 @@ async fn pagination_uses_model_operation_ids() {
     assert_eq!(second.next_cursor, 4);
     assert!(server.changes::<Task>(5, 2).await.is_err());
 }
+
+#[tokio::test]
+async fn missing_parent_defers_projection_but_keeps_latest_state_and_cursor() {
+    use che_sync::ModelLogClient;
+    let server = server(database(false).await).await;
+    let parent = Uuid::now_v7();
+    let child = Uuid::now_v7();
+    server.write(insert(parent, "parent")).await.unwrap();
+    server
+        .write(ValidatedWrite::Create(
+            Child::insert()
+                .set(Child::ID, child)
+                .set(Child::TASK_ID, parent)
+                .set(Child::LABEL, "first"),
+        ))
+        .await
+        .unwrap();
+    let db = database(true).await;
+    let client = ModelLogClient::open(db.clone(), registry(true))
+        .await
+        .unwrap();
+    assert!(
+        client
+            .apply(server.changes::<Child>(0, 100).await.unwrap())
+            .await
+            .unwrap()
+    );
+    assert_eq!(client.cursor::<Child>().await.unwrap(), 1);
+    assert!(
+        client
+            .database()
+            .get::<Child>(child)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let conflicts = client.conflicts().await.unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert!(conflicts[0].retryable);
+    server
+        .write(ValidatedWrite::Update(
+            Child::update()
+                .filter(Child::ID.eq(child))
+                .set(Child::LABEL, "latest"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        client
+            .apply(server.changes::<Child>(1, 100).await.unwrap())
+            .await
+            .unwrap()
+    );
+    assert_eq!(client.cursor::<Child>().await.unwrap(), 2);
+    drop(client);
+    let client = ModelLogClient::open(db, registry(true)).await.unwrap();
+    assert_eq!(client.cursor::<Child>().await.unwrap(), 2);
+    assert!(
+        client
+            .apply(server.changes::<Task>(0, 100).await.unwrap())
+            .await
+            .unwrap()
+    );
+    let projected = client
+        .database()
+        .get::<Child>(child)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(projected.label, "latest");
+    assert_eq!(projected.task_id, parent);
+    assert!(client.conflicts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_operation_rolls_back_the_entire_page_and_cursor() {
+    use che_sync::ModelLogClient;
+    let server = server(database(false).await).await;
+    let id = Uuid::now_v7();
+    server.write(insert(id, "first")).await.unwrap();
+    server
+        .write(ValidatedWrite::Update(
+            Task::update()
+                .filter(Task::ID.eq(id))
+                .set(Task::TITLE, "second"),
+        ))
+        .await
+        .unwrap();
+    let page = server.changes::<Task>(0, 100).await.unwrap();
+    let mut invalid = page.clone();
+    invalid.operations[1].diff[0].old_value = Some(json!("wrong baseline"));
+    let client = ModelLogClient::open(database(true).await, registry(true))
+        .await
+        .unwrap();
+    assert!(client.apply(invalid).await.is_err());
+    assert_eq!(client.cursor::<Task>().await.unwrap(), 0);
+    assert!(client.database().get::<Task>(id).await.unwrap().is_none());
+    assert!(client.conflicts().await.unwrap().is_empty());
+    assert!(client.apply(page).await.unwrap());
+    assert_eq!(client.cursor::<Task>().await.unwrap(), 2);
+    assert_eq!(
+        client
+            .database()
+            .get::<Task>(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "second"
+    );
+}
+
+#[tokio::test]
+async fn existing_rows_require_explicit_backfill_preserving_revisions() {
+    use che_orm::DatabaseValue as D;
+    let db = database(false).await;
+    let id = Uuid::now_v7();
+    insert(id, "existing").save(&db).await.unwrap();
+    db.execute_sql(
+        "UPDATE journal_tasks SET revision = 7 WHERE id = $1",
+        vec![D::Uuid(id)],
+    )
+    .await
+    .unwrap();
+    let server = server(db.clone()).await;
+    assert!(server.changes::<Task>(0, 100).await.is_err());
+    assert!(
+        server
+            .write(insert(Uuid::now_v7(), "blocked"))
+            .await
+            .is_err()
+    );
+    assert!(
+        db.query_sql("SELECT id FROM journal_tasks_sync_log", vec![])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(server.backfill_model_log::<Task>().await.unwrap(), 1);
+    let page = server.changes::<Task>(0, 100).await.unwrap();
+    assert_eq!(page.operations.len(), 1);
+    assert_eq!(page.operations[0].revision, 7);
+    assert_eq!(page.operations[0].kind, ChangeKind::Create);
+    assert_eq!(page.operations[0].record_id, id);
+    assert!(server.backfill_model_log::<Task>().await.is_err());
+    server
+        .write(ValidatedWrite::Update(
+            Task::update()
+                .filter(Task::ID.eq(id))
+                .set(Task::TITLE, "after baseline"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        server.changes::<Task>(1, 100).await.unwrap().operations[0].revision,
+        8
+    );
+}
+
+#[tokio::test]
+async fn incompatible_legacy_scope_backfill_rolls_back_every_row() {
+    use che_orm::DatabaseValue as D;
+    let db = database(false).await;
+    let first = Uuid::from_u128(1);
+    let second = Uuid::from_u128(2);
+    insert(first, "unscoped").save(&db).await.unwrap();
+    insert(second, "legacy").save(&db).await.unwrap();
+    db.execute_sql(
+        "UPDATE journal_tasks SET sync_scope = 'legacy-board', revision = 9 WHERE id = $1",
+        vec![D::Uuid(second)],
+    )
+    .await
+    .unwrap();
+    let before = db
+        .query_sql(
+            "SELECT revision, sync_scope, updated_at FROM journal_tasks ORDER BY id",
+            vec![],
+        )
+        .await
+        .unwrap();
+    let server = server(db.clone()).await;
+    assert!(
+        server
+            .backfill_model_log::<Task>()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("legacy scope migration")
+    );
+    let after = db
+        .query_sql(
+            "SELECT revision, sync_scope, updated_at FROM journal_tasks ORDER BY id",
+            vec![],
+        )
+        .await
+        .unwrap();
+    for (before, after) in before.iter().zip(after.iter()) {
+        assert_eq!(before.get::<i64>(0).unwrap(), after.get::<i64>(0).unwrap());
+        assert_eq!(
+            before.get::<String>(1).unwrap(),
+            after.get::<String>(1).unwrap()
+        );
+        assert_eq!(
+            before.get::<che_orm::time::OffsetDateTime>(2).unwrap(),
+            after.get::<che_orm::time::OffsetDateTime>(2).unwrap()
+        );
+    }
+    assert!(
+        db.query_sql("SELECT id FROM journal_tasks_sync_log", vec![])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(server.changes::<Task>(0, 100).await.is_err());
+}
+
+#[tokio::test]
+async fn opening_model_client_over_legacy_database_does_not_modify_metadata() {
+    use che_sync::{ModelLogClient, SyncClient};
+    let db = database(true).await;
+    let _legacy = SyncClient::open(db.clone(), registry(true), "legacy-board")
+        .await
+        .unwrap();
+    let metadata = || async {
+        db.query_sql("SELECT key, value FROM _sync_meta ORDER BY key", vec![])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get::<String>(0).unwrap(), row.get::<String>(1).unwrap()))
+            .collect::<Vec<_>>()
+    };
+    let before = metadata().await;
+    assert!(
+        ModelLogClient::open(db.clone(), registry(true))
+            .await
+            .is_err()
+    );
+    assert_eq!(metadata().await, before);
+}
+
+#[tokio::test]
+async fn failed_protocol_switch_leaves_legacy_request_settleable() {
+    use che_sync::{
+        ModelLogClient, SyncClient, SyncEngine, SyncTransport, TransportFuture, protocol::*,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct LostReply {
+        server: SyncServer,
+        lose: AtomicBool,
+    }
+    impl SyncTransport for LostReply {
+        fn push(&self, request: PushRequest) -> TransportFuture<'_, PushResult> {
+            Box::pin(async move {
+                let result = self.server.push(request).await?;
+                if self.lose.swap(false, Ordering::SeqCst) {
+                    Err(che_orm::OrmError::Interaction("lost reply".into()))
+                } else {
+                    Ok(result)
+                }
+            })
+        }
+        fn pull(&self, request: PullRequest) -> TransportFuture<'_, PullResult> {
+            Box::pin(self.server.pull(request))
+        }
+        fn snapshot(&self) -> TransportFuture<'_, Snapshot> {
+            Box::pin(self.server.snapshot())
+        }
+    }
+    let legacy = SyncServer::open(
+        database(false).await,
+        registry(false),
+        "legacy-board",
+        "user",
+        Arc::new(AllowAll),
+    )
+    .await
+    .unwrap();
+    let db = database(true).await;
+    let client = SyncClient::open(db.clone(), registry(true), "legacy-board")
+        .await
+        .unwrap();
+    let engine = SyncEngine::new(
+        client.clone(),
+        LostReply {
+            server: legacy,
+            lose: AtomicBool::new(true),
+        },
+    );
+    engine.full_load().await.unwrap();
+    let id = Uuid::now_v7();
+    client
+        .save(&Task {
+            id,
+            title: "pending".into(),
+            document: che_orm::JsonField(json!({})),
+            optional_document: None,
+            number: i64::MAX,
+        })
+        .await
+        .unwrap();
+    assert!(engine.flush().await.is_err());
+    let pending = db
+        .query_sql("SELECT payload FROM _sync_outbox", vec![])
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    let payload = pending[0].get::<String>(0).unwrap();
+    assert!(
+        ModelLogClient::open(db.clone(), registry(true))
+            .await
+            .is_err()
+    );
+    let pending = db
+        .query_sql("SELECT payload FROM _sync_outbox", vec![])
+        .await
+        .unwrap();
+    assert_eq!(pending[0].get::<String>(0).unwrap(), payload);
+    assert_eq!(engine.flush().await.unwrap().accepted_operations, 1);
+    assert!(
+        db.query_sql("SELECT payload FROM _sync_outbox", vec![])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db.query_sql(
+            "SELECT value FROM _sync_meta WHERE key = 'model_log_protocol'",
+            vec![]
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn model_protocol_ownership_and_failed_initialization_are_atomic() {
+    use che_orm::DatabaseValue as D;
+    use che_sync::{ModelLogClient, SyncClient};
+    let db = database(true).await;
+    // Replica decoding fails after the scope/protocol initialization attempts.
+    db.execute_sql(
+        "INSERT INTO _sync_meta (key, value) VALUES ('replica_id', $1)",
+        vec![D::Text("invalid JSON".into())],
+    )
+    .await
+    .unwrap();
+    assert!(
+        ModelLogClient::open(db.clone(), registry(true))
+            .await
+            .is_err()
+    );
+    let rows = db
+        .query_sql("SELECT key FROM _sync_meta ORDER BY key", vec![])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<String>(0).unwrap(), "replica_id");
+    db.execute_sql("DELETE FROM _sync_meta", vec![])
+        .await
+        .unwrap();
+    let _client = ModelLogClient::open(db.clone(), registry(true))
+        .await
+        .unwrap();
+    // Even the same internal scope cannot reinterpret v2 state as legacy.
+    assert!(
+        SyncClient::open(
+            db.clone(),
+            registry(true),
+            che_sync::model_log::MODEL_LOG_SCOPE
+        )
+        .await
+        .is_err()
+    );
+    assert!(ModelLogClient::open(db, registry(true)).await.is_ok());
+}
+
+#[tokio::test]
+async fn journal_gaps_are_applied_without_assuming_contiguous_ids() {
+    use che_sync::ModelLogClient;
+    let db = database(false).await;
+    let server = server(db.clone()).await;
+    let id = Uuid::now_v7();
+    server.write(insert(id, "first")).await.unwrap();
+    // A cursor is an ordered position, not a count of journal rows.
+    db.execute_sql(
+        "UPDATE journal_tasks_sync_log_state SET sequence = sequence + 4 WHERE key = 0",
+        vec![],
+    )
+    .await
+    .unwrap();
+    server
+        .write(ValidatedWrite::Update(
+            Task::update()
+                .filter(Task::ID.eq(id))
+                .set(Task::TITLE, "after gap"),
+        ))
+        .await
+        .unwrap();
+    let client = ModelLogClient::open(database(true).await, registry(true))
+        .await
+        .unwrap();
+    let first = server.changes::<Task>(0, 1).await.unwrap();
+    assert!(first.has_more);
+    assert_eq!(first.next_cursor, 1);
+    client.apply(first).await.unwrap();
+    let second = server
+        .changes::<Task>(client.cursor::<Task>().await.unwrap(), 1)
+        .await
+        .unwrap();
+    assert_eq!(second.next_cursor, 6);
+    assert!(!second.has_more);
+    client.apply(second).await.unwrap();
+    assert_eq!(client.cursor::<Task>().await.unwrap(), 6);
+    assert_eq!(
+        client
+            .database()
+            .get::<Task>(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "after gap"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writers_and_paginated_reader_do_not_skip_commits() {
+    let server = server(database(false).await).await;
+    let mut writers = Vec::new();
+    for writer in 0..2 {
+        let server = server.clone();
+        writers.push(tokio::spawn(async move {
+            let mut ids = Vec::new();
+            for n in 0..20 {
+                let id = Uuid::now_v7();
+                server
+                    .write(insert(id, &format!("writer {writer}: {n}")))
+                    .await
+                    .unwrap();
+                ids.push(id);
+                tokio::task::yield_now().await;
+            }
+            ids
+        }));
+    }
+    let mut after = 0;
+    let mut downloaded = std::collections::BTreeSet::new();
+    loop {
+        // Check completion before the page so the final read includes all
+        // commits. Joining below also surfaces writer failures without spinning.
+        let finished = writers.iter().all(tokio::task::JoinHandle::is_finished);
+        let page = server.changes::<Task>(after, 3).await.unwrap();
+        for operation in &page.operations {
+            assert!(operation.id > after);
+            assert!(downloaded.insert(operation.record_id));
+        }
+        after = page.next_cursor;
+        if finished && !page.has_more {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let mut committed = std::collections::BTreeSet::new();
+    for writer in writers {
+        committed.extend(writer.await.unwrap());
+    }
+    assert_eq!(downloaded, committed);
+    assert_eq!(downloaded.len(), 40);
+    assert_eq!(after, 40);
+}
+
+#[tokio::test]
+async fn independent_fields_merge_and_overlapping_or_delete_edits_require_resolution() {
+    use che_sync::{ModelLogClient, Resolution};
+    let server = server(database(false).await).await;
+    let id = Uuid::now_v7();
+    server.write(insert(id, "base")).await.unwrap();
+    let client = ModelLogClient::open(database(true).await, registry(true))
+        .await
+        .unwrap();
+    client
+        .apply(server.changes::<Task>(0, 100).await.unwrap())
+        .await
+        .unwrap();
+    let mut local = client.database().get::<Task>(id).await.unwrap().unwrap();
+    local.title = "local edit".into();
+    client.save(&local).await.unwrap();
+    server
+        .write(ValidatedWrite::Update(
+            Task::update().filter(Task::ID.eq(id)).set(Task::NUMBER, 42),
+        ))
+        .await
+        .unwrap();
+    client
+        .apply(server.changes::<Task>(1, 100).await.unwrap())
+        .await
+        .unwrap();
+    let merged = client.database().get::<Task>(id).await.unwrap().unwrap();
+    assert_eq!(merged.title, "local edit");
+    assert_eq!(merged.number, 42);
+    assert!(client.conflicts().await.unwrap().is_empty());
+    server
+        .write(ValidatedWrite::Update(
+            Task::update()
+                .filter(Task::ID.eq(id))
+                .set(Task::TITLE, "remote edit"),
+        ))
+        .await
+        .unwrap();
+    client
+        .apply(server.changes::<Task>(2, 100).await.unwrap())
+        .await
+        .unwrap();
+    let conflicts = client.conflicts().await.unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].fields, vec!["title"]);
+    assert!(!conflicts[0].retryable);
+    assert_eq!(
+        client
+            .database()
+            .get::<Task>(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "local edit"
+    );
+    client
+        .resolve("tasks.task", id, Resolution::Remote)
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .database()
+            .get::<Task>(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "remote edit"
+    );
+    assert!(client.conflicts().await.unwrap().is_empty());
+    client.delete::<Task>(id).await.unwrap();
+    server
+        .write(ValidatedWrite::Update(
+            Task::update()
+                .filter(Task::ID.eq(id))
+                .set(Task::TITLE, "updated after local deletion"),
+        ))
+        .await
+        .unwrap();
+    client
+        .apply(server.changes::<Task>(3, 100).await.unwrap())
+        .await
+        .unwrap();
+    assert!(client.database().get::<Task>(id).await.unwrap().is_none());
+    let conflicts = client.conflicts().await.unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].fields, vec!["$entity"]);
+    assert!(conflicts[0].remote.record.is_some());
+    client
+        .resolve("tasks.task", id, Resolution::Remote)
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .database()
+            .get::<Task>(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "updated after local deletion"
+    );
+    assert!(client.conflicts().await.unwrap().is_empty());
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "typed_events", sync, sync_name = "events.event")]
+struct TypedEvent {
+    #[orm(primary_key)]
+    id: Uuid,
+    #[orm(db_column = "occurred", sync_name = "timestamp")]
+    happened_at: che_orm::time::OffsetDateTime,
+    number: i64,
+    document: Option<che_orm::JsonField>,
+}
+
+#[tokio::test]
+async fn typed_journal_round_trips_dates_json_scalars_sql_null_and_integer_extremes() {
+    use che_sync::ModelLogClient;
+    async fn setup(client: bool) -> (Database, Registry) {
+        let schema = if client {
+            SchemaSet::new().client_model::<TypedEvent>()
+        } else {
+            SchemaSet::new().server_model::<TypedEvent>()
+        };
+        let registry = Registry::from_schema(&schema).unwrap();
+        let state = ProjectState::from_app_schemas([("events", &schema)]).unwrap();
+        let db = Database::connect_in_memory().await.unwrap();
+        db.migrate(
+            MigrationGraph::new(vec![Migration::new(
+                MigrationId {
+                    app: "events".into(),
+                    name: "0001".into(),
+                },
+                vec![],
+                state
+                    .models()
+                    .iter()
+                    .cloned()
+                    .map(|model| MigrationOperation::CreateModel { model })
+                    .collect(),
+            )])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        (db, registry)
+    }
+    let (db, registry) = setup(false).await;
+    let server = SyncServer::open_model_logs(db, registry, "user", Arc::new(AllowAll))
+        .await
+        .unwrap();
+    let (db, registry) = setup(true).await;
+    let client = ModelLogClient::open(db, registry).await.unwrap();
+    let id = Uuid::now_v7();
+    let timestamp = che_orm::time::OffsetDateTime::parse(
+        "2026-10-20T08:09:10.123456789+05:00",
+        &che_orm::time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    server
+        .write(ValidatedWrite::Create(
+            TypedEvent::insert()
+                .set(TypedEvent::ID, id)
+                .set(TypedEvent::HAPPENED_AT, timestamp)
+                .set(TypedEvent::NUMBER, i64::MIN)
+                .set(TypedEvent::DOCUMENT, None::<che_orm::JsonField>),
+        ))
+        .await
+        .unwrap();
+    client
+        .apply(server.changes::<TypedEvent>(0, 100).await.unwrap())
+        .await
+        .unwrap();
+    let saved = client
+        .database()
+        .get::<TypedEvent>(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.happened_at, timestamp);
+    assert_eq!(saved.number, i64::MIN);
+    assert_eq!(saved.document, None);
+    for (index, value) in [
+        json!(null),
+        json!({"k":[1,true,null]}),
+        json!([false, "x"]),
+        json!(true),
+        json!("text"),
+        json!(42),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let after = client.cursor::<TypedEvent>().await.unwrap();
+        server
+            .write(ValidatedWrite::Update(
+                TypedEvent::update()
+                    .filter(TypedEvent::ID.eq(id))
+                    .set(TypedEvent::NUMBER, i64::MAX)
+                    .set(
+                        TypedEvent::DOCUMENT,
+                        Some(che_orm::JsonField(value.clone())),
+                    ),
+            ))
+            .await
+            .unwrap();
+        let page = server.changes::<TypedEvent>(after, 100).await.unwrap();
+        assert_eq!(page.operations.len(), 1);
+        let document = page.operations[0]
+            .diff
+            .iter()
+            .find(|diff| diff.field == "document")
+            .unwrap();
+        assert_eq!(document.new_value, Some(value.clone()));
+        assert!(!document.new_sql_null);
+        if index == 0 {
+            assert!(document.old_sql_null);
+        }
+        client.apply(page).await.unwrap();
+        let saved = client
+            .database()
+            .get::<TypedEvent>(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.document, Some(che_orm::JsonField(value)));
+        assert_eq!(saved.number, i64::MAX);
+        assert_eq!(saved.happened_at, timestamp);
+    }
+}

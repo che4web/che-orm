@@ -111,10 +111,10 @@ impl Descriptor {
             if matches!(value, Value::Real(v) if !v.is_finite()) {
                 return Err(invalid("non-finite real"));
             }
-            if let (Some(choices), Value::Text(value)) = (&column.choices, value) {
-                if !choices.contains(&value.as_str()) {
-                    return Err(invalid("invalid enum value"));
-                }
+            if let (Some(choices), Value::Text(value)) = (&column.choices, value)
+                && !choices.contains(&value.as_str())
+            {
+                return Err(invalid("invalid enum value"));
             }
             if column.primary_key && *value != Value::Uuid(id) {
                 return Err(invalid("primary key mismatch"));
@@ -326,19 +326,17 @@ impl Registry {
                         .unwrap();
                     if let (Some(fk), Some(crate::protocol::Value::Uuid(id))) =
                         (&column.references, record.get(field.name))
-                    {
-                        if fk
+                        && fk
                             .on_delete()
                             .is_some_and(|action| action.eq_ignore_ascii_case("cascade"))
-                        {
-                            let parent = self
-                                .models
-                                .iter()
-                                .find(|d| d.schema.name == fk.target_parts().unwrap().0)
-                                .unwrap();
-                            if deleted.contains(&(parent.name.to_owned(), *id)) {
-                                deleted.insert((entity.model.clone(), entity.id));
-                            }
+                    {
+                        let parent = self
+                            .models
+                            .iter()
+                            .find(|d| d.schema.name == fk.target_parts().unwrap().0)
+                            .unwrap();
+                        if deleted.contains(&(parent.name.to_owned(), *id)) {
+                            deleted.insert((entity.model.clone(), entity.id));
                         }
                     }
                 }
