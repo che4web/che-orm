@@ -196,6 +196,14 @@ journals, then prepares new work when caught up. Keep UI/worker cycles bounded;
 stop on `blocked`, conflicts and rejections. Never apply the legacy cursor-expiry
 and automatic full-load rules to `ModelLogEngine`.
 
+The next-stage requirement is objects shared across users through per-object
+permissions, with explicit grants/revocations and safe offline-write settlement.
+See `../che-rest/docs/OBJECT_SYNC_PLAN.md`. This is not implemented in protocol 2;
+retain whole-model behavior until versioned migration is designed. Keep ACL
+definitions in the application, HTTP/principal handling in che-rest, and neutral
+events/delivery in the sync crates. Do not add per-owner copies of shared rows or
+claim queryset filtering alone handles changes in access.
+
 `ModelLogTransport` supplies a stable `id`, one-time `prepare_write`, immutable
 payload `write`, and journal `changes`. Validate embedded request identity in the
 adapter before side effects. Preserve pending payload namespaces and legacy
@@ -206,8 +214,11 @@ The downstream `che-tauri/sync` feature wraps this engine as `TauriSync` and
 commands write through its configured client handle. Do not add Tauri, HTTP or
 UI dependencies to this workspace. Sync database ownership includes server and
 account identity; auth/cache changes must not clear pending sync data. Cache/sync
-table overlap is currently prohibited by the downstream application contract,
-not enforced by a registration guard.
+table overlap is rejected by TauriApi build for local/cache resources mapped to
+declared sync tables. Separate runtimes and trigger/cascade effects remain the
+application's responsibility. Tauri modules now declare client schemas through
+AppModule::schema, independently of init; do not use the removed ctx.sync_model.
+Registration runs at build, and schema/registry discovery must never call init.
 
 The runnable server/client example is in the sibling
 `../che-tauri/examples/todo-sync` workspace, with shared models and frozen client

@@ -6,6 +6,13 @@ entire model; there is no client-supplied scope or per-record journal filtering.
 The scoped `SyncClient` / `SyncEngine` snapshot API remains a separate
 [compatibility protocol](sync.md).
 
+Objects shared through per-object permissions need grant/revocation delivery in
+addition to data journals. This is a new, **unimplemented** requirement; current
+protocol 2 still grants whole-model access. See the
+[access-delivery plan](../../che-rest/docs/OBJECT_SYNC_PLAN.md). Keep one shared
+object UUID/revision; per-user copies or filtering current journal pages cannot
+substitute for explicit visibility events.
+
 ## Ownership
 
 | Crate | Responsibility |
@@ -111,16 +118,18 @@ use decimal strings; nullable JSON distinguishes SQL NULL and JSON null.
 
 ## Tauri application
 
-Enable `che-tauri/sync`. `ModuleContext::sync_model::<Todo>()` registers the
-client schema for migrations; `InstalledApps::sync_registry()` builds its
-registry. Manage `TauriSync` after migrations and pass it the existing REST
-transport. Register `che_tauri::che_model_sync` with a fully qualified path in
+Enable `che-tauri/sync`. Declare `SchemaSet::client_model::<Todo>()` in
+`AppModule::schema()`; `InstalledApps::sync_registry()` builds its registry
+without running init. Both frameworks separate schema, declarative init and
+runtime subscribe/start hooks; Tauri install defers registration to build.
+Manage `TauriSync` after migrations and pass it the existing REST transport. Register `che_tauri::che_model_sync` with a fully qualified path in
 one `tauri::generate_handler!` list alongside application UUID CRUD commands.
 
 The ordinary `che_api` i64 resources remain separate. `AppState` auth changes do
 not update sync credentials. Cache invalidation must never delete durable sync
-tables: overlap is a documented application restriction, currently without a
-registration-time guard. Use a separate client database for each server/account.
+tables: TauriApi build rejects ordinary local/cache resources mapped to declared
+sync tables. Separate runtimes and related trigger/cascade effects still need
+application isolation. Use a separate client database for each server/account.
 
 The complete [Todo server and desktop client](../../che-tauri/examples/todo-sync/README.md)
 uses frozen migrations, offline SQLite, manual synchronization and conflict
