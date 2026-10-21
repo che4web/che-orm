@@ -757,6 +757,10 @@ fn validate_expr_table(expr: Option<&Expr>, table: &'static str) -> Result<(), Q
             validate_expr_table(Some(left), table)?;
             validate_expr_table(Some(right), table)
         }
+        Expr::InQuery { left, query } => {
+            validate_expr_table(Some(left), table)?;
+            validate_subquery(query)
+        }
         Expr::In { left, .. } => validate_expr_table(Some(left), table),
         Expr::Not(expr) | Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
             validate_expr_table(Some(expr), table)
@@ -806,9 +810,27 @@ fn validate_expr_tables(
             validate_expr_tables(Some(left), tables)?;
             validate_expr_tables(Some(right), tables)
         }
+        Expr::InQuery { left, query } => {
+            validate_expr_tables(Some(left), tables)?;
+            validate_subquery(query)
+        }
         Expr::In { left, .. } => validate_expr_tables(Some(left), tables),
         Expr::Not(expr) | Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
             validate_expr_tables(Some(expr), tables)
         }
     }
+}
+
+fn validate_subquery(query: &SelectAst) -> Result<(), QueryBuildError> {
+    if query.columns.len() != 1 {
+        return Err(QueryBuildError::InvalidSchema(
+            "IN subquery must select one column".into(),
+        ));
+    }
+    let mut tables = vec![query.table.name];
+    for join in &query.joins {
+        tables.extend([join.table.name, join.alias]);
+    }
+    validate_expr_tables(Some(&Expr::Column(query.columns[0])), &tables)?;
+    QueryAst::Select(query.clone()).validate()
 }

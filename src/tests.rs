@@ -1630,3 +1630,68 @@ async fn sqlite_optional_join_uses_primary_key_metadata() {
     assert_eq!(rows.iter().filter(|row| row.related.is_some()).count(), 1);
     assert_eq!(rows.iter().filter(|row| row.related.is_none()).count(), 1);
 }
+
+#[test]
+fn compiles_native_in_subqueries_with_nested_parameters_on_both_dialects() {
+    let crate::QueryAst::Select(mut inner) = User::query()
+        .filter(User::EMAIL.eq("allowed@example.test"))
+        .into_ast()
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    inner.columns = vec![User::ID.column()];
+    let ast = Post::query()
+        .filter(Post::TITLE.eq("visible").and(crate::Expr::InQuery {
+            left: Box::new(crate::Expr::Column(Post::USER_ID.column())),
+            query: Box::new(inner),
+        }))
+        .into_ast()
+        .unwrap();
+    ast.validate().unwrap();
+    let sqlite = SqlCompiler::<SqliteDialect>::compile(&ast);
+    assert!(
+        sqlite
+            .sql
+            .contains("posts.user_id IN (SELECT users.id FROM users WHERE (users.email = ?))")
+    );
+    assert_eq!(
+        sqlite.params,
+        vec![
+            DatabaseValue::Text("visible".into()),
+            DatabaseValue::Text("allowed@example.test".into())
+        ]
+    );
+    let postgres = SqlCompiler::<PostgresDialect>::compile(&ast);
+    assert!(postgres.sql.contains(
+        r#""posts"."user_id" IN (SELECT "users"."id" FROM "users" WHERE ("users"."email" = $2))"#
+    ));
+    assert_eq!(sqlite.params, postgres.params);
+}
+
+#[test]
+fn in_subqueries_validate_the_projection_and_inner_tables() {
+    let crate::QueryAst::Select(mut inner) = User::query().into_ast().unwrap() else {
+        unreachable!()
+    };
+    let expr = |query| crate::Expr::InQuery {
+        left: Box::new(crate::Expr::Column(Post::USER_ID.column())),
+        query: Box::new(query),
+    };
+    assert!(
+        Post::query()
+            .filter(expr(inner.clone()))
+            .into_ast()
+            .is_err()
+    );
+    inner.columns = vec![Post::ID.column()];
+    assert!(
+        Post::query()
+            .filter(expr(inner.clone()))
+            .into_ast()
+            .is_err()
+    );
+    inner.columns = vec![User::ID.column()];
+    inner.filter = Some(Post::TITLE.eq("wrong table"));
+    assert!(Post::query().filter(expr(inner)).into_ast().is_err());
+}

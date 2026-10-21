@@ -170,6 +170,11 @@ pub enum Expr {
         left: Box<Expr>,
         pattern: Box<Expr>,
     },
+    /// Membership in a single-column SELECT, with native key types.
+    InQuery {
+        left: Box<Expr>,
+        query: Box<crate::SelectAst>,
+    },
     In {
         left: Box<Expr>,
         values: Vec<DatabaseValue>,

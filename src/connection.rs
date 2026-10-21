@@ -107,7 +107,8 @@ pub trait ModelRuntime: Send + Sync {
     fn prepare_read(&self, ast: QueryAst) -> QueryAst {
         ast
     }
-    /// Recheck access for every query, including counts and relation loading.
+    /// Recheck access for every SELECT, including nested subqueries, counts,
+    /// relation loading, and SELECTs embedded in ordinary mutation predicates.
     fn authorize_read(&self, _ast: &QueryAst) -> Result<(), OrmError> {
         Ok(())
     }
@@ -165,18 +166,15 @@ impl Database {
 
     pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
         ast.validate()?;
-        let ast = match (&self.runtime, ast) {
-            (Some(runtime), ast @ QueryAst::Select(_)) => {
-                runtime.authorize_read(&ast)?;
-                runtime.prepare_read(ast)
-            }
-            (_, ast) => ast,
-        };
         if self.captures(&ast) {
             return self
                 .transaction(move |tx| Box::pin(async move { tx.execute(ast).await }))
                 .await;
         }
+        let ast = match &self.runtime {
+            Some(runtime) => prepare_runtime_ast(runtime.as_ref(), ast)?,
+            None => ast,
+        };
         backend::Session::acquire(&self.pool)
             .await?
             .execute(SqlCompiler::<CurrentDialect>::compile(&ast))
@@ -376,6 +374,37 @@ impl Database {
         T: Send + 'static,
         F: for<'a> FnOnce(&'a Transaction) -> TransactionFuture<'a, T> + Send,
     {
+        self.transaction_result_with_isolation(isolation, action)
+            .await
+    }
+
+    /// Transaction with an application error type; every error rolls back.
+    pub async fn transaction_result<T, E, F>(&self, action: F) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<OrmError>,
+        F: for<'a> FnOnce(
+                &'a Transaction,
+            ) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>
+            + Send,
+    {
+        self.transaction_result_with_isolation(IsolationLevel::Serializable, action)
+            .await
+    }
+
+    async fn transaction_result_with_isolation<T, E, F>(
+        &self,
+        isolation: IsolationLevel,
+        action: F,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<OrmError>,
+        F: for<'a> FnOnce(
+                &'a Transaction,
+            ) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>
+            + Send,
+    {
         let _runtime_guard = match self
             .runtime
             .as_ref()
@@ -468,10 +497,7 @@ impl Database {
                 .await;
         }
         let ast = match &self.runtime {
-            Some(runtime) => {
-                runtime.authorize_read(&ast)?;
-                runtime.prepare_read(ast)
-            }
+            Some(runtime) => prepare_runtime_ast(runtime.as_ref(), ast)?,
             None => ast,
         };
         backend::Session::acquire(&self.pool)
@@ -538,12 +564,9 @@ impl Transaction {
 
     pub async fn execute(&self, ast: QueryAst) -> Result<ExecuteResult, OrmError> {
         ast.validate()?;
-        let ast = match (&self.runtime, ast) {
-            (Some(runtime), ast @ QueryAst::Select(_)) => {
-                runtime.authorize_read(&ast)?;
-                runtime.prepare_read(ast)
-            }
-            (_, ast) => ast,
+        let ast = match &self.runtime {
+            Some(runtime) => prepare_runtime_ast(runtime.as_ref(), ast)?,
+            None => ast,
         };
         if let Some(runtime) = &self.runtime
             && write_table(&ast).is_some_and(|table| runtime.role(table).is_some())
@@ -644,18 +667,15 @@ impl Transaction {
     }
     async fn rows(&self, ast: QueryAst) -> Result<Vec<Row>, OrmError> {
         ast.validate()?;
+        let ast = match &self.runtime {
+            Some(runtime) => prepare_runtime_ast(runtime.as_ref(), ast)?,
+            None => ast,
+        };
         if let Some(runtime) = &self.runtime
             && write_table(&ast).is_some_and(|table| runtime.role(table).is_some())
         {
             return Ok(runtime.write(self, ast).await?.rows);
         }
-        let ast = match &self.runtime {
-            Some(runtime) => {
-                runtime.authorize_read(&ast)?;
-                runtime.prepare_read(ast)
-            }
-            None => ast,
-        };
         self.session
             .query(SqlCompiler::<CurrentDialect>::compile(&ast))
             .await
@@ -675,16 +695,83 @@ fn insert_ast<M: Model>(model: &M) -> QueryAst {
         returning: Vec::new(),
     })
 }
+/// Apply read authorization and rewriting to every submitted SELECT, including
+/// subqueries in predicates of ordinary reads and mutations. Runtime-owned
+/// rewrites remain trusted, just like runtime-owned raw transaction operations.
+fn prepare_runtime_ast(
+    runtime: &dyn ModelRuntime,
+    mut ast: QueryAst,
+) -> Result<QueryAst, OrmError> {
+    match &mut ast {
+        QueryAst::Select(select) => {
+            if let Some(filter) = &mut select.filter {
+                prepare_runtime_expr(runtime, filter)?;
+            }
+            for join in &mut select.joins {
+                prepare_runtime_expr(runtime, &mut join.on)?;
+            }
+        }
+        QueryAst::Update(update) => {
+            if let Some(filter) = &mut update.filter {
+                prepare_runtime_expr(runtime, filter)?;
+            }
+        }
+        QueryAst::Delete(delete) => {
+            if let Some(filter) = &mut delete.filter {
+                prepare_runtime_expr(runtime, filter)?;
+            }
+        }
+        QueryAst::Insert(_) | QueryAst::CreateTable(_) => {}
+    }
+    if matches!(ast, QueryAst::Select(_)) {
+        runtime.authorize_read(&ast)?;
+        ast = runtime.prepare_read(ast);
+        if !matches!(ast, QueryAst::Select(_)) {
+            return Err(OrmError::Configuration(
+                "read runtime must preserve SELECT queries".into(),
+            ));
+        }
+    }
+    ast.validate()?;
+    Ok(ast)
+}
+fn prepare_runtime_expr(runtime: &dyn ModelRuntime, expr: &mut Expr) -> Result<(), OrmError> {
+    match expr {
+        Expr::InQuery { left, query } => {
+            prepare_runtime_expr(runtime, left)?;
+            let QueryAst::Select(prepared) =
+                prepare_runtime_ast(runtime, QueryAst::Select((**query).clone()))?
+            else {
+                unreachable!()
+            };
+            **query = prepared;
+        }
+        Expr::Compare { left, right, .. }
+        | Expr::And { left, right }
+        | Expr::Or { left, right } => {
+            prepare_runtime_expr(runtime, left)?;
+            prepare_runtime_expr(runtime, right)?;
+        }
+        Expr::Like { left, pattern } => {
+            prepare_runtime_expr(runtime, left)?;
+            prepare_runtime_expr(runtime, pattern)?;
+        }
+        Expr::In { left, .. } => prepare_runtime_expr(runtime, left)?,
+        Expr::Not(expr) | Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
+            prepare_runtime_expr(runtime, expr)?
+        }
+        Expr::Column(_) | Expr::Value(_) => {}
+    }
+    Ok(())
+}
+
 fn count_query<M: Model>(
     query: SelectQuery<M>,
     runtime: Option<&dyn ModelRuntime>,
 ) -> Result<CompiledQuery, OrmError> {
     let ast = QueryAst::Select(query.into_select_ast()?);
     let ast = match runtime {
-        Some(runtime) => {
-            runtime.authorize_read(&ast)?;
-            runtime.prepare_read(ast)
-        }
+        Some(runtime) => prepare_runtime_ast(runtime, ast)?,
         None => ast,
     };
     let compiled = SqlCompiler::<CurrentDialect>::compile(&ast);
@@ -790,6 +877,15 @@ impl<M: Model> TransactionQuery<'_, M> {
     }
 }
 impl<M: Model + Send + 'static> ValidatedWrite<M> {
+    /// Saves through the caller's transaction and its configured model runtime.
+    pub async fn save_in(self, transaction: &Transaction) -> Result<Option<M>, OrmError> {
+        let ast = match self {
+            Self::Create(query) => query.returning_all().into_ast()?,
+            Self::Update(query) => query.returning_all().into_ast()?,
+        };
+        transaction.execute_returning(ast).await
+    }
+
     pub async fn save(self, database: &Database) -> Result<Option<M>, OrmError> {
         let ast = match self {
             Self::Create(query) => query.returning_all().into_ast()?,

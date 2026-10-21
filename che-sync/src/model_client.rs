@@ -29,6 +29,22 @@ pub trait ModelLogTransport: Send + Sync {
         write: &'a ModelWrite,
         payload: &'a serde_json::Value,
     ) -> TransportFuture<'a, ModelWriteResult>;
+    /// Protocol 3 is explicit; a protocol-2 adapter cannot silently send writes.
+    fn object_write<'a>(
+        &'a self,
+        _write: &'a ModelWrite,
+        _payload: &'a serde_json::Value,
+    ) -> TransportFuture<'a, crate::object_log::ObjectWriteResult> {
+        Box::pin(async { Err(invalid("transport does not support object protocol 3")) })
+    }
+    fn object_changes<'a>(
+        &'a self,
+        _model: &'a str,
+        _cursor: Option<crate::object_log::ObjectCursor>,
+        _limit: u32,
+    ) -> TransportFuture<'a, crate::object_log::ObjectChanges> {
+        Box::pin(async { Err(invalid("transport does not support object protocol 3")) })
+    }
     fn changes<'a>(
         &'a self,
         model: &'a str,
@@ -45,7 +61,7 @@ struct SubmittedWrite {
 
 #[derive(Clone)]
 pub struct ModelLogClient {
-    inner: SyncClient,
+    pub(crate) inner: SyncClient,
 }
 impl ModelLogClient {
     pub async fn open(db: Database, registry: Registry) -> Result<Self, OrmError> {
@@ -54,6 +70,48 @@ impl ModelLogClient {
         Ok(Self { inner })
     }
 
+    /// Explicit protocol-3 opt-in. Apply object_log::migration_operations first.
+    pub async fn open_objects(
+        db: Database,
+        registry: Registry,
+        server: impl Into<String>,
+        account: impl Into<String>,
+    ) -> Result<Self, OrmError> {
+        crate::object_log::validate_registry(&registry)?;
+        let inner = SyncClient::open_with_version(
+            db,
+            registry,
+            MODEL_LOG_SCOPE.into(),
+            3,
+            Some((server.into(), account.into())),
+            false,
+        )
+        .await?;
+        Ok(Self { inner })
+    }
+    /// Explicit upgrade after submitted v2 writes have settled. Dirty drafts,
+    /// replica IDs, old cursors and saved rows remain intact.
+    pub async fn upgrade_to_objects(
+        db: Database,
+        registry: Registry,
+        server: impl Into<String>,
+        account: impl Into<String>,
+    ) -> Result<Self, OrmError> {
+        crate::object_log::validate_registry(&registry)?;
+        let inner = SyncClient::open_with_version(
+            db,
+            registry,
+            MODEL_LOG_SCOPE.into(),
+            3,
+            Some((server.into(), account.into())),
+            true,
+        )
+        .await?;
+        Ok(Self { inner })
+    }
+    pub fn is_object_sync(&self) -> bool {
+        self.inner.object_mode
+    }
     pub fn database(&self) -> &Database {
         self.inner.database()
     }
@@ -82,6 +140,9 @@ impl ModelLogClient {
             .map_or(0, |cursor| cursor.sequence))
     }
     pub async fn apply(&self, changes: ModelChanges) -> Result<bool, OrmError> {
+        if self.inner.object_mode {
+            return Err(invalid("object clients require protocol-3 delivery pages"));
+        }
         self.inner.apply_model_changes(changes).await
     }
     pub fn engine<T: ModelLogTransport>(&self, transport: T) -> ModelLogEngine<T> {
@@ -126,6 +187,25 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
     async fn pull_inner(&self) -> Result<SyncReport, OrmError> {
         let mut report = SyncReport::default();
         for d in self.client.inner.registry.models.iter() {
+            if self.client.inner.object_mode {
+                let cursor = self.client.inner.object_cursor(d.name).await?;
+                let page = self
+                    .transport
+                    .object_changes(d.name, cursor, self.page_size)
+                    .await?;
+                if page.cursor.model != d.name {
+                    return Err(invalid("object page belongs to another model"));
+                }
+                let count = page.events.len();
+                let more = page.has_more;
+                if self.client.inner.apply_objects(page).await? {
+                    report.received_changes += count;
+                    report.has_more |= more;
+                } else {
+                    report.blocked = true;
+                }
+                continue;
+            }
             let after = self
                 .client
                 .inner
@@ -149,6 +229,9 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
             }
         }
         report.conflicts = self.client.conflicts().await?.len();
+        if self.client.inner.object_mode {
+            report.blocked |= self.client.inner.object_blocked().await?;
+        }
         Ok(report)
     }
     /// Send one coalesced object per model. Already submitted requests are always
@@ -168,8 +251,14 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
     }
     async fn flush_inner(&self, prepare_new: bool) -> Result<SyncReport, OrmError> {
         let mut report = SyncReport::default();
+        let mut object_disclosure = false;
         if self.transport.id().is_empty() {
             return Err(invalid("empty transport identity"));
+        }
+        if self.client.inner.object_mode {
+            // Recover a crash after receipt settlement and before applying a
+            // previously downloaded state, before preparing another request.
+            self.client.inner.apply_deferred_objects().await?;
         }
         for d in self.client.inner.registry.models.iter() {
             let pending = if let Some(pending) = self.client.inner.pending(Some(d.name)).await? {
@@ -300,7 +389,52 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
                     .await?;
                 (key, submitted)
             };
-            let result = self.transport.write(&write, &submitted.payload).await?;
+            let reply = if self.client.inner.object_mode {
+                self.transport
+                    .object_write(&write, &submitted.payload)
+                    .await?
+            } else {
+                crate::object_log::ObjectWriteResult::Canonical(
+                    self.transport.write(&write, &submitted.payload).await?,
+                )
+            };
+            let result = match reply {
+                crate::object_log::ObjectWriteResult::Canonical(result) => result,
+                crate::object_log::ObjectWriteResult::Acknowledged {
+                    operation_id,
+                    outcome,
+                } => {
+                    if operation_id != id || !self.client.inner.object_mode {
+                        return Err(invalid("invalid content-free settlement identity"));
+                    }
+                    match outcome {
+                        crate::object_log::WriteOutcome::Accepted => {
+                            report.accepted_operations += 1
+                        }
+                        crate::object_log::WriteOutcome::Rejected => {
+                            report.rejected_operations += 1
+                        }
+                        _ => {}
+                    }
+                    self.client
+                        .inner
+                        .finish_without_state(pending, outcome)
+                        .await?;
+                    self.client
+                        .inner
+                        .db
+                        .execute_sql("DELETE FROM _sync_meta WHERE key=$1", vec![text(key)])
+                        .await?;
+                    continue;
+                }
+            };
+            let disclosed = match &result {
+                ModelWriteResult::Accepted(states) | ModelWriteResult::Conflict(states) => states
+                    .iter()
+                    .map(|s| (s.model.clone(), s.record_id, s.values.is_some()))
+                    .collect(),
+                _ => Vec::new(),
+            };
             let result = match result {
                 ModelWriteResult::Accepted(states) | ModelWriteResult::Conflict(states)
                     if states.is_empty() =>
@@ -323,16 +457,26 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
                 .inner
                 .finish_result(pending, result, true)
                 .await?;
+            if self.client.inner.object_mode {
+                object_disclosure |= !disclosed.is_empty();
+                self.client.inner.observe_disclosures(disclosed).await?;
+            }
             self.client
                 .inner
                 .db
                 .execute_sql("DELETE FROM _sync_meta WHERE key = $1", vec![text(key)])
                 .await?;
         }
+        if self.client.inner.object_mode {
+            self.client.inner.apply_deferred_objects().await?;
+        }
         let (conflicts, dirty, blocked) = self.client.inner.feed_status(None).await?;
         report.conflicts = conflicts;
         report.blocked = blocked || conflicts > 0;
-        report.has_more = dirty && !report.blocked;
+        if self.client.inner.object_mode {
+            report.blocked |= self.client.inner.object_blocked().await?;
+        }
+        report.has_more = (dirty || object_disclosure) && !report.blocked;
         Ok(report)
     }
     async fn entities(

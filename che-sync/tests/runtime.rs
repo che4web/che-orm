@@ -466,3 +466,6 @@ async fn drain_model<M: SyncModel>(
     }
     panic!("synchronization did not converge");
 }
+
+#[path = "runtime/subqueries.rs"]
+mod subqueries;

@@ -6,6 +6,8 @@ mod merge;
 mod model;
 mod model_client;
 pub mod model_log;
+mod object_client;
+pub mod object_log;
 mod runtime;
 mod schema;
 mod server;

@@ -213,6 +213,13 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 self.compile_expr(pattern);
                 self.sql.push(')');
             }
+            Expr::InQuery { left, query } => {
+                self.sql.push('(');
+                self.compile_expr(left);
+                self.sql.push_str(" IN (");
+                self.compile_select(query);
+                self.sql.push_str("))");
+            }
             Expr::In { left, values } => {
                 if values.is_empty() {
                     self.sql.push_str("(1 = 0)");

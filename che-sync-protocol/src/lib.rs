@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub mod model_log;
+pub mod object_log;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 

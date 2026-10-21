@@ -28,7 +28,28 @@ pub struct PostCommitEffect {
 /// Use OrmError::Configuration for permanent business rejections; operational
 /// errors propagate without creating a receipt so the operation can be retried.
 pub trait AccessPolicy: Send + Sync + 'static {
+    fn isolation(&self) -> IsolationLevel {
+        IsolationLevel::ReadCommitted
+    }
     fn authorize_scope(&self, principal: &str, scope: &str) -> Result<(), OrmError>;
+    /// Runs against the committing transaction, including no-ops and conflicts.
+    fn authorize_write<'a>(
+        &'a self,
+        _tx: &'a Transaction,
+        _current: &'a Entity,
+        _mutation: &'a Mutation,
+    ) -> che_orm::TransactionFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    /// Transactional application initialization, e.g. explicit creator grants.
+    fn after_write<'a>(
+        &'a self,
+        _tx: &'a Transaction,
+        _current: &'a Entity,
+        _next: &'a Entity,
+    ) -> che_orm::TransactionFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn validate(
         &self,
         principal: &str,
@@ -51,14 +72,14 @@ impl AccessPolicy for AllowAll {
 
 #[derive(Clone)]
 pub struct SyncServer {
-    db: Database,
+    pub(crate) db: Database,
     orm_db: Database,
-    registry: Registry,
-    scope: String,
-    principal: String,
-    policy: Arc<dyn AccessPolicy>,
-    model: Option<String>,
-    model_logs: bool,
+    pub(crate) registry: Registry,
+    pub(crate) scope: String,
+    pub(crate) principal: String,
+    pub(crate) policy: Arc<dyn AccessPolicy>,
+    pub(crate) model: Option<String>,
+    pub(crate) model_logs: bool,
 }
 
 impl SyncServer {
@@ -420,7 +441,7 @@ impl SyncServer {
         let server = self.clone();
         // READ COMMITTED plus a scope row lock yields commit-ordered groups in
         // PostgreSQL. SQLite's write lock provides the same serialization.
-        self.db.transaction_with_isolation(IsolationLevel::ReadCommitted, move |tx| Box::pin(async move {
+        self.db.transaction_with_isolation(self.policy.isolation(), move |tx| Box::pin(async move {
              tx.execute_sql("UPDATE _sync_scopes SET sequence = sequence WHERE scope = $1", vec![text(&server.scope)]).await?;
              if server.model_logs { crate::model_log::lock_logs(tx, &server.registry).await?; }
             let request_json = match &request_identity { Some(identity) => encode(&(identity, &request))?, None => encode(&request)? };
@@ -447,6 +468,7 @@ impl SyncServer {
                         if changes.keys().any(|name| d.field(name).is_ok_and(|f| f.column == d.primary)) { return Err(invalid("primary key is immutable")); }
                     }
                     let entity = server.entity(tx, d, m.id).await?;
+                    server.policy.authorize_write(tx, &entity, m).await?;
                     if entity.revision == 0 && m.changes.is_none() { return Err(invalid("cannot delete an unknown UUID")); }
                     if entity.revision != m.base_revision { conflict = true; }
                     if entity.revision == m.base_revision && entity.revision > 0 && entity.record.is_none() && m.changes.is_some() { return Err(invalid("deleted UUID cannot be resurrected")); }
@@ -804,7 +826,12 @@ impl SyncServer {
         })
     }
 
-    async fn entity(&self, tx: &Transaction, d: &Descriptor, id: Uuid) -> Result<Entity, OrmError> {
+    pub(crate) async fn entity(
+        &self,
+        tx: &Transaction,
+        d: &Descriptor,
+        id: Uuid,
+    ) -> Result<Entity, OrmError> {
         let rows = tx
             .query_sql(
                 format!(
@@ -1090,13 +1117,15 @@ impl SyncServer {
             if let Some(changes) = &changes {
                 d.validate(changes, *id, false, false)?;
             }
-            mutations.push(Mutation {
+            let mutation = Mutation {
                 model: d.name.into(),
                 id: *id,
                 schema_version: d.version,
                 base_revision: old.revision,
                 changes,
-            });
+            };
+            self.policy.authorize_write(tx, &old, &mutation).await?;
+            mutations.push(mutation);
             before.push(old);
         }
         for mutation in mutations.iter().filter(|m| m.changes.is_none()) {
@@ -1183,6 +1212,7 @@ impl SyncServer {
                 let next = self.entity(tx, descriptor, old.id).await?;
                 self.policy
                     .validate(&self.principal, &self.scope, old, &next)?;
+                self.policy.after_write(tx, old, &next).await?;
                 if self.model_logs {
                     crate::model_log::append(tx, &self.registry, old, &next).await?;
                 }

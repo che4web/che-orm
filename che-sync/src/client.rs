@@ -17,6 +17,7 @@ type CycleLocks = Arc<Mutex<std::collections::HashMap<Option<String>, Arc<Mutex<
 
 #[derive(Clone)]
 pub struct SyncClient {
+    pub(crate) object_mode: bool,
     pub(crate) db: Database,
     orm_db: Database,
     pub(crate) registry: Registry,
@@ -67,19 +68,40 @@ impl SyncClient {
         scope: String,
         model_logs: bool,
     ) -> Result<Self, OrmError> {
+        Self::open_with_version(
+            db,
+            registry,
+            scope,
+            if model_logs { 2 } else { 1 },
+            None,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_with_version(
+        db: Database,
+        registry: Registry,
+        scope: String,
+        version: u32,
+        owner: Option<(String, String)>,
+        upgrade: bool,
+    ) -> Result<Self, OrmError> {
+        let model_logs = version >= 2;
+        let object_mode = version == 3;
         registry.require_role(che_orm::ModelRole::Client)?;
         if scope.is_empty() {
             return Err(invalid("empty scope"));
         }
         let expected = scope.clone();
+        let opening_registry = registry.clone();
         let replica_id = db
             .transaction(move |tx| {
                 Box::pin(async move {
                     let protocol = meta::<u32>(tx, "model_log_protocol").await?;
                     if model_logs {
-                        use crate::model_log::MODEL_LOG_PROTOCOL;
                         if let Some(protocol) = protocol {
-                            if protocol != MODEL_LOG_PROTOCOL {
+                            if protocol != version && !(upgrade && protocol==2 && version==3) {
                                 return Err(invalid("incompatible local model-log protocol"));
                             }
                         } else {
@@ -99,10 +121,30 @@ impl SyncClient {
                                     "settle and explicitly migrate legacy sync data before switching protocols",
                                 ));
                             }
-                            set_meta(tx, "model_log_protocol", &MODEL_LOG_PROTOCOL).await?;
+                            set_meta(tx, "model_log_protocol", &version).await?;
                         }
                     } else if protocol.is_some() {
                         return Err(invalid("client database belongs to the model-log protocol"));
+                    }
+                    if object_mode {
+                        // Missing follow-up tables must fail before any ownership metadata commits.
+                        tx.query_sql("SELECT model FROM _sync_object_models LIMIT 0",vec![]).await?;
+                        let owner=owner.ok_or_else(|| invalid("object sync requires server and account ownership"))?;
+                        if owner.0.is_empty() || owner.1.is_empty() { return Err(invalid("empty object-sync owner")); }
+                        if let Some(old)=meta::<(String,String)>(tx,"object_owner").await? {
+                            if old!=owner { return Err(invalid("object client belongs to another server/account")); }
+                        } else { set_meta(tx,"object_owner",&owner).await?; }
+                        if upgrade && !tx.query_sql("SELECT operation_id FROM _sync_outbox LIMIT 1",vec![]).await?.is_empty() {
+                            return Err(invalid("settle submitted protocol-2 operations before explicit upgrade"));
+                        }
+                        if upgrade && protocol==Some(2) {
+                            for d in opening_registry.models.iter() {
+                                // Existing confirmed rows need a new explicit grant;
+                                // ADD alone must not permit sending their old edits.
+                                tx.execute_sql(format!("INSERT INTO _sync_object_access (model,entity_id,readable,changeable,deletable,status) SELECT $1,{},$2,$2,$2,'review' FROM {} WHERE {} > 0 ON CONFLICT (model,entity_id) DO NOTHING",quote(d.primary),quote(&d.mirror()),quote(d.revision)),vec![text(d.name),che_orm::DatabaseValue::Boolean(false)]).await?;
+                            }
+                        }
+                        set_meta(tx,"model_log_protocol",&version).await?;
                     }
                     if let Some(existing) = meta::<String>(tx, "scope").await? {
                         if existing != expected {
@@ -127,8 +169,10 @@ impl SyncClient {
             .with_model_runtime(Arc::new(crate::runtime::ClientRuntime {
                 registry: registry.clone(),
                 writes: writes.clone(),
+                object_mode,
             }));
         Ok(Self {
+            object_mode,
             db,
             orm_db,
             registry,
@@ -1049,7 +1093,7 @@ async fn selected_entities(
             Some(patch) => patch.is_empty() && base.record.is_some(),
             None => base.record.is_none(),
         };
-        if !unchanged {
+        if !unchanged && crate::object_client::can_send(tx, &name, id, local.is_none()).await? {
             dirty.insert((name, id));
         }
     }
@@ -1156,6 +1200,7 @@ pub(crate) async fn save_local(
     id: Uuid,
     mut data: Record,
 ) -> Result<(), OrmError> {
+    crate::object_client::require_local_write(tx, d.name, id, false).await?;
     if let Some(previous) = read(tx, d, id, false).await? {
         for field in d.fields.iter().filter(|f| !f.writable) {
             data.insert(field.name.into(), previous[field.name].clone());
@@ -1173,6 +1218,7 @@ pub(crate) fn delete_local<'a>(
     id: Uuid,
 ) -> TransactionFuture<'a, ()> {
     Box::pin(async move {
+        crate::object_client::require_local_write(tx, name, id, true).await?;
         let parent = registry.get(name)?;
         for child in registry.models.iter().rev() {
             for column in &child.schema.columns {
@@ -1251,7 +1297,7 @@ fn validate_entity(d: &crate::model::Descriptor, entity: &Entity) -> Result<(), 
     Ok(())
 }
 
-struct Update {
+pub(crate) struct Update {
     acknowledgement: Option<Entity>,
     remote: Entity,
     merged: Option<Record>,
@@ -1263,7 +1309,7 @@ struct Update {
     received: bool,
 }
 
-async fn reconcile(
+pub(crate) async fn reconcile(
     tx: &Transaction,
     registry: &Registry,
     entities: Vec<Entity>,
@@ -1278,14 +1324,26 @@ async fn reconcile(
         validate_entity(d, &remote)?;
         let old = shadow(tx, d, remote.id).await?;
         let existing = load_conflict(tx, d.name, remote.id).await?;
+        let accepted_key = crate::object_client::accepted_intent_key(d.name, remote.id);
+        let accepted = meta::<crate::object_client::AcceptedIntent>(tx, &accepted_key).await?;
         if remote.revision < old.revision
-            || (remote.revision == old.revision && !existing.as_ref().is_some_and(|c| c.retryable))
+            || (remote.revision == old.revision
+                && accepted.is_none()
+                && !existing.as_ref().is_some_and(|c| c.retryable))
         {
             continue;
         }
         let local = read(tx, d, remote.id, false).await?;
         let deleted = deleting(tx, d.name, remote.id).await? && local.is_none();
-        let base = if deleted {
+        if accepted
+            .as_ref()
+            .is_some_and(|a| a.base_revision != old.revision)
+        {
+            return Err(invalid("accepted intent shadow base changed"));
+        }
+        let base = if let Some(accepted) = &accepted {
+            accepted.record.clone()
+        } else if deleted {
             old.record
         } else if let Some(c) = existing.as_ref().filter(|c| c.retryable) {
             c.base.clone()
@@ -1336,6 +1394,13 @@ async fn reconcile(
         } else {
             None
         };
+        if accepted.is_some() {
+            tx.execute_sql(
+                "DELETE FROM _sync_meta WHERE key=$1",
+                vec![text(accepted_key)],
+            )
+            .await?;
+        }
         updates.push(Update {
             acknowledgement,
             remote,
@@ -1367,7 +1432,7 @@ async fn retry_blocked(tx: &Transaction, registry: &Registry) -> Result<(), OrmE
     Ok(())
 }
 
-async fn apply_updates(
+pub(crate) async fn apply_updates(
     tx: &Transaction,
     registry: &Registry,
     mut updates: Vec<Update>,

@@ -152,6 +152,7 @@ pub(crate) async fn result(
 }
 
 pub(crate) struct ClientRuntime {
+    pub object_mode: bool,
     pub registry: Registry,
     pub writes: Arc<tokio::sync::Mutex<()>>,
 }
@@ -168,7 +169,12 @@ impl ModelRuntime for ClientRuntime {
         Some(self.writes.clone())
     }
     fn prepare_read(&self, ast: QueryAst) -> QueryAst {
-        prepare_read(&self.registry, ast, None)
+        let ast = prepare_read(&self.registry, ast, None);
+        if self.object_mode {
+            crate::object_client::prepare_read(&self.registry, ast)
+        } else {
+            ast
+        }
     }
     fn write<'a>(
         &'a self,
@@ -217,6 +223,9 @@ impl ClientRuntime {
         }
         match ast {
             QueryAst::Insert(insert) => {
+                if self.object_mode {
+                    crate::object_client::require_local_write(tx, d.name, ids[0], false).await?;
+                }
                 let mut insert = insert.clone();
                 insert.returning.clear();
                 let mut supplied = crate::protocol::Record::new();

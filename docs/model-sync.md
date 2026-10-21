@@ -6,12 +6,11 @@ entire model; there is no client-supplied scope or per-record journal filtering.
 The scoped `SyncClient` / `SyncEngine` snapshot API remains a separate
 [compatibility protocol](sync.md).
 
-Objects shared through per-object permissions need grant/revocation delivery in
-addition to data journals. This is a new, **unimplemented** requirement; current
-protocol 2 still grants whole-model access. See the
-[access-delivery plan](../../che-rest/docs/OBJECT_SYNC_PLAN.md). Keep one shared
-object UUID/revision; per-user copies or filtering current journal pages cannot
-substitute for explicit visibility events.
+Objects shared through per-object permissions use the explicit protocol-3
+object delivery API: `ModelLogClient::open_objects`, `SyncServer::object_changes`,
+and neutral `object_log` events. See the [object-sync contract](../../che-rest/docs/object-sync.md).
+Protocol 2 retains whole-model authorization and its existing database/outbox
+contract; upgrades are explicit and refuse submitted operations.
 
 ## Ownership
 

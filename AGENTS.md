@@ -155,7 +155,10 @@ the configured `SyncClient::database()` / `SyncServer::database()` handle or the
 explicit sync facade. Original unconfigured handles and raw SQL bypass capture.
 Configured server reads recheck scope authorization and filter scope/tombstones,
 including counts, joins, `execute(SELECT)` and reads in existing transactions.
-Preserve this behavior in every AST read path. Non-sync tables use ordinary ORM rules.
+Preserve this behavior in every AST read path. The ORM connection layer authorizes
+and prepares every submitted nested SELECT, including `Expr::InQuery` inside
+ordinary UPDATE/DELETE predicates, counts and transaction reads; runtimes need
+not implement their own recursive SQL AST traversal. Non-sync tables use ordinary ORM rules.
 The following snapshot/reset rules belong to the scoped compatibility API:
 `SyncEngine::pull()` downloads only and reports initial/reset load requirements;
 `full_load()` is explicit. `flush()` sends only, through the supplied transport.
@@ -196,13 +199,17 @@ journals, then prepares new work when caught up. Keep UI/worker cycles bounded;
 stop on `blocked`, conflicts and rejections. Never apply the legacy cursor-expiry
 and automatic full-load rules to `ModelLogEngine`.
 
-The next-stage requirement is objects shared across users through per-object
-permissions, with explicit grants/revocations and safe offline-write settlement.
-See `../che-rest/docs/OBJECT_SYNC_PLAN.md`. This is not implemented in protocol 2;
-retain whole-model behavior until versioned migration is designed. Keep ACL
-definitions in the application, HTTP/principal handling in che-rest, and neutral
-events/delivery in the sync crates. Do not add per-owner copies of shared rows or
-claim queryset filtering alone handles changes in access.
+Explicit protocol 3 supports shared objects through `object_log` neutral events,
+`SyncServer::object_changes` and `ModelLogClient::open_objects`. See
+`../che-rest/docs/object-sync.md`. Freeze new object-delivery migration operations;
+declare their schema under stable owner `che_object_sync`. Retain v2 whole-model
+behavior and require explicit upgrade after submitted writes settle. Addressed
+feeds store UUIDs/order and recheck current ACLs transactionally before every
+payload disclosure; receipts remain immutable and can acknowledge outcomes without
+content. Hidden client rows/drafts are retained, excluded from ORM reads and new
+submissions, and require explicit review after regrant. Current delivery scans the
+model per request; FK projections, background fan-out and targeted signals remain
+unsupported. Keep HTTP/principal/ACL definitions outside the ORM and sync crates.
 
 `ModelLogTransport` supplies a stable `id`, one-time `prepare_write`, immutable
 payload `write`, and journal `changes`. Validate embedded request identity in the
