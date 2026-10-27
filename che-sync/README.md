@@ -3,6 +3,32 @@
 Native offline-first synchronization for che-orm: current/shadow client tables,
 durable delivery, server revisions and journal, and three-way field merging.
 
+Requires **Rust 1.88+**, **che-orm 0.3.2** and **che-sync-protocol 0.1.0**.
+Licensed under MIT. See the [changelog](CHANGELOG.md) and
+[Rust API documentation](https://docs.rs/che-sync).
+
+## Install
+
+SQLite is enabled by default:
+
+```toml
+[dependencies]
+che-sync = "0.1.0"
+che-orm = "0.3.2"
+```
+
+For PostgreSQL, disable defaults on both crates and select exactly one backend:
+
+```toml
+[dependencies]
+che-sync = { version = "0.1.0", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.2", default-features = false, features = ["postgres"] }
+```
+
+When developing with local checkouts, use the same local ORM dependency for all
+consumers; local and registry copies are distinct Rust crates even at the same
+version. The Cargo package version is independent of wire protocol versions.
+
 Shared `#[orm(sync)]` models are registered with `SchemaSet::client_model` or
 `server_model`. Only clients create shadow tables. Use the configured
 `SyncClient::database()` or `SyncServer::database()` handle to capture ordinary
@@ -29,9 +55,9 @@ databases or pending requests implicitly.
 HTTP routes/headers/bodies and old REST request compatibility belong to the
 `che-rest` adapter, not to this crate or `che-sync-protocol`.
 
-See [the protocol-2 guide](../docs/model-sync.md),
-[REST integration](../../che-rest/docs/model-sync.md) and the runnable
-[Todo server / Tauri client](../../che-tauri/examples/todo-sync/README.md).
+See [the protocol-2 guide](https://github.com/che4web/che-orm/blob/main/docs/model-sync.md),
+[REST integration](https://github.com/che4web/che-rest/blob/main/docs/model-sync.md) and the runnable
+[Todo server / Tauri client](https://github.com/che4web/che-tauri/blob/main/examples/todo-sync/README.md).
 
 Run the native journal replay and offline field-merge example (SQLite):
 
@@ -47,7 +73,7 @@ delivery through a `ModelLogTransport` adapter.
 Per-object permissions use explicit `ModelLogClient::open_objects` and
 `SyncServer::object_changes` APIs. Protocol 2 keeps whole-model authorization;
 upgrades are explicit and require submitted writes to settle first. See the
-[object-sync contract](../../che-rest/docs/object-sync.md).
+[object-sync contract](https://github.com/che4web/che-rest/blob/main/docs/object-sync.md).
 
 ## Scoped compatibility protocol
 
@@ -56,7 +82,8 @@ snapshot loading requirements, `full_load` performs that loading, and the
 compatibility `sync_once` can combine it with delivery. These loading rules do
 not apply to `ModelLogClient`.
 
-See [the scoped walkthrough](../docs/sync.md) and run its native example:
+See [the scoped walkthrough](https://github.com/che4web/che-orm/blob/main/docs/sync.md)
+and run its native example from a repository checkout:
 
 ```bash
 cargo run -p che-sync --example offline

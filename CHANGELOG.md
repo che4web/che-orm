@@ -1,5 +1,14 @@
 # Changelog
 
+## Initial sync publications: 0.1.0
+
+- Prepare the first crates.io releases of `che-sync-protocol` and `che-sync`,
+  depending on the already published che-orm 0.3.2.
+- Include package-local README, changelog and MIT license files, with backend
+  selection, protocol compatibility and publication-order documentation.
+- Cover scoped compatibility, per-model protocol 2 and explicit object protocol
+  3 without conflating wire versions with Cargo package versions.
+
 ## 0.3.2
 
 - Use shared `APP_NAME` constants and inferred app-prefixed table names in both

@@ -7,6 +7,14 @@ license = "MIT"
 description = "Durable offline-first synchronization engine for che-orm"
 repository = "https://github.com/che4web/che-orm"
 documentation = "https://docs.rs/che-sync"
+homepage = "https://github.com/che4web/che-orm"
+readme = "README.md"
+keywords = ["sync", "offline", "sqlite", "postgres", "orm"]
+categories = ["database"]
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["sqlite"]
 
 [features]
 default = ["sqlite"]

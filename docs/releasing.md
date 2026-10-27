@@ -2,7 +2,8 @@
 
 ## Release versions
 
-Workspace package versions for the 0.3.2 release preparation (not yet published):
+Workspace package versions (core/macros 0.3.2 are already published; the initial
+sync publications are 0.1.0):
 
 | Package | Version |
 | --- | --- |
@@ -17,9 +18,84 @@ crates explicitly rather than using `cargo package --workspace`.
 The 0.3.2 patch releases core and macros together. It adds app-prefixed table-name
 inference from literals or shared constants, and updates the template with
 `createapp`, single/modular layouts and explicit migration generation.
-The template requires 0.3.2; use local patches until publication.
-Sync package versions remain unchanged; their archive
-checks are workspace compatibility checks, not instructions to republish them.
+The template requires the published core 0.3.2. Sync package versions remain
+0.1.0 for their initial publication; they have not previously been published.
+
+## Initial sync publication: 0.1.0
+
+`che-sync-protocol` is transport/backend independent. `che-sync` depends on
+`che-sync-protocol 0.1.0` and `che-orm 0.3.2`. Both require Rust 1.88.
+Each sync archive includes its own README, changelog and MIT license. Review the
+package file lists and preserve existing uncommitted application/example work
+when preparing a release commit.
+
+The remaining publication order is:
+
+1. `che-sync-protocol 0.1.0`.
+2. Wait for its crates.io index entry, then `che-sync 0.1.0`.
+3. The downstream `che-rest 0.3.1` can then pass its normal registry dry run.
+
+Before publication, validate both unpublished packages together using Cargo's
+temporary package registry:
+
+```bash
+cargo publish --dry-run -p che-sync-protocol --allow-dirty
+cargo package -p che-sync-protocol -p che-sync --allow-dirty
+```
+
+An ordinary `cargo publish --dry-run -p che-sync` cannot resolve the unpublished
+protocol dependency. After protocol publication, repeat it without substituting
+local dependencies. The joint package check is not a registry publication.
+
+For extracted-archive Rust 1.88 verification, use the sibling REST helper:
+
+```bash
+TMPDIR=/tmp/opencode python3 ../che-rest/scripts/verify_sync_packages.py \
+  --output /absolute/path/outside/source/repos/sync-0.1.0-verification
+```
+
+The output directory must be new and have room for five crates and their build
+artifacts. It retains logs, archives and a SHA-256 report. The helper checks both
+SQLite/HTTP and PostgreSQL against extracted sources; it requires cached optional
+dependencies for its offline checks.
+
+Publish only after reviewing and committing the intended release files:
+
+```bash
+cargo publish -p che-sync-protocol
+# Wait for the protocol package to be indexed.
+cargo publish --dry-run -p che-sync
+cargo publish -p che-sync
+```
+
+Use distinct sync tags such as `che-sync-protocol-v0.1.0` and `che-sync-v0.1.0`
+for this initial release; do not move the published core tag `v0.3.2`.
+
+### Verified candidate (2026-10-27)
+
+- Protocol `publish --dry-run --allow-dirty --locked`: passed.
+- Joint sync packaging with `--allow-dirty --locked`: passed, using the published
+  crates.io ORM 0.3.2 rather than a substituted ORM version.
+- Sync tests, both backend builds, Clippy, API docs and both native examples:
+  passed. Live PostgreSQL tests remain ignored without `TEST_POSTGRES_URL`.
+- Extracted sync archives: Rust 1.88 all-target checks for SQLite and PostgreSQL,
+  and SQLite protocol/engine tests passed against the published ORM.
+- Audit findings were addressed in lock files: Tokio 1.54.1, ctutils 0.4.4, and
+  matching downstream REST TLS dependencies. Current ORM/REST/fullstack lock files
+  have no reported vulnerabilities. Auditing the sync archive lock cannot check
+  registry yanked status for the as-yet unpublished protocol package; repeat
+  the audit after it is indexed.
+
+Final extracted-archive report and logs are retained at
+`/home/che/web/rust/che-sync-010-final-2552aaa0/result.json`.
+
+| Archive | SHA-256 |
+| --- | --- |
+| `che-sync-protocol-0.1.0.crate` | `cf3afbcad85d21683a4e4252af1589ad9ce19daf38126b55ef11769e14e1c8c8` |
+| `che-sync-0.1.0.crate` | `452dff20c5b9dec6f9436d5d42dc1d7d320083e653168550eb3e69c85b809d19` |
+
+These hashes identify the reviewed local candidates; packaging again after a
+release commit can change VCS metadata and therefore the archive hashes.
 
 The 0.3 ORM release introduces async database access with feature-selected
 SQLite/PostgreSQL backends and role-aware synchronization. Shared models use
@@ -84,8 +160,8 @@ cargo publish -p che-orm
 python3 scripts/check-template.py --published
 ```
 
-After registry verification, create the release tag `v0.3.2`. Publish sync crates
-separately only when making a versioned sync release.
+The published core tag is `v0.3.2`. For the separate initial sync release, follow
+the 0.1.0 publication section above.
 
 `cargo publish --dry-run -p PACKAGE` can be used before each step once its
 dependencies are available. The multi-package `cargo package` check above

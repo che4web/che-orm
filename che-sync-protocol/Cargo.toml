@@ -7,6 +7,10 @@ license = "MIT"
 description = "Backend-independent offline synchronization protocol for che-orm"
 repository = "https://github.com/che4web/che-orm"
 documentation = "https://docs.rs/che-sync-protocol"
+homepage = "https://github.com/che4web/che-orm"
+readme = "README.md"
+keywords = ["sync", "offline", "protocol", "serde"]
+categories = ["database", "data-structures"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

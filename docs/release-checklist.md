@@ -4,6 +4,10 @@ Use this checklist for every release. [The release procedure](releasing.md)
 records the planned versions, full verification commands and publication order
 for all four public crates. `che-orm-examples` is not published.
 
+The current publication preparation targets **che-sync-protocol 0.1.0** and
+**che-sync 0.1.0**. Core/macros **0.3.2** are already published and must not be
+republished. Keep the existing core tag intact; use package-specific sync tags.
+
 ## Prepare
 
 - [ ] Decide versions for `che-orm`, `che-orm-macros`, `che-sync` and `che-sync-protocol`.
@@ -85,8 +89,10 @@ cargo package --manifest-path che-orm-macros/Cargo.toml --list
    ```
 
 5. Verify the published documentation and create the matching Git tag.
-   For 0.3.2, sync versions remain unchanged; publish only macros and core, run
-   `python3 scripts/check-template.py --published`, and tag `v0.3.2`.
+   For the initial sync release, dry-run and publish protocol first, wait for its
+   registry availability, then dry-run and publish sync. Their package versions
+   remain 0.1.0; wire protocol versions are independent. See the dedicated
+   [publication steps](releasing.md#initial-sync-publication-010).
 
 Do not publish if the package contents, generated SQL, or migration changes are
 not understood.
