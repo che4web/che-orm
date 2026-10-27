@@ -118,16 +118,42 @@ struct User {
 | Rust | SQLite SQL | Nullable |
 | --- | --- | --- |
 | `i64` | `INTEGER` | No |
+| `f64` | `REAL` | No |
 | `Uuid` | `BLOB` (16 bytes) | No |
 | `String` | `TEXT` | No |
 | `ImageField` | `TEXT` (relative storage key) | No |
+| `JsonField` | `TEXT` (JSON) | No |
+| enum deriving `DbEnum` | `TEXT` with a choices `CHECK` | No |
 | `Vec<u8>` | `BLOB` | No |
 | `bool` | `INTEGER` (`0`/`1`) | No |
 | `time::OffsetDateTime` | UTC `TEXT` | No |
 | `Option<T>` | `T` type | Yes |
 
-`Option<T>` is automatically considered nullable. `OffsetDateTime` uses the
-`time` feature of `rusqlite` and UTC values.
+`Option<T>` is automatically considered nullable. The ORM decodes fields through
+the common `Row` and `FromDatabaseValue`. SQLite stores `OffsetDateTime` as RFC3339
+`TEXT` and decodes it into UTC; see [SQLite runtime](sqlite.md) for date comparisons.
+See the [backend guide](backends.md) for PostgreSQL types.
+
+### Rust Names and SQL Columns
+
+An existing SQL column named `caption` can have a Rust field named `title`:
+
+```rust
+#[derive(Debug, che_orm::Model)]
+#[orm(table = "articles")]
+struct Article {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(db_column = "caption")]
+    title: String,
+}
+```
+
+Queries use `Article::TITLE`, while SQL addresses `caption`. Renaming only the
+Rust field while preserving `db_column` creates no schema operation and does not
+rewrite data. New columns with matching Rust and SQL names do not need this
+attribute. Sync models declare stable wire names separately with
+`#[orm(sync_name = "...")]`.
 
 `Option<ImageField>` holds a relative file key or `NULL`, not image bytes or an
 HTTP URL. The field is automatically read-only in JSON model writes; uploading
@@ -219,8 +245,10 @@ let user_ids = users.iter().map(|user| user.id);
 let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
 ```
 
-`fetch_by_many` performs one parameterized `IN` query and returns an empty list
-for an empty set. The child rows must then be grouped by `post.user_id` in memory.
+`fetch_by_many` performs parameterized `IN` queries, automatically chunking keys
+to respect the backend limit and deduplicating results by primary key. An empty
+set returns an empty list without a query. The child rows must then be grouped
+by `post.user_id` in memory.
 
 Typed eager-loading wrappers are available on querysets:
 

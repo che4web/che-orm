@@ -99,6 +99,17 @@ or replacing history requires explicit application handling, not cursor rewind.
 Protocol ownership metadata prevents silent reinterpretation of legacy client
 databases and pending requests.
 
+For a native SQLite example of journal replay and offline field merging, run:
+
+```bash
+cargo run -p che-sync --example model_log
+```
+
+The example calls `changes` and `apply` directly and retains the offline edit as
+pending work. It creates disposable in-memory databases; persistent applications
+must freeze migration operations. For transport-backed delivery, use the Todo
+application linked below.
+
 ## Transport contract
 
 `ModelLogTransport` provides a stable `id()`, `prepare_write(&ModelWrite)`,

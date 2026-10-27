@@ -32,7 +32,7 @@ cargo test --workspace
 cargo test -p che-orm --no-default-features --features postgres
 cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
 cargo test -p che-sync --no-default-features --features postgres
-cargo test -p che-sync --no-default-features --features postgres --test runtime --test model_roles -- --ignored
+cargo test -p che-sync --no-default-features --features postgres --test runtime --test model_roles --test model_log_postgres -- --ignored
 cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
 cargo run -p che-sync --example offline

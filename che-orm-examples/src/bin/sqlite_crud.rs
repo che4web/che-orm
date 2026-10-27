@@ -11,7 +11,7 @@ async fn main() -> Result<(), orm::OrmError> {
         .as_nanos();
     let alice_email = format!("alice-{suffix}@example.test");
     let bob_email = format!("bob-{suffix}@example.test");
-    let alice = database
+    let mut alice = database
         .create::<ExampleUser>()
         .set(ExampleUser::EMAIL, alice_email.as_str())
         .set(ExampleUser::NAME, "Alice")
@@ -30,6 +30,10 @@ async fn main() -> Result<(), orm::OrmError> {
         .set(ExamplePost::TITLE, "Alice's first post")
         .execute()
         .await?;
+
+    alice.name = "Alice Cooper".into();
+    let saved = database.save(&alice).await?;
+    println!("saved existing user: {saved:?}");
 
     let users = database
         .query::<ExampleUser>()

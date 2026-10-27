@@ -250,6 +250,23 @@ impl Database {
     pub async fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
         self.execute(insert_ast(model)).await
     }
+    /// Updates an existing row by its primary key using all ordinary model fields.
+    ///
+    /// Preserves the stored primary key and `auto_now_add` fields, refreshes
+    /// `auto_now`, and returns the row produced by `RETURNING`. The supplied
+    /// object is not modified. Returns `None` if no row matches; never inserts.
+    /// Models without writable fields or managed updates return `EmptyUpdate`.
+    /// Configured model runtimes capture this write just like `update`.
+    /// All ordinary fields are written, including unchanged values; use
+    /// `update().set(...)` to update only selected fields of a stale object.
+    pub async fn save<M: Model + Send + 'static>(&self, model: &M) -> Result<Option<M>, OrmError> {
+        self.execute_returning(
+            crate::UpdateQuery::from_model(model)
+                .returning_all()
+                .into_ast()?,
+        )
+        .await
+    }
     pub async fn fetch_all<M: Model + Send + 'static>(
         &self,
         query: SelectQuery<M>,
@@ -579,6 +596,16 @@ impl Transaction {
     }
     pub async fn insert<M: Model>(&self, model: &M) -> Result<ExecuteResult, OrmError> {
         self.execute(insert_ast(model)).await
+    }
+    /// Saves an existing model through this transaction and its configured runtime.
+    /// See [`Database::save`] for field handling and return semantics.
+    pub async fn save<M: Model + Send + 'static>(&self, model: &M) -> Result<Option<M>, OrmError> {
+        self.execute_returning(
+            crate::UpdateQuery::from_model(model)
+                .returning_all()
+                .into_ast()?,
+        )
+        .await
     }
     pub async fn fetch_all<M: Model + Send + 'static>(
         &self,

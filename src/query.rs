@@ -602,6 +602,26 @@ pub struct UpdateQuery<M> {
 }
 
 impl<M: Model> UpdateQuery<M> {
+    pub(crate) fn from_model(model: &M) -> Self {
+        let schema = M::schema();
+        let mut query = Self::new().filter(M::primary_key().eq(model.primary_key_value()));
+        query.ast.assignments = model
+            .field_values()
+            .into_iter()
+            .filter(|value| {
+                !schema.columns.iter().any(|column| {
+                    column.name == value.column.name
+                        && (column.primary_key || column.auto_now_add || column.auto_now)
+                })
+            })
+            .map(|value| Assignment {
+                column: value.column,
+                value: value.value,
+            })
+            .collect();
+        query
+    }
+
     pub fn new() -> Self {
         Self {
             ast: UpdateAst {

@@ -99,6 +99,19 @@ database.transaction(|tx| Box::pin(async move {
 })).await?;
 ```
 
+Save all ordinary fields of an existing materialized model with `save`:
+
+```rust
+let mut user = database.get::<User>(user_id).await?.unwrap();
+user.name = "Alice Cooper".into();
+let saved = database.save(&user).await?; // Option<User>
+```
+
+`save` updates by primary key, returning `None` if the row is missing. It preserves
+`auto_now_add`, refreshes `auto_now`, and returns the `RETURNING` model without
+modifying the supplied object. Use `create` or `insert` for new rows.
+Transactions also support `tx.save(&user).await?`.
+
 See [the backend and PostgreSQL guide](docs/en/backends.md) for configuration,
 migrations, testing and upgrading from 0.2.
 

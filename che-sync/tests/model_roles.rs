@@ -863,6 +863,97 @@ async fn database(schema: &SchemaSet) -> (Database, Option<(Database, String)>) 
 
 #[tokio::test]
 #[cfg_attr(feature = "postgres", ignore = "requires TEST_POSTGRES_URL")]
+async fn materialized_save_captures_client_and_server_writes_and_rolls_back() {
+    let server_schema = schema(ModelRole::Server);
+    let client_schema = schema(ModelRole::Client);
+    let (server_db, server_cleanup) = database(&server_schema).await;
+    let (client_db, client_cleanup) = database(&client_schema).await;
+    let server = SyncServer::from_schema(
+        server_db,
+        &server_schema,
+        "scope",
+        "principal",
+        Arc::new(AllowAll),
+    )
+    .await
+    .unwrap();
+    let client = SyncClient::from_schema(client_db, &client_schema, "scope")
+        .await
+        .unwrap();
+    let mut task = server
+        .database()
+        .create::<Task>()
+        .set(Task::TITLE, "original")
+        .execute()
+        .await
+        .unwrap();
+    let feed = client
+        .model::<Task, _>(server.for_model::<Task>().unwrap())
+        .unwrap();
+    feed.full_load().await.unwrap();
+
+    task.title = "server saved".into();
+    task.body = "server body".into();
+    assert_eq!(
+        server.database().save(&task).await.unwrap().unwrap().title,
+        task.title
+    );
+    assert_eq!(feed.pull().await.unwrap().received_changes, 1);
+    let mut local = client
+        .database()
+        .get::<Task>(task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(local.title, task.title);
+    assert_eq!(local.body, task.body);
+    local.title = "client saved".into();
+    local.done = true;
+    client.database().save(&local).await.unwrap().unwrap();
+    assert_eq!(feed.flush().await.unwrap().accepted_operations, 1);
+    let saved = server
+        .database()
+        .get::<Task>(task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.title, "client saved");
+    assert!(saved.done);
+    // Consume the accepted write's journal echo before testing rollback.
+    feed.pull().await.unwrap();
+
+    // Both runtimes must roll back service data together with the business row.
+    for db in [client.database(), server.database()] {
+        let id = task.id;
+        let rollback: Result<(), OrmError> = db
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    let mut task = tx.get::<Task>(id).await?.unwrap();
+                    task.title = "rolled back".into();
+                    tx.save(&task).await?;
+                    Err(OrmError::Interaction("requested rollback".into()))
+                })
+            })
+            .await;
+        assert!(rollback.is_err());
+        assert_eq!(
+            db.get::<Task>(id).await.unwrap().unwrap().title,
+            "client saved"
+        );
+    }
+    assert_eq!(feed.flush().await.unwrap().accepted_operations, 0);
+    assert_eq!(feed.pull().await.unwrap().received_changes, 0);
+
+    for (admin, name) in [server_cleanup, client_cleanup].into_iter().flatten() {
+        admin
+            .execute_sql(format!("DROP SCHEMA \"{name}\" CASCADE"), vec![])
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "requires TEST_POSTGRES_URL")]
 async fn ordinary_orm_writes_and_independent_pull_flush() {
     let server_schema = schema(ModelRole::Server);
     let client_schema = schema(ModelRole::Client);

@@ -119,16 +119,42 @@ struct User {
 | Rust | SQL SQLite | Nullable |
 | --- | --- | --- |
 | `i64` | `INTEGER` | Нет |
+| `f64` | `REAL` | Нет |
 | `Uuid` | `BLOB` (16 байт) | Нет |
 | `String` | `TEXT` | Нет |
 | `ImageField` | `TEXT` (относительный ключ файла) | Нет |
+| `JsonField` | `TEXT` (JSON) | Нет |
+| enum с `DbEnum` | `TEXT` с `CHECK` допустимых значений | Нет |
 | `Vec<u8>` | `BLOB` | Нет |
 | `bool` | `INTEGER` (`0`/`1`) | Нет |
 | `time::OffsetDateTime` | `TEXT` UTC | Нет |
 | `Option<T>` | тип `T` | Да |
 
-`Option<T>` определяется как nullable автоматически. Для `OffsetDateTime`
-используется feature `time` у `rusqlite` и UTC-значения.
+`Option<T>` определяется как nullable автоматически. ORM декодирует поля через
+общие `Row` и `FromDatabaseValue`. В SQLite `OffsetDateTime` хранится как RFC3339
+`TEXT` и декодируется в UTC; подробнее см. [SQLite runtime](sqlite.md).
+Типы PostgreSQL описаны в [руководстве backend](backends.md#типы-и-ключи).
+
+### Rust-имя и SQL-колонка
+
+Если существующая колонка называется `caption`, Rust-поле можно назвать `title`:
+
+```rust
+#[derive(Debug, che_orm::Model)]
+#[orm(table = "articles")]
+struct Article {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(db_column = "caption")]
+    title: String,
+}
+```
+
+В запросах используется `Article::TITLE`, а SQL обращается к `caption`.
+Переименование только Rust-поля при сохранении `db_column` не создаёт операции
+изменения схемы и не переписывает данные. Для новых колонок с совпадающими именами
+этот атрибут не нужен. В sync-моделях стабильное wire-имя задаётся отдельно через
+`#[orm(sync_name = "...")]`.
 
 `Option<ImageField>` хранит относительный ключ файла либо `NULL`, например
 `avatars/photo.png`. Он не содержит байты изображения или HTTP-адрес. В
@@ -225,9 +251,10 @@ let user_ids = users.iter().map(|user| user.id);
 let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
 ```
 
-`fetch_by_many` выполняет один параметризованный `IN`-запрос и для пустого
-набора возвращает пустой список. Затем дочерние строки нужно сгруппировать по
-`post.user_id` в памяти.
+`fetch_by_many` выполняет параметризованные `IN`-запросы, автоматически разбивая
+ключи на порции по лимиту backend. Пустой набор возвращает пустой список без
+запроса; результаты объединяются без повторов по primary key. Затем дочерние
+строки нужно сгруппировать по `post.user_id` в памяти.
 
 Для queryset доступны typed eager-loading wrappers:
 

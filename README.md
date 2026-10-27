@@ -256,6 +256,19 @@ let deleted = database.delete::<User>(user.id).await?;
 assert!(deleted);
 ```
 
+Чтобы сохранить все обычные поля уже загруженного объекта:
+
+```rust
+let mut user = database.get::<User>(user_id).await?.unwrap();
+user.name = "Alice Cooper".into();
+let saved = database.save(&user).await?; // Option<User>
+```
+
+`save` обновляет существующую строку по primary key и возвращает `None`, если
+строки нет. Метод сохраняет `auto_now_add`, обновляет `auto_now` и возвращает
+модель из `RETURNING`; исходный объект не изменяется. Для новой строки используйте
+`create` или `insert`. В транзакции доступен `tx.save(&user).await?`.
+
 Для сложных условий и массовых операций используйте низкоуровневый AST.
 `UPDATE` и `DELETE` должны иметь фильтр. Массовую операцию нужно разрешить
 явно через `.allow_all()`:
@@ -305,6 +318,7 @@ let user = database
     .create::<User>()
     .set(User::EMAIL, "alice@example.test")
     .set(User::NAME, "Alice")
+    .set(User::IS_ACTIVE, true)
     .execute()
     .await?;
 let user_id = user.id;
@@ -321,8 +335,8 @@ let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
 ```
 
 Дочерние строки затем группируются по `post.user_id` в памяти. Пустой набор
-возвращает пустой список; для очень больших наборов ключей используйте
-несколько порций из-за лимита SQLite на bind-параметры.
+возвращает пустой список без запроса. ORM автоматически разбивает ключи на
+порции с учётом лимита bind-параметров выбранного backend.
 
 `fetch_by` строит обычный параметризованный `SELECT`. SQLite foreign keys
 включаются для каждого соединения пула автоматически. Поэтому

@@ -153,6 +153,141 @@ async fn fixture() -> (Database, Option<(Database, String)>) {
         )
     }
 }
+
+#[derive(Debug, Model)]
+#[orm(table = "portable_saved_notes")]
+struct SavedNote {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(db_column = "caption", unique)]
+    title: String,
+    document: che_orm::JsonField,
+    optional_text: Option<String>,
+    #[orm(auto_now_add)]
+    created: OffsetDateTime,
+    #[orm(auto_now)]
+    updated: OffsetDateTime,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "portable_saved_keys")]
+struct SavedKey {
+    #[orm(primary_key)]
+    id: i64,
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires TEST_POSTGRES_URL and a live PostgreSQL server"
+)]
+async fn portable_save_updates_materialized_models_and_respects_transactions() {
+    let (db, cleanup) = fixture().await;
+    db.create_table::<SavedNote>().await.unwrap();
+    db.create_table::<SavedKey>().await.unwrap();
+    db.create_table::<Account>().await.unwrap();
+    let document = che_orm::JsonField(che_orm::serde_json::json!({"text": "original"}));
+    let mut note = db
+        .create::<SavedNote>()
+        .set(SavedNote::TITLE, "original")
+        .set(SavedNote::DOCUMENT, document.clone())
+        .set(SavedNote::OPTIONAL_TEXT, Some("remove me"))
+        .execute()
+        .await
+        .unwrap();
+    let other = db
+        .create::<SavedNote>()
+        .set(SavedNote::TITLE, "other")
+        .set(SavedNote::DOCUMENT, document)
+        .execute()
+        .await
+        .unwrap();
+    let created = note.created;
+    note.title = "O'Reilly; -- saved".into();
+    note.document = che_orm::JsonField(che_orm::serde_json::json!({"saved": [1, null]}));
+    note.optional_text = None;
+    // A stale/tampered object must not overwrite either managed timestamp.
+    note.created = OffsetDateTime::UNIX_EPOCH;
+    note.updated = OffsetDateTime::UNIX_EPOCH;
+    let saved = db.save(&note).await.unwrap().unwrap();
+    assert_eq!(saved.id, note.id);
+    assert_eq!(saved.title, note.title);
+    assert_eq!(saved.document, note.document);
+    assert!(saved.optional_text.is_none());
+    assert_eq!(saved.created, created);
+    assert!(saved.updated >= created);
+    assert_eq!(note.updated, OffsetDateTime::UNIX_EPOCH);
+    assert_eq!(
+        db.get::<SavedNote>(other.id).await.unwrap().unwrap().title,
+        "other"
+    );
+
+    note.title = other.title;
+    assert_eq!(
+        db.save(&note).await.unwrap_err().constraint_kind(),
+        Some(che_orm::ConstraintKind::Unique)
+    );
+    assert_eq!(
+        db.get::<SavedNote>(note.id).await.unwrap().unwrap().title,
+        saved.title
+    );
+
+    let id = note.id;
+    db.transaction(move |tx| {
+        Box::pin(async move {
+            let mut note = tx.get::<SavedNote>(id).await?.unwrap();
+            note.title = "committed".into();
+            assert_eq!(tx.save(&note).await?.unwrap().title, "committed");
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let rollback: Result<(), OrmError> = db
+        .transaction(move |tx| {
+            Box::pin(async move {
+                let mut note = tx.get::<SavedNote>(id).await?.unwrap();
+                note.title = "rolled back".into();
+                tx.save(&note).await?;
+                Err(OrmError::Interaction("requested rollback".into()))
+            })
+        })
+        .await;
+    assert!(rollback.is_err());
+    assert_eq!(
+        db.get::<SavedNote>(id).await.unwrap().unwrap().title,
+        "committed"
+    );
+    assert!(db.delete::<SavedNote>(id).await.unwrap());
+    assert!(db.save(&saved).await.unwrap().is_none());
+    assert_eq!(db.count::<SavedNote>().await.unwrap(), 1);
+
+    let mut account = account(&db, "UUID account").await;
+    account.name = "UUID saved".into();
+    account.enabled = false;
+    account.optional_count = Some(42);
+    let saved = db.save(&account).await.unwrap().unwrap();
+    assert_eq!(saved.id, account.id);
+    assert_eq!(saved.name, "UUID saved");
+    assert!(!saved.enabled);
+    assert_eq!(saved.optional_count, Some(42));
+    account.id = Uuid::now_v7();
+    assert!(db.save(&account).await.unwrap().is_none());
+    assert_eq!(db.count::<Account>().await.unwrap(), 1);
+
+    let key = db.create::<SavedKey>().execute().await.unwrap();
+    assert!(matches!(
+        db.save(&key).await,
+        Err(OrmError::QueryBuild(che_orm::QueryBuildError::EmptyUpdate))
+    ));
+    if let Some((admin, schema)) = cleanup {
+        admin
+            .execute_sql(format!("DROP SCHEMA \"{schema}\" CASCADE"), vec![])
+            .await
+            .unwrap();
+    }
+}
+
 async fn account(db: &Database, name: &str) -> Account {
     db.create::<Account>()
         .set(Account::NAME, name)

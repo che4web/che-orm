@@ -75,12 +75,35 @@ let deleted = database.delete::<User>(user.id).await?;
 `get` and `first` return `Option` when the row is absent. `update` also returns
 `Option`; `delete` returns `bool`.
 
-`create` and `update` use SQLite `RETURNING` and return values obtained directly
+`create`, `update` and `save` use SQLite `RETURNING` and return values obtained directly
 from the ORM operation. The ORM does not create `AFTER INSERT` or `AFTER UPDATE`
 triggers, so when the database is used only through the ORM, the returned model
 matches the stored values. If such triggers are added manually, through raw SQL,
 or in a migration, they can change the row after SQLite produces the `RETURNING`
 result; that value does not reflect later trigger changes.
+
+## Saving a Materialized Model
+
+`save` updates every ordinary field of an existing row by primary key:
+
+```rust
+let mut user = database.get::<User>(user_id).await?.unwrap();
+user.name = "Alice Cooper".into();
+let saved = database.save(&user).await?; // Option<User>
+```
+
+It never inserts a new row: a missing row returns `None`. The stored primary key
+and `auto_now_add` fields are preserved, while the ORM refreshes `auto_now`.
+Ordinary fields, including nullable values, JSON and trusted `ImageField` keys,
+come from the object; `db_column` mappings are respected. The result is the
+`RETURNING` model; the supplied object is not modified. Models without ordinary
+fields or managed updates return `EmptyUpdate`. For individual field changes,
+use `update().set(...)`: `save` writes all ordinary fields and can overwrite
+changes made since the object was loaded.
+
+Inside a transaction use `tx.save(&user).await?`. For synchronized models, use
+the configured `client.database()` / `server.database()` handle to commit the
+write and sync metadata together.
 
 ## Low-Level Insert
 
@@ -194,8 +217,8 @@ let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
 
 `fetch_by_many` builds a parameterized `IN` query. An empty set returns an empty
 list without accessing the database. Results should be grouped by `post.user_id`
-in memory. For many keys, split them into chunks to stay within SQLite's limit on
-bind parameters.
+in memory. The ORM automatically chunks keys to respect SQLite's bind-parameter
+limit and combines results without duplicate primary keys.
 
 `Database` enables `PRAGMA foreign_keys = ON` whenever it obtains a connection,
 so a nonexistent `user_id` fails with a SQLite error, and deleting a user

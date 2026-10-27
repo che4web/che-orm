@@ -22,3 +22,7 @@ tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 
 [[example]]
 name = "offline"
+
+[[example]]
+name = "model_log"
+required-features = ["sqlite"]

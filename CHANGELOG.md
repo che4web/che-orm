@@ -2,6 +2,9 @@
 
 ## 0.3.0
 
+- Add `Database::save(&model)` and `Transaction::save(&model)` to update existing
+  materialized models by primary key, preserving managed creation timestamps and
+  capturing writes through configured sync runtimes.
 - Add shared `#[orm(sync)]` models with explicit client/server registration,
   stable wire field names and infrastructure-owned service columns.
 - Capture ordinary ORM writes through configured sync database handles and

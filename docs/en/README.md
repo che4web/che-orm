@@ -15,6 +15,8 @@ the same async high-level API.
 - [Compile-tested API examples](api-examples.md): models, relations, serializers, and queries.
 - [Per-model synchronization](../model-sync.md): protocol-2 journals, shared UUID
   models, transport ownership and Tauri integration (English).
+- [Shared-object synchronization](../../../che-rest/docs/object-sync.md): explicit
+  protocol-3 delivery with per-object permissions (English).
 - [Scoped synchronization compatibility](../sync.md): legacy scoped feeds,
   snapshots and explicit full loading (English).
 

@@ -33,6 +33,22 @@ See [the protocol-2 guide](../docs/model-sync.md),
 [REST integration](../../che-rest/docs/model-sync.md) and the runnable
 [Todo server / Tauri client](../../che-tauri/examples/todo-sync/README.md).
 
+Run the native journal replay and offline field-merge example (SQLite):
+
+```bash
+cargo run -p che-sync --example model_log
+```
+
+It uses the journal application API directly; the Todo application demonstrates
+delivery through a `ModelLogTransport` adapter.
+
+## Protocol 3: shared objects
+
+Per-object permissions use explicit `ModelLogClient::open_objects` and
+`SyncServer::object_changes` APIs. Protocol 2 keeps whole-model authorization;
+upgrades are explicit and require submitted writes to settle first. See the
+[object-sync contract](../../che-rest/docs/object-sync.md).
+
 ## Scoped compatibility protocol
 
 `SyncClient` / `SyncEngine` retain scoped feeds. Their `pull` reports explicit
