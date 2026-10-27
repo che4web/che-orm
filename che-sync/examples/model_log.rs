@@ -66,18 +66,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.apply(page).await?;
 
     // The configured client handle captures an offline edit transactionally.
-    client
+    let mut local = client
         .database()
-        .update::<Note>(note.id)
-        .set(Note::TITLE, "Offline title")
-        .execute()
-        .await?;
+        .get::<Note>(note.id)
+        .await?
+        .ok_or("local note is missing")?;
+    local.title = "Offline title".into();
+    let local = client
+        .database()
+        .save(&local)
+        .await?
+        .ok_or("local note was deleted")?;
+    assert_eq!(local.title, "Offline title");
+    let mut remote = server
+        .database()
+        .get::<Note>(note.id)
+        .await?
+        .ok_or("server note is missing")?;
+    remote.body = "Server body".into();
     server
         .database()
-        .update::<Note>(note.id)
-        .set(Note::BODY, "Server body")
-        .execute()
-        .await?;
+        .save(&remote)
+        .await?
+        .ok_or("server note was deleted")?;
 
     // Applying a later page merges independent fields and retains local work.
     let cursor = client.cursor::<Note>().await?;

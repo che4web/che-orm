@@ -105,22 +105,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     flush(&a_feed).await?;
     b_feed.full_load().await?;
 
+    // Save freshly loaded models through the configured handles to capture the edits.
+    let mut first = a
+        .database()
+        .get::<Note>(note.id)
+        .await?
+        .ok_or("device A note is missing")?;
+    let mut second = b
+        .database()
+        .get::<Note>(note.id)
+        .await?
+        .ok_or("device B note is missing")?;
+    first.title = "Title from device A".into();
+    second.body = "Body from device B".into();
     a.database()
-        .update::<Note>(note.id)
-        .set(Note::TITLE, "Title from device A")
-        .execute()
-        .await?;
+        .save(&first)
+        .await?
+        .ok_or("device A note was deleted")?;
     b.database()
-        .update::<Note>(note.id)
-        .set(Note::BODY, "Body from device B")
-        .execute()
-        .await?;
+        .save(&second)
+        .await?
+        .ok_or("device B note was deleted")?;
     flush(&a_feed).await?;
     // Receive without submitting device B's offline edit.
     println!("Download only: {:?}", b_feed.pull().await?);
     flush(&b_feed).await?;
     a_feed.pull().await?;
-    println!("Merged: {:?}", a.database().get::<Note>(note.id).await?);
+    let merged = a
+        .database()
+        .get::<Note>(note.id)
+        .await?
+        .ok_or("merged note is missing")?;
+    assert_eq!(merged.title, "Title from device A");
+    assert_eq!(merged.body, "Body from device B");
+    println!("Merged: {merged:?}");
     for (admin, schema) in [server_cleanup, first_cleanup, second_cleanup]
         .into_iter()
         .flatten()
