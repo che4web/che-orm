@@ -2,15 +2,19 @@
 
 ## Release versions
 
-Workspace package versions (core/macros 0.3.2 are already published; the initial
-sync publications are 0.1.0):
+Current workspace package versions:
 
 | Package | Version |
 | --- | --- |
 | che-orm-macros | 0.3.2 |
-| che-orm | 0.3.2 |
+| che-orm | 0.3.3 |
 | che-sync-protocol | 0.1.0 |
-| che-sync | 0.1.0 |
+| che-sync | 0.1.1 |
+
+The 0.3.3 core and 0.1.1 sync patches add capture of ordinary-parent referential
+actions for model journals and integer foreign-key support. Macros and protocol
+versions are unchanged. Publish core 0.3.3 before sync 0.1.1, then downstream
+che-rest 0.3.2. The initial-publication notes below describe the previous candidate.
 
 `che-orm-examples` is private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.
