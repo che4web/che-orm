@@ -22,6 +22,25 @@ let database = che_orm::Database::connect_in_memory().await?;
 An in-memory database must use a pool size of 1, otherwise every connection
 receives a separate `:memory:` database.
 
+## Timestamp comparisons
+
+`OffsetDateTime` and `Option<OffsetDateTime>` remain RFC3339 `TEXT` columns.
+Derived timestamp fields use `COLLATE che_datetime` in filters and ordering,
+including joined fields. Each ORM connection registers this collation, which
+compares instants at nanosecond precision. Existing values with different
+fractional precision or UTC offsets work without rewriting data or migrations.
+PostgreSQL continues to use native timestamp comparisons.
+
+For hand-written ASTs, use `ColumnRef::datetime(table, column)`; manually declared
+timestamp fields use `ModelField::datetime(table, column)`. `ColumnRef::new` and
+`ModelField::new` retain ordinary SQL comparison semantics. Raw SQL must request
+`COLLATE che_datetime` explicitly. External SQLite connections executing that SQL
+must also register the collation. Existing binary text indexes cannot serve
+chronological comparisons; declare a matching `COLLATE che_datetime` index in an
+application-owned migration when needed.
+
+An offset without a limit compiles to `LIMIT -1 OFFSET ...` on SQLite.
+
 ## Creating the Schema
 
 ```rust

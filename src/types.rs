@@ -138,11 +138,25 @@ impl TableRef {
 pub struct ColumnRef {
     pub table: &'static str,
     pub name: &'static str,
+    /// Compare RFC3339 text chronologically on SQLite; other dialects ignore this hint.
+    pub datetime: bool,
 }
 
 impl ColumnRef {
     pub const fn new(table: &'static str, name: &'static str) -> Self {
-        Self { table, name }
+        Self {
+            table,
+            name,
+            datetime: false,
+        }
+    }
+
+    pub const fn datetime(table: &'static str, name: &'static str) -> Self {
+        Self {
+            table,
+            name,
+            datetime: true,
+        }
     }
 }
 
@@ -223,6 +237,7 @@ impl Expr {
 pub struct ModelField<M, T> {
     table: &'static str,
     column: &'static str,
+    datetime: bool,
     _marker: PhantomData<fn() -> (M, T)>,
 }
 
@@ -231,12 +246,27 @@ impl<M, T> ModelField<M, T> {
         Self {
             table,
             column,
+            datetime: false,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Constructs a timestamp field, including nullable timestamps.
+    pub const fn datetime(table: &'static str, column: &'static str) -> Self {
+        Self {
+            table,
+            column,
+            datetime: true,
             _marker: PhantomData,
         }
     }
 
     pub const fn column(&self) -> ColumnRef {
-        ColumnRef::new(self.table, self.column)
+        ColumnRef {
+            table: self.table,
+            name: self.column,
+            datetime: self.datetime,
+        }
     }
 
     fn comparison<V>(self, op: CompareOp, value: V) -> Expr

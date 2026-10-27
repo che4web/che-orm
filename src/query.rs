@@ -404,7 +404,10 @@ impl<From, To, Relation, Key> BelongsTo<From, To, Relation, Key> {
     }
 
     pub const fn related_field<T>(&self, field: ModelField<To, T>) -> JoinedField<T> {
-        JoinedField::new(ColumnRef::new(self.alias, field.column().name))
+        JoinedField::new(ColumnRef {
+            table: self.alias,
+            ..field.column()
+        })
     }
 
     pub fn foreign_key(&self, model: &From) -> Key {

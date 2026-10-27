@@ -19,6 +19,8 @@ pub trait SqlDialect {
     fn column_type(column_type: ColumnType, output: &mut String);
     fn identity_primary_key(output: &mut String);
     fn timestamp_default(output: &mut String);
+    fn datetime_collation(_output: &mut String) {}
+    fn offset_without_limit(_output: &mut String) {}
 }
 
 pub struct PostgresDialect;
@@ -62,6 +64,12 @@ impl SqlDialect for PostgresDialect {
 
 pub struct SqliteDialect;
 impl SqlDialect for SqliteDialect {
+    fn datetime_collation(output: &mut String) {
+        output.push_str(" COLLATE che_datetime");
+    }
+    fn offset_without_limit(output: &mut String) {
+        output.push_str(" LIMIT -1");
+    }
     fn placeholder(output: &mut String, _index: usize) {
         output.push('?');
     }
@@ -186,9 +194,16 @@ impl<D: SqlDialect> SqlCompiler<D> {
         D::placeholder(&mut self.sql, self.params.len());
     }
 
+    fn push_comparable_column(&mut self, column: &ColumnRef) {
+        self.push_column(column);
+        if column.datetime {
+            D::datetime_collation(&mut self.sql);
+        }
+    }
+
     fn compile_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Column(column) => self.push_column(column),
+            Expr::Column(column) => self.push_comparable_column(column),
             Expr::Value(value) => self.push_value(value),
             Expr::Compare { left, op, right } => {
                 self.sql.push('(');
@@ -296,7 +311,7 @@ impl<D: SqlDialect> SqlCompiler<D> {
                 if index != 0 {
                     self.sql.push_str(", ");
                 }
-                self.push_column(&order.column);
+                self.push_comparable_column(&order.column);
                 self.sql.push_str(match order.direction {
                     OrderDirection::Asc => " ASC",
                     OrderDirection::Desc => " DESC",
@@ -308,6 +323,9 @@ impl<D: SqlDialect> SqlCompiler<D> {
             self.sql.push_str(&limit.to_string());
         }
         if let Some(offset) = query.offset {
+            if query.limit.is_none() {
+                D::offset_without_limit(&mut self.sql);
+            }
             self.sql.push_str(" OFFSET ");
             self.sql.push_str(&offset.to_string());
         }

@@ -41,6 +41,19 @@ impl Session {
                     connection.execute_batch("ROLLBACK")?;
                 }
                 connection.execute_batch("PRAGMA foreign_keys = ON")?;
+                connection.create_collation("che_datetime", |left, right| {
+                    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+                    // Keep a total order even if application-owned raw SQL stored invalid text.
+                    match (
+                        OffsetDateTime::parse(left, &Rfc3339),
+                        OffsetDateTime::parse(right, &Rfc3339),
+                    ) {
+                        (Ok(left), Ok(right)) => left.cmp(&right),
+                        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                        (Err(_), Err(_)) => left.cmp(right),
+                    }
+                })?;
                 Ok(())
             })
             .await?;

@@ -976,9 +976,15 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         }
 
         columns.push(LitStr::new(&column, field_name.span()));
+        let field_constructor =
+            if is_offset_date_time(&field_type) || is_option_offset_date_time(&field_type) {
+                quote!(datetime)
+            } else {
+                quote!(new)
+            };
         constants.push(quote! {
             pub const #constant: #orm::ModelField<Self, #field_type> =
-                #orm::ModelField::new(#table, #column);
+                #orm::ModelField::#field_constructor(#table, #column);
         });
 
         let primary_key = field_attributes.primary_key;
@@ -1168,8 +1174,8 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             }
             impl #model {
                 pub const REVISION: #orm::ModelField<Self, i64> = #orm::ModelField::new(#table, "revision");
-                pub const UPDATED_AT: #orm::ModelField<Self, #orm::time::OffsetDateTime> = #orm::ModelField::new(#table, "updated_at");
-                pub const DELETED_AT: #orm::ModelField<Self, Option<#orm::time::OffsetDateTime>> = #orm::ModelField::new(#table, "deleted_at");
+                pub const UPDATED_AT: #orm::ModelField<Self, #orm::time::OffsetDateTime> = #orm::ModelField::datetime(#table, "updated_at");
+                pub const DELETED_AT: #orm::ModelField<Self, Option<#orm::time::OffsetDateTime>> = #orm::ModelField::datetime(#table, "deleted_at");
                 pub const SYNC_SCOPE: #orm::ModelField<Self, String> = #orm::ModelField::new(#table, "sync_scope");
             }
         }
