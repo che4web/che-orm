@@ -2,17 +2,22 @@
 
 ## Release versions
 
-The next release contains:
+Workspace package versions for the 0.3.1 release preparation:
 
 | Package | Version |
 | --- | --- |
-| che-orm-macros | 0.3.0 |
-| che-orm | 0.3.0 |
+| che-orm-macros | 0.3.1 |
+| che-orm | 0.3.1 |
 | che-sync-protocol | 0.1.0 |
 | che-sync | 0.1.0 |
 
 `che-orm-examples` is private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.
+
+The 0.3.1 patch releases core and macros together. It adds materialized-model
+`save`, fixes SQLite timestamp comparisons and offset-only queries, and includes
+the application template. Sync package versions remain unchanged; their archive
+checks are workspace compatibility checks, not instructions to republish them.
 
 The 0.3 ORM release introduces async database access with feature-selected
 SQLite/PostgreSQL backends and role-aware synchronization. Shared models use
@@ -35,6 +40,7 @@ cargo test --workspace --locked
 cargo doc --workspace --no-deps --locked
 cargo run -p che-orm-examples --bin manage --locked -- schema
 cargo run -p che-sync --example offline --locked
+python3 scripts/check-template.py
 cargo +1.88.0 check --workspace --all-targets --locked
 cargo +1.88.0 check -p che-orm -p che-sync --all-targets --locked --no-default-features --features postgres
 cargo package -p che-orm-macros -p che-orm -p che-sync-protocol -p che-sync --locked
@@ -73,9 +79,11 @@ dependency to become available in the registry before publishing its consumers:
 ```bash
 cargo publish -p che-orm-macros
 cargo publish -p che-orm
-cargo publish -p che-sync-protocol
-cargo publish -p che-sync
+python3 scripts/check-template.py --published
 ```
+
+After registry verification, create the release tag `v0.3.1`. Publish sync crates
+separately only when making a versioned sync release.
 
 `cargo publish --dry-run -p PACKAGE` can be used before each step once its
 dependencies are available. The multi-package `cargo package` check above

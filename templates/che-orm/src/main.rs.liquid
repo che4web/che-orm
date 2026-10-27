@@ -1,0 +1,35 @@
+use che_orm::Database;
+
+use {{crate_name}}::{models::Task, settings::database_url};
+
+#[tokio::main]
+async fn main() -> Result<(), che_orm::OrmError> {
+    // Apply compiled migrations with `cargo run --bin manage -- migrate` first.
+    let database = Database::connect(database_url()).await?;
+    let mut task = database
+        .create::<Task>()
+        .set(Task::TITLE, "Try che-orm")
+        .execute()
+        .await?;
+    println!("Created: {task:?}");
+
+    let loaded = database.get::<Task>(task.id).await?;
+    println!("Loaded: {loaded:?}");
+
+    task.done = true;
+    let updated = database.save(&task).await?;
+    println!("Updated: {updated:?}");
+
+    let tasks = database
+        .query::<Task>()
+        .filter(Task::DONE.eq(true))
+        .order_by(Task::ID.desc())
+        .limit(20)
+        .all(&database)
+        .await?;
+    println!("Completed tasks: {tasks:?}");
+
+    let deleted = database.delete::<Task>(task.id).await?;
+    println!("Deleted demo task: {deleted}");
+    Ok(())
+}

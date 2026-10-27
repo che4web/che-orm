@@ -3,13 +3,13 @@
 Включается ровно один backend. SQLite выбран по умолчанию:
 
 ```toml
-che-orm = "0.3"
+che-orm = "0.3.1"
 ```
 
 Для PostgreSQL:
 
 ```toml
-che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.1", default-features = false, features = ["postgres"] }
 ```
 
 Оба features одновременно или отсутствие обоих — ошибка компиляции. Типы
@@ -113,7 +113,7 @@ cargo run -p che-orm-examples --no-default-features --features postgres --bin tr
 - Ручной `Model` также реализует `primary_key_value` для пакетных запросов и
   группировки связей; реализации по умолчанию с panic больше нет.
 - Для прямого SQLite `query_row` есть `Model::from_sqlite_row`.
-- Core 0.3.0 использует макросы 0.3.0. SQLite pool accessor убран из общего фасада.
+- Core 0.3.1 требует макросы 0.3.1 для timestamp metadata. SQLite pool accessor убран из общего фасада.
 
 ## Проверка
 

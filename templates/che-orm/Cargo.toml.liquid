@@ -1,0 +1,18 @@
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+default-run = "{{project-name}}"
+publish = false
+
+[workspace]
+
+[features]
+default = ["{{backend}}"]
+sqlite = ["che-orm/sqlite"]
+postgres = ["che-orm/postgres"]
+
+[dependencies]
+che-orm = { version = "0.3.1", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

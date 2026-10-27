@@ -41,11 +41,26 @@ HTTP и REST-маппинг принадлежат `che-rest`; Tauri-коман�
 
 ## Быстрый старт
 
+Готовое приложение с выбором SQLite/PostgreSQL, моделью и compiled migrations
+можно создать через `cargo-generate`:
+
+```bash
+cargo install cargo-generate --locked
+cargo generate --git https://github.com/che4web/che-orm templates/che-orm --name my-app
+cd my-app
+cargo run --bin manage -- migrate
+cargo run
+```
+
+Для PostgreSQL перед миграцией создайте БД и задайте `CHE_ORM_DATABASE_URL`.
+Локальная генерация и устройство проекта описаны в
+[руководстве по шаблону](docs/template.md).
+
 Добавьте зависимость:
 
 ```toml
 [dependencies]
-che-orm = "0.3"
+che-orm = "0.3.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```
@@ -110,7 +125,7 @@ Managed timestamp-поля не передаются в `INSERT`: их знач�
 Включается ровно один feature. SQLite выбран по умолчанию. Для PostgreSQL:
 
 ```toml
-che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.1", default-features = false, features = ["postgres"] }
 ```
 
 В обоих случаях приложение вызывает

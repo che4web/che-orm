@@ -53,6 +53,12 @@ cargo run -p che-orm-examples --bin serializers
 
 ## Documentation
 
+The standalone application template lives in `templates/che-orm`. When changing
+it, install `cargo-generate` and run `python3 scripts/check-template.py`. This
+generates both backend variants outside the workspace, verifies their local
+dependencies and compiled history, and runs SQLite migrations and CRUD.
+After releasing, use `--published` to verify dependencies from crates.io.
+
 Russian guides in `docs/` are the original documentation. Keep their English
 counterparts in `docs/en/` consistent when changing public behavior. Update
 `README.md` and `README.en.md` when installation, backend status, or the main

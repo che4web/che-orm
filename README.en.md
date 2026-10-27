@@ -33,9 +33,23 @@ transport-independent delivery; HTTP belongs to `che-rest` and Tauri invoke to
 
 ## Quick Start
 
+Generate an application with SQLite/PostgreSQL selection, a model and compiled
+migrations using `cargo-generate`:
+
+```bash
+cargo install cargo-generate --locked
+cargo generate --git https://github.com/che4web/che-orm templates/che-orm --name my-app
+cd my-app
+cargo run --bin manage -- migrate
+cargo run
+```
+
+For PostgreSQL, create the database and set `CHE_ORM_DATABASE_URL` before migrating.
+See the [template guide](docs/en/template.md) for local generation and project layout.
+
 ```toml
 [dependencies]
-che-orm = "0.3"
+che-orm = "0.3.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```
@@ -83,7 +97,7 @@ migrations for persistent application schemas.
 Enable exactly one backend. SQLite is the default. For PostgreSQL:
 
 ```toml
-che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.1", default-features = false, features = ["postgres"] }
 ```
 
 The same `Database::connect(settings.database_url()).await?` call accepts a

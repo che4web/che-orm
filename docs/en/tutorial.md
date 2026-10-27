@@ -5,6 +5,9 @@ relations. `create_table` is intended only for tests and local experiments.
 
 ## 1. Create an Application
 
+For a ready-to-run project with a model and compiled migrations, use the
+[cargo-generate template](template.md). The steps below show manual setup.
+
 ```bash
 cargo new blog-app
 ```

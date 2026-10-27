@@ -1,0 +1,62 @@
+use std::{env, process::ExitCode};
+
+use che_orm::{CurrentDialect, Database};
+
+use {{crate_name}}::{migrations, registry, settings::database_url};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run(env::args().skip(1).collect()).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("manage: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Vec<String>) -> Result<()> {
+    match args.as_slice() {
+        [] => help(),
+        [command] if command == "help" => help(),
+        [command] if command == "schema" => {
+            print!("{}", registry().to_sql::<CurrentDialect>());
+        }
+        [command] if command == "migrate" => {
+            let database = database().await?;
+            let applied = database.migrate(migrations::graph()?).await?;
+            println!("Applied {applied} migration(s).");
+        }
+        [command, action] if command == "migrate" && action == "status" => {
+            let database = database().await?;
+            let history = database.migration_history().await?;
+            for migration in migrations::all() {
+                let key = (migration.id.app.clone(), migration.id.name.clone());
+                let marker = if history.contains_key(&key) { "X" } else { " " };
+                println!("[{marker}] {}:{}", migration.id.app, migration.id.name);
+            }
+        }
+        _ => return Err("unknown command; run `cargo run --bin manage -- help`".into()),
+    }
+    Ok(())
+}
+
+async fn database() -> Result<Database> {
+    let url = database_url();
+    if url.trim().is_empty() {
+        return Err("CHE_ORM_DATABASE_URL must not be empty".into());
+    }
+    #[cfg(feature = "sqlite")]
+    if url == ":memory:" || url == "sqlite://:memory:" {
+        return Err("migration commands require a persistent SQLite file".into());
+    }
+    Ok(Database::connect(url).await?)
+}
+
+fn help() {
+    println!(
+        "Usage:\n  cargo run --bin manage -- schema\n  cargo run --bin manage -- migrate\n  cargo run --bin manage -- migrate status"
+    );
+}

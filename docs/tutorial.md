@@ -7,6 +7,9 @@ relations и показывает переход к compiled migrations. Для 
 
 ## 1. Создайте приложение
 
+Готовый проект с моделью и compiled migrations можно создать через
+[шаблон cargo-generate](template.md). Шаги ниже показывают ручную настройку.
+
 ```bash
 cargo new blog-app
 ```

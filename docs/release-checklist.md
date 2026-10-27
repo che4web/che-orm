@@ -48,9 +48,9 @@ the new macros are published, patch only that dependency to the unpacked macro
 archive (use the release's macro and core versions in these paths):
 
 ```bash
-cargo test --manifest-path target/package/che-orm-0.3.0/Cargo.toml \
-  --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.0"' \
-  --test public_api_examples --test uuid --test runtime
+cargo test --manifest-path target/package/che-orm-0.3.1/Cargo.toml \
+  --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.1"' \
+  --test public_api_examples --test uuid --test runtime --test sqlite_datetime
 ```
 
 Inspect the macro archive with:
@@ -72,11 +72,11 @@ cargo package --manifest-path che-orm-macros/Cargo.toml --list
 
    ```bash
    cargo package
-   cargo test --manifest-path target/package/che-orm-0.3.0/Cargo.toml --test public_api_examples --test uuid --test runtime
+    cargo test --manifest-path target/package/che-orm-0.3.1/Cargo.toml --test public_api_examples --test uuid --test runtime --test sqlite_datetime
    cargo publish
    ```
 
-4. Publish `che-sync-protocol`, wait for its registry availability, then publish
+4. For a versioned sync release, publish `che-sync-protocol`, wait for its registry availability, then publish
    `che-sync` (which also requires the new core version):
 
    ```bash
@@ -85,6 +85,8 @@ cargo package --manifest-path che-orm-macros/Cargo.toml --list
    ```
 
 5. Verify the published documentation and create the matching Git tag.
+   For 0.3.1, sync versions remain unchanged; publish only macros and core, run
+   `python3 scripts/check-template.py --published`, and tag `v0.3.1`.
 
 Do not publish if the package contents, generated SQL, or migration changes are
 not understood.

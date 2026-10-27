@@ -6,6 +6,7 @@ the same async high-level API.
 
 ## Guides
 
+- [Application template](template.md): generate a standalone project with backend selection and compiled migrations.
 - [Backends and PostgreSQL](backends.md): feature selection, transactions, migrations and the 0.3 upgrade.
 - [Tutorial](tutorial.md): create related models, use SQLite, and adopt compiled migrations.
 - [Models and schema](models.md): model derives, fields, relations, and serializers.

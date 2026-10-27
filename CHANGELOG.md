@@ -1,10 +1,20 @@
 # Changelog
 
-## 0.3.0
+## 0.3.1
 
+- Fix SQLite timestamp filters, joins and ordering with the `che_datetime`
+  collation, preserving nanosecond precision and supporting historical RFC3339
+  values with different fractional precision or UTC offsets without rewriting rows.
+- Fix SQLite queries and counts with an offset but no limit.
+- Require `che-orm-macros` 0.3.1 for generated timestamp field metadata.
+- Add a cargo-generate application template with backend selection, compiled
+  migrations, a management CLI and standalone generation checks.
 - Add `Database::save(&model)` and `Transaction::save(&model)` to update existing
   materialized models by primary key, preserving managed creation timestamps and
   capturing writes through configured sync runtimes.
+
+## 0.3.0
+
 - Add shared `#[orm(sync)]` models with explicit client/server registration,
   stable wire field names and infrastructure-owned service columns.
 - Capture ordinary ORM writes through configured sync database handles and

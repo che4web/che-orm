@@ -6,6 +6,19 @@ on:
   workflow_dispatch:
 
 jobs:
+  template:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        backend: [sqlite, postgres]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo install cargo-generate --version 0.23.7 --locked
+      - run: python3 scripts/check-template.py --backend ${{ matrix.backend }}
+
   sqlite:
     runs-on: ubuntu-latest
     steps:

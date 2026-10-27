@@ -1,0 +1,79 @@
+# {{project-name}}
+
+Rust application using `che-orm` and the **{{backend}}** backend.
+Requires Rust 1.88 or newer. The dependency requires che-orm 0.3.1 or later.
+
+## Run
+
+{% if backend == "postgres" -%}
+Create a PostgreSQL database first, then set its connection URL:
+
+```bash
+export CHE_ORM_DATABASE_URL='postgresql://postgres:postgres@localhost/{{crate_name}}'
+```
+
+{% endif -%}
+Apply migrations explicitly before running the CRUD demo:
+
+```bash
+cargo run --bin manage -- schema
+cargo run --bin manage -- migrate
+cargo run --bin manage -- migrate status
+cargo run
+```
+
+The demo creates, reads, saves with `Database::save`, and deletes one task. It does not apply
+migrations at startup.
+
+{% if backend == "sqlite" -%}
+SQLite uses `app.db` by default. Set `CHE_ORM_DATABASE_URL` to use a different
+file. The migration CLI requires a persistent database; tests use in-memory SQLite.
+{% else -%}
+Without `CHE_ORM_DATABASE_URL`, the default is
+`postgresql://localhost/{{crate_name}}`. Authentication and TLS options belong in
+your connection settings.
+{% endif %}
+Exactly one backend feature must be enabled. To switch to the other backend,
+disable defaults and enable that feature on **every** command, for example:
+
+```bash
+cargo run --no-default-features --features {% if backend == "sqlite" %}postgres{% else %}sqlite{% endif %} --bin manage -- schema
+```
+
+## Project layout
+
+- `src/models.rs`: application models.
+- `src/lib.rs`: `AppConfig` and application registry.
+- `src/settings.rs`: database connection settings.
+- `src/migrations/`: compiled migration history and its registry.
+- `src/bin/manage.rs`: schema, migration and migration-status commands.
+- `src/main.rs`: async CRUD demo.
+- `tests/runtime.rs`: schema-history validation and SQLite CRUD coverage.
+
+## Change the schema
+
+The `tasks:0001_initial` migration is frozen independently of the current model.
+When changing `Task`, add a new migration module with a new `MigrationId`, its
+dependency on the previous migration, and reviewed `MigrationOperation` values.
+Register the new module in `src/migrations/mod.rs`.
+
+The schema-history test detects model changes without matching migrations.
+Preserve the identities and checksums of applied migrations. Use compiled
+migrations for persistent schemas; `create_table` is for tests and local setup.
+This CLI does not generate migrations automatically.
+
+## Verify
+
+```bash
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+With PostgreSQL selected, tests validate the compiled history without connecting
+to a server. To also run the in-memory CRUD test, use
+`cargo test --no-default-features --features sqlite`. Running PostgreSQL migration
+and CRUD commands requires a live database.
+
+See the [che-orm documentation](https://github.com/che4web/che-orm) for relations,
+serializers, UUID models and synchronization.

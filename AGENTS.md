@@ -37,6 +37,9 @@ Workspace members:
 - `che-sync/src/model_log.rs`: protocol-2 journal/state application and model-log capture.
 - `docs/model-sync.md`: current per-model protocol, layer boundaries and downstream Tauri integration; `docs/sync.md` documents the scoped compatibility API.
 - `docs/releasing.md` and `.github/workflows/release-check.yml`: release procedure and checks.
+- `templates/che-orm/`: cargo-generate application template with backend selection
+  and frozen compiled migrations, using the versioned che-orm API.
+- `scripts/check-template.py`: standalone template generation and runtime checks.
 
 ## Application Modules
 
@@ -233,6 +236,12 @@ and server migrations. Keep existing initial migrations unchanged; startup does
 not apply them. See its README for two-device launch and manual GUI checks.
 
 ## Verification
+
+When changing the application template, install `cargo-generate` and run
+`python3 scripts/check-template.py`. Keep the template buildable against its
+versioned dependency. The script patches core and macros to this checkout;
+use `--published` after publication to verify crates.io resolution. Do not
+generate historical migration operations from current models at startup.
 
 Run these commands after code changes:
 

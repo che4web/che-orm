@@ -3,13 +3,13 @@
 Enable exactly one backend. SQLite is enabled by default:
 
 ```toml
-che-orm = "0.3"
+che-orm = "0.3.1"
 ```
 
 For PostgreSQL, disable defaults:
 
 ```toml
-che-orm = { version = "0.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.1", default-features = false, features = ["postgres"] }
 ```
 
 Enabling both features, or neither, is a compilation error. There is one
@@ -115,7 +115,7 @@ The `sqlite_crud` binary retains its historical name and uses the shared API.
 - Hand-written models must implement `primary_key_value` for batched queries
   and relation grouping; there is no panic-producing default implementation.
 - Direct SQLite `query_row` callers can use `Model::from_sqlite_row`.
-- Use `che-orm-macros` 0.3.0 with core 0.3.0; the old SQLite pool accessor was
+- Core 0.3.1 requires `che-orm-macros` 0.3.1 for timestamp metadata; the old SQLite pool accessor was
   removed from the common facade.
 
 ## Verification
