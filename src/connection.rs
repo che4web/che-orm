@@ -101,6 +101,10 @@ pub type TransactionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OrmErr
 /// use raw transaction methods internally to avoid recursively capturing writes.
 pub trait ModelRuntime: Send + Sync {
     fn role(&self, table: &str) -> Option<crate::ModelRole>;
+    /// Also intercept ordinary tables whose SQL referential actions affect tracked models.
+    fn captures_table(&self, table: &str) -> bool {
+        self.role(table).is_some()
+    }
     fn transaction_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
         None
     }
@@ -197,7 +201,7 @@ impl Database {
         write_table(ast).is_some_and(|table| {
             self.runtime
                 .as_ref()
-                .is_some_and(|runtime| runtime.role(table).is_some())
+                .is_some_and(|runtime| runtime.captures_table(table))
         })
     }
     /// Executes explicitly supplied SQL with bound values. SQL syntax is backend-specific.
@@ -586,7 +590,7 @@ impl Transaction {
             None => ast,
         };
         if let Some(runtime) = &self.runtime
-            && write_table(&ast).is_some_and(|table| runtime.role(table).is_some())
+            && write_table(&ast).is_some_and(|table| runtime.captures_table(table))
         {
             return Ok(runtime.write(self, ast).await?.result);
         }
@@ -699,7 +703,7 @@ impl Transaction {
             None => ast,
         };
         if let Some(runtime) = &self.runtime
-            && write_table(&ast).is_some_and(|table| runtime.role(table).is_some())
+            && write_table(&ast).is_some_and(|table| runtime.captures_table(table))
         {
             return Ok(runtime.write(self, ast).await?.rows);
         }

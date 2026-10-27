@@ -855,6 +855,23 @@ impl SyncServer {
                 row.get::<Option<che_orm::time::OffsetDateTime>>(2)?,
                 row.get::<Option<che_orm::time::OffsetDateTime>>(3)?,
             )
+        } else if self.model_logs {
+            // SQL cascades from ordinary FK parents may physically remove a row.
+            // Its journal retains identity/revision so a stale create cannot resurrect it.
+            let rows = tx.query_sql(
+                format!("SELECT revision, created_at, kind FROM {} WHERE record_id = $1 ORDER BY id DESC LIMIT 1", quote(&d.log_table())),
+                vec![D::Uuid(id)],
+            ).await?;
+            if let Some(row) = rows.first() {
+                let timestamp = row.get::<che_orm::time::OffsetDateTime>(1)?;
+                (
+                    row.get::<i64>(0)?,
+                    Some(timestamp),
+                    (row.get::<String>(2)? == "delete").then_some(timestamp),
+                )
+            } else {
+                (0, None, None)
+            }
         } else {
             (0, None, None)
         };
@@ -998,6 +1015,16 @@ impl SyncServer {
 }
 
 impl che_orm::ModelRuntime for SyncServer {
+    fn captures_table(&self, table: &str) -> bool {
+        self.role(table).is_some()
+            || (self.model_logs
+                && self.registry.models.iter().any(|model| {
+                    model.schema.columns.iter().any(|column| {
+                        column.references.is_some()
+                            && column.column_type == che_orm::ColumnType::Integer
+                    })
+                }))
+    }
     fn role(&self, table: &str) -> Option<che_orm::ModelRole> {
         self.registry
             .models
@@ -1061,6 +1088,20 @@ impl SyncServer {
         ast: &che_orm::QueryAst,
     ) -> Result<che_orm::ModelWriteResult, OrmError> {
         use che_orm::QueryAst;
+        let table = match ast {
+            QueryAst::Insert(ast) => ast.table.name,
+            QueryAst::Update(ast) => ast.table.name,
+            QueryAst::Delete(ast) => ast.table.name,
+            _ => return Err(invalid("expected mutation")),
+        };
+        if !self
+            .registry
+            .models
+            .iter()
+            .any(|model| model.schema.name == table)
+        {
+            return self.external_write(tx, ast).await;
+        }
         let d = crate::runtime::descriptor(&self.registry, ast)?;
         let ids = crate::runtime::targets(tx, d, ast, Some(&self.scope)).await?;
         if ids.is_empty() {
@@ -1264,6 +1305,63 @@ impl SyncServer {
         )
         .await?;
         Ok(affected)
+    }
+}
+
+impl SyncServer {
+    async fn external_write(
+        &self,
+        tx: &Transaction,
+        ast: &che_orm::QueryAst,
+    ) -> Result<che_orm::ModelWriteResult, OrmError> {
+        let before = self.inventory(tx).await?;
+        let compiled = che_orm::Compiler::compile(ast);
+        let returning = match ast {
+            che_orm::QueryAst::Insert(ast) => !ast.returning.is_empty(),
+            che_orm::QueryAst::Update(ast) => !ast.returning.is_empty(),
+            _ => false,
+        };
+        let (result, rows) = if returning {
+            let rows = tx.query_sql(compiled.sql, compiled.params).await?;
+            (
+                che_orm::ExecuteResult {
+                    rows_affected: rows.len(),
+                    last_insert_rowid: None,
+                },
+                rows,
+            )
+        } else {
+            (tx.execute_sql(compiled.sql, compiled.params).await?, vec![])
+        };
+        for old in before.into_iter().filter(|entity| entity.record.is_some()) {
+            let descriptor = self.registry.get(&old.model)?;
+            let record = read(tx, descriptor, old.id, false).await?;
+            if record == old.record {
+                continue;
+            }
+            let revision = old
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("revision overflow"))?;
+            let next = if record.is_some() {
+                stamp(tx, descriptor, old.id, revision, &self.scope).await?;
+                self.entity(tx, descriptor, old.id).await?
+            } else {
+                let now = che_orm::time::OffsetDateTime::now_utc();
+                Entity {
+                    revision,
+                    updated_at: Some(now),
+                    deleted_at: Some(now),
+                    record: None,
+                    ..old.clone()
+                }
+            };
+            self.policy
+                .validate(&self.principal, &self.scope, &old, &next)?;
+            self.policy.after_write(tx, &old, &next).await?;
+            crate::model_log::append(tx, &self.registry, &old, &next).await?;
+        }
+        Ok(che_orm::ModelWriteResult { result, rows })
     }
 }
 

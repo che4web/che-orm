@@ -252,10 +252,14 @@ impl Registry {
         {
             return Err(invalid("duplicate sync model"));
         }
-        // Parents must be registered before children; cycles are rejected.
+        // UUID parents precede children. Integer references belong to ordinary,
+        // externally managed tables and are enforced by the database FK.
         for column in &schema.columns {
             if let Some(fk) = &column.references {
                 let (table, key) = fk.target_parts().ok_or_else(|| invalid("invalid FK"))?;
+                if column.column_type == ColumnType::Integer {
+                    continue;
+                }
                 if !self
                     .models
                     .iter()
@@ -366,8 +370,9 @@ impl Registry {
                 for column in &d.schema.columns {
                     if let Some(fk) = &column.references {
                         let table = fk.target_parts().unwrap().0;
-                        let parent = self.models.iter().find(|d| d.schema.name == table).unwrap();
-                        models.insert(parent.name.into());
+                        if let Some(parent) = self.models.iter().find(|d| d.schema.name == table) {
+                            models.insert(parent.name.into());
+                        }
                     }
                 }
             }
@@ -385,7 +390,10 @@ impl Registry {
                 for column in &d.schema.columns {
                     if let Some(fk) = &column.references {
                         let table = fk.target_parts().unwrap().0;
-                        let parent = self.models.iter().find(|d| d.schema.name == table).unwrap();
+                        let Some(parent) = self.models.iter().find(|d| d.schema.name == table)
+                        else {
+                            continue;
+                        };
                         if models.contains(d.name) || models.contains(parent.name) {
                             models.insert(d.name.into());
                             models.insert(parent.name.into());
