@@ -4,6 +4,11 @@ use che_orm::{CurrentDialect, Database};
 
 use {{crate_name}}::{migrations, registry, settings::database_url};
 
+#[path = "manage/createapp.rs"]
+mod createapp;
+#[path = "manage/makemigrations.rs"]
+mod makemigrations;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[tokio::main]
@@ -23,6 +28,12 @@ async fn run(args: Vec<String>) -> Result<()> {
         [command] if command == "help" => help(),
         [command] if command == "schema" => {
             print!("{}", registry().to_sql::<CurrentDialect>());
+        }
+        [command, options @ ..] if command == "makemigrations" => {
+            makemigrations::run(options)?;
+        }
+        [command, name] if command == "createapp" => {
+            createapp::run(name)?;
         }
         [command] if command == "migrate" => {
             let database = database().await?;
@@ -57,6 +68,6 @@ async fn database() -> Result<Database> {
 
 fn help() {
     println!(
-        "Usage:\n  cargo run --bin manage -- schema\n  cargo run --bin manage -- migrate\n  cargo run --bin manage -- migrate status"
+        "Usage:\n  cargo run --bin manage -- schema\n  cargo run --bin manage -- createapp NAME\n  cargo run --bin manage -- makemigrations [--name NAME] [--check | --dry-run]\n  cargo run --bin manage -- migrate\n  cargo run --bin manage -- migrate status"
     );
 }

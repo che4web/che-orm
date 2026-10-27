@@ -2,21 +2,23 @@
 
 ## Release versions
 
-Workspace package versions for the 0.3.1 release preparation:
+Workspace package versions for the 0.3.2 release preparation (not yet published):
 
 | Package | Version |
 | --- | --- |
-| che-orm-macros | 0.3.1 |
-| che-orm | 0.3.1 |
+| che-orm-macros | 0.3.2 |
+| che-orm | 0.3.2 |
 | che-sync-protocol | 0.1.0 |
 | che-sync | 0.1.0 |
 
 `che-orm-examples` is private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.
 
-The 0.3.1 patch releases core and macros together. It adds materialized-model
-`save`, fixes SQLite timestamp comparisons and offset-only queries, and includes
-the application template. Sync package versions remain unchanged; their archive
+The 0.3.2 patch releases core and macros together. It adds app-prefixed table-name
+inference from literals or shared constants, and updates the template with
+`createapp`, single/modular layouts and explicit migration generation.
+The template requires 0.3.2; use local patches until publication.
+Sync package versions remain unchanged; their archive
 checks are workspace compatibility checks, not instructions to republish them.
 
 The 0.3 ORM release introduces async database access with feature-selected
@@ -82,7 +84,7 @@ cargo publish -p che-orm
 python3 scripts/check-template.py --published
 ```
 
-After registry verification, create the release tag `v0.3.1`. Publish sync crates
+After registry verification, create the release tag `v0.3.2`. Publish sync crates
 separately only when making a versioned sync release.
 
 `cargo publish --dry-run -p PACKAGE` can be used before each step once its

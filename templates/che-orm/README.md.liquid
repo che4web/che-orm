@@ -1,7 +1,8 @@
 # {{project-name}}
 
 Rust application using `che-orm` and the **{{backend}}** backend.
-Requires Rust 1.88 or newer. The dependency requires che-orm 0.3.1 or later.
+Selected layout: **{{layout}}**.
+Requires Rust 1.88 or newer. The dependency requires che-orm 0.3.2 or later.
 
 ## Run
 
@@ -13,17 +14,20 @@ export CHE_ORM_DATABASE_URL='postgresql://postgres:postgres@localhost/{{crate_na
 ```
 
 {% endif -%}
-Apply migrations explicitly before running the CRUD demo:
+Create the initial migration yourself, then apply it before running the CRUD demo:
 
 ```bash
 cargo run --bin manage -- schema
+cargo run --bin manage -- makemigrations --name initial
 cargo run --bin manage -- migrate
 cargo run --bin manage -- migrate status
 cargo run
 ```
 
-The demo creates, reads, saves with `Database::save`, and deletes one task. It does not apply
-migrations at startup.
+The demo creates, reads, saves with `Database::save`, and deletes one task.
+It uses the model returned by `save` to get refreshed managed timestamps, then
+checks that saving a deleted row returns `None` instead of inserting it again.
+Migrations are applied explicitly before startup.
 
 {% if backend == "sqlite" -%}
 SQLite uses `app.db` by default. Set `CHE_ORM_DATABASE_URL` to use a different
@@ -42,25 +46,102 @@ cargo run --no-default-features --features {% if backend == "sqlite" %}postgres{
 
 ## Project layout
 
-- `src/models.rs`: application models.
+{% if layout == "single" -%}
+- `src/models.rs`: application models in one module.
+{% else -%}
+- `src/apps/tasks/`: the starter app, with its own `AppConfig` and models.
+{% endif -%}
+- `src/apps/mod.rs`: app registration, extended by `manage createapp`.
 - `src/lib.rs`: `AppConfig` and application registry.
 - `src/settings.rs`: database connection settings.
-- `src/migrations/`: compiled migration history and its registry.
-- `src/bin/manage.rs`: schema, migration and migration-status commands.
+- `src/migrations/`: an empty compiled migration registry, ready for your migrations.
+- `src/bin/manage.rs`: schema, migration generation, application and status commands.
+- `src/bin/manage/makemigrations.rs`: application-owned migration generator.
+- `src/bin/manage/createapp.rs`: app module generator.
 - `src/main.rs`: async CRUD demo.
-- `tests/runtime.rs`: schema-history validation and SQLite CRUD coverage.
+- `tests/runtime.rs`: schema-history validation, SQLite CRUD and transactional
+  save commit/rollback coverage.
+
+## Create an App Module
+
+```bash
+cargo run --bin manage -- createapp blog
+```
+
+This creates `src/apps/blog/mod.rs` with `APP_NAME` and an `AppConfig`, a
+`src/apps/blog/models.rs` with naming guidance, and registers the app in
+`src/apps/mod.rs`.
+Names use snake_case, such as `blog` or `user_accounts`.
+The command works with either layout: `single` keeps the starter models in
+`src/models.rs`; `modular` puts them in `src/apps/tasks/models.rs`.
+
+The app's `APP_NAME` is shared by `AppConfig::name()` and model table names:
+
+```rust
+// src/apps/blog/models.rs
+#[derive(Debug, che_orm::Model)]
+#[orm(app = super::APP_NAME)]
+pub struct Post {
+    #[orm(primary_key)]
+    pub id: i64,
+    pub title: String,
+}
+```
+
+This produces `blog_post`. Add models to the app's `AppConfig::schema`, for example
+`SchemaSet::new().model::<models::Post>()`. Register FK parents before children;
+new apps are appended to the app registry. Keep the `createapp` marker comments
+in `src/apps/mod.rs` so future commands can extend registration.
+
+```bash
+cargo run --bin manage -- makemigrations --name add_blog
+cargo run --bin manage -- migrate
+```
+
+All apps share the project's compiled migration registry in `src/migrations/`.
+Migration operations preserve each model's app ownership. App creation requires
+`rustfmt` and does not connect to the database. Existing app directories are not
+overwritten. Run through `cargo run` so registry changes are compiled before
+creating the next app.
+
+The starter `Task` uses the same pattern and produces `tasks_task`. With `single`,
+its `APP_NAME` is in `src/lib.rs`; with `modular`, it is in `src/apps/tasks/mod.rs`.
+An explicit `#[orm(table = "existing_table")]` preserves an existing table name.
 
 ## Change the schema
 
-The `tasks:0001_initial` migration is frozen independently of the current model.
-When changing `Task`, add a new migration module with a new `MigrationId`, its
-dependency on the previous migration, and reviewed `MigrationOperation` values.
-Register the new module in `src/migrations/mod.rs`.
+The template contains no migration files. Your first
+`makemigrations --name initial` creates `tasks:0001_initial` from your models.
+After changing `Task`, generate a follow-up migration:
 
-The schema-history test detects model changes without matching migrations.
+```bash
+cargo run --bin manage -- makemigrations --name update_tasks
+cargo run --bin manage -- migrate
+```
+
+`makemigrations` compares registered models with the replayed compiled history,
+writes `src/migrations/m0002_update_tasks.rs` and updates `src/migrations/mod.rs`.
+It records a dependency on the previous migration without modifying its source.
+Review generated operations before applying them, especially removals and changes
+to existing non-null fields. Data backfills and explicit rename operations may
+need manual edits. Subsequent commands rebuild the management binary automatically.
+
+```bash
+cargo run --bin manage -- makemigrations --dry-run
+cargo run --bin manage -- makemigrations --check
+```
+
+`--dry-run` prints the proposed Rust migration without changing history. `--check`
+returns a nonzero exit code when changes need a migration, for use in CI. Neither
+requires a database connection. Generation requires `rustfmt` (`rustup component
+add rustfmt`). Run generation through `cargo run`: a stale prebuilt management
+binary refuses to generate from changed migration sources.
+
+Generate the initial migration before running tests. The schema-history test
+detects model changes without matching migrations.
 Preserve the identities and checksums of applied migrations. Use compiled
 migrations for persistent schemas; `create_table` is for tests and local setup.
-This CLI does not generate migrations automatically.
+Migration generation is explicit; application startup never generates migrations.
 
 ## Verify
 

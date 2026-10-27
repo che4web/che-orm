@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "che-orm"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "che-orm-macros",
  "deadpool-postgres",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "che-orm-macros"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

@@ -1,0 +1,13 @@
+use che_orm::AppRegistry;
+
+{% if layout == "modular" -%}
+pub mod tasks;
+{% endif -%}
+// createapp:modules
+
+pub const REGISTRY_SOURCE: &str = include_str!("mod.rs");
+
+pub fn register(registry: AppRegistry) -> AppRegistry {
+    registry{% if layout == "modular" %}.register::<tasks::App>(){% endif %}
+    // createapp:register
+}

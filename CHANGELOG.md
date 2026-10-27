@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2
+
+- Use shared `APP_NAME` constants and inferred app-prefixed table names in both
+  template layouts and `createapp` guidance; the starter table is `tasks_task`.
+- Add `#[orm(app = "...")]` table-name inference with an application prefix;
+  accept paths to `const &str` prefixes shared with `AppConfig::name()`, with
+  compile-time name assembly and validation. Explicit `table` remains an exact
+  override.
+- Add single/modular layout selection and `manage createapp` to the application
+  template, with automatic schema registration and shared project migrations.
+- Add `manage makemigrations` to the cargo-generate template, with compiled
+  history diffs, automatic registry updates, `--check` and `--dry-run`.
+- Start generated applications with an empty migration registry; users create
+  the initial migration explicitly after defining their models.
+
 ## 0.3.1
 
 - Fix SQLite timestamp filters, joins and ordering with the `che_datetime`

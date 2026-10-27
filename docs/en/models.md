@@ -53,11 +53,54 @@ key type, for example `WriteMode<Uuid>`.
 
 ### `table`
 
-Sets the table name and is required:
+Sets the exact table name. Required unless `app` is specified:
 
 ```rust
 #[orm(table = "users")]
 ```
+
+### `app`
+
+Generates `<app>_<snake_case model name>` when `table` is omitted:
+
+```rust
+#[derive(Debug, che_orm::Model)]
+#[orm(app = "blog")]
+pub struct Post {
+    #[orm(primary_key)]
+    pub id: i64,
+}
+```
+
+`Post` uses `blog_post`; `PostComment` uses `blog_post_comment`. Names are not
+pluralized. An explicit `#[orm(app = "blog", table = "legacy_posts")]` uses
+exactly `legacy_posts`. The prefix must be a valid SQL identifier.
+
+`app` also accepts a path to a `const &str`, so all models and `AppConfig::name()`
+can share one definition:
+
+```rust
+pub const APP_NAME: &str = "blog";
+
+#[derive(Debug, che_orm::Model)]
+#[orm(app = APP_NAME)]
+pub struct Post {
+    #[orm(primary_key)]
+    pub id: i64,
+}
+```
+
+For models in a child module, use `#[orm(app = super::APP_NAME)]` (or import the
+constant). `crate::apps::blog::APP_NAME` is supported too. Return this same
+constant from the app's `AppConfig::name()`. The table name is assembled and
+validated at compile time, without runtime allocation. Expressions and function
+calls are not accepted. Explicit `table` overrides the prefix, including a
+constant prefix.
+
+`app` controls table naming only; register the model in `AppConfig::schema()` as
+usual. The derive cannot infer the registry owner or module path. Changing `app`
+changes the inferred physical table name: review the migration diff and use an
+explicit `table` to preserve an existing name.
 
 ### `index`
 

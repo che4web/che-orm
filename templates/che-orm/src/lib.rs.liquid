@@ -1,0 +1,35 @@
+pub mod apps;
+pub mod migrations;
+{% if layout == "single" -%}
+pub mod models;
+{% endif -%}
+pub mod settings;
+
+{% if layout == "modular" -%}
+pub use apps::tasks::{APP_NAME, App, models};
+
+pub fn registry() -> che_orm::AppRegistry {
+    apps::register(che_orm::AppRegistry::new())
+}
+{% else -%}
+use che_orm::{AppConfig, AppRegistry, SchemaSet};
+use models::Task;
+
+pub const APP_NAME: &str = "tasks";
+
+pub struct App;
+
+impl AppConfig for App {
+    fn name() -> &'static str {
+        APP_NAME
+    }
+
+    fn schema() -> SchemaSet {
+        SchemaSet::new().model::<Task>()
+    }
+}
+
+pub fn registry() -> AppRegistry {
+    apps::register(AppRegistry::new().register::<App>())
+}
+{% endif -%}

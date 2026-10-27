@@ -1,0 +1,108 @@
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use {{crate_name}}::{apps, registry};
+
+use super::{Result, makemigrations::format_rust};
+
+pub fn run(name: &str) -> Result<()> {
+    let keywords = [
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+        "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match", "mod",
+        "move", "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait",
+        "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+        "register", "che_orm",
+    ];
+    if !name.bytes().next().is_some_and(|c| c.is_ascii_lowercase())
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        || keywords.contains(&name)
+    {
+        return Err("app name must be a non-keyword snake_case Rust identifier".into());
+    }
+    if registry().apps().contains(&name) {
+        return Err(format!("app {name} is already registered").into());
+    }
+
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/apps");
+    let lock = dir.join(".createapp.lock");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)?;
+    let _lock = SourceLock(lock);
+    let registry_path = dir.join("mod.rs");
+    let source = fs::read_to_string(&registry_path)?;
+    if source != apps::REGISTRY_SOURCE {
+        return Err(
+            "app registry changed; rebuild manage with cargo run before creating another app"
+                .into(),
+        );
+    }
+    for marker in ["// createapp:modules", "// createapp:register"] {
+        if source.matches(marker).count() != 1 {
+            return Err(format!("app registry must contain exactly one {marker} marker").into());
+        }
+    }
+    let source = source
+        .replace(
+            "// createapp:modules",
+            &format!("pub mod {name};\n// createapp:modules"),
+        )
+        .replace(
+            "// createapp:register",
+            &format!(".register::<{name}::App>()\n// createapp:register"),
+        );
+    let source = format_rust(source)?;
+    let app_source = format_rust(String::from(
+        "pub mod models;\n\nuse che_orm::{AppConfig, SchemaSet};\n\npub const APP_NAME: &str = \"__APP_NAME__\";\n\npub struct App;\n\nimpl AppConfig for App {\n    fn name() -> &'static str {\n        APP_NAME\n    }\n\n    fn schema() -> SchemaSet {\n        SchemaSet::new()\n    }\n}\n",
+    ).replace("__APP_NAME__", name))?;
+
+    let app_dir = dir.join(name);
+    fs::create_dir(&app_dir)?;
+    let temporary = dir.join(".mod.rs.tmp");
+    let result = (|| -> Result<()> {
+        fs::write(app_dir.join("mod.rs"), app_source)?;
+        fs::write(
+            app_dir.join("models.rs"),
+            "// Define models here with #[derive(Debug, che_orm::Model)] and\n\
+             // #[orm(app = super::APP_NAME)] for app-prefixed table names.\n\
+             // Register each model in this app's AppConfig::schema.\n",
+        )?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        if let Err(error) = (|| -> Result<()> {
+            file.write_all(source.as_bytes())?;
+            drop(file);
+            fs::rename(&temporary, &registry_path)?;
+            Ok(())
+        })() {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        // Only this invocation's newly created directory can be removed here.
+        let _ = fs::remove_dir_all(&app_dir);
+    }
+    result?;
+    println!("Created app {name} at {}", app_dir.display());
+    println!("Add models to its schema, then run cargo run --bin manage -- makemigrations.");
+    Ok(())
+}
+
+struct SourceLock(PathBuf);
+
+impl Drop for SourceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}

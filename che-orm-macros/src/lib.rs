@@ -3,7 +3,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
 use std::collections::{HashMap, HashSet};
 use syn::{
-    Data, DeriveInput, Error, Fields, Ident, LitStr, Path, Token, parse_macro_input,
+    Data, DeriveInput, Error, Fields, Ident, LitStr, Path, Token, ext::IdentExt, parse_macro_input,
     spanned::Spanned,
 };
 
@@ -817,8 +817,8 @@ fn pascal_case(value: &str) -> String {
 fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let orm = orm_path()?;
     let model_attributes = parse_model_attributes(&input)?;
-    let table = model_attributes.table;
-    validate_identifier(&table.value(), table.span(), "table")?;
+    let table_value = model_attributes.table;
+    let table = quote!(__CHE_ORM_MODEL_TABLE_NAME);
     let fields = match input.data {
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => fields.named,
@@ -1163,7 +1163,11 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     });
 
     let sync_impl = if model_attributes.sync {
-        let name = model_attributes.sync_name.as_ref().unwrap_or(&table);
+        let name = model_attributes
+            .sync_name
+            .as_ref()
+            .map(|name| quote!(#name))
+            .unwrap_or_else(|| table.clone());
         let version = model_attributes.sync_version;
         quote! {
             impl #orm::SyncModel for #model {
@@ -1182,9 +1186,8 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     } else {
         quote!()
     };
-    Ok(quote! {
+    let implementations = quote! {
         #sync_impl
-        #(#relation_markers)*
 
         impl #orm::Model for #model {
             type PrimaryKey = #primary_key_type;
@@ -1252,11 +1255,18 @@ fn derive_model_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             #(#constants)*
             #(#relation_constants)*
         }
+    };
+    Ok(quote! {
+        #(#relation_markers)*
+        const _: () = {
+            const __CHE_ORM_MODEL_TABLE_NAME: &str = #table_value;
+            #implementations
+        };
     })
 }
 
 struct ModelAttributes {
-    table: LitStr,
+    table: proc_macro2::TokenStream,
     unique_constraints: Vec<Vec<LitStr>>,
     indexes: Vec<Vec<LitStr>>,
     sync: bool,
@@ -1265,7 +1275,8 @@ struct ModelAttributes {
 }
 
 fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
-    let mut table = None;
+    let mut table: Option<LitStr> = None;
+    let mut app: Option<syn::Expr> = None;
     let mut unique_constraints = Vec::new();
     let mut indexes = Vec::new();
     let mut sync = false;
@@ -1280,6 +1291,25 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
                 table = Some(meta.value()?.parse()?);
+                Ok(())
+            } else if meta.path.is_ident("app") {
+                let value: syn::Expr = meta.value()?.parse()?;
+                match &value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(value),
+                        ..
+                    }) => {
+                        validate_identifier(&value.value(), value.span(), "app")?;
+                    }
+                    syn::Expr::Path(path) if path.qself.is_none() => {}
+                    _ => {
+                        return Err(Error::new_spanned(
+                            &value,
+                            "app must be a string literal or a path to a const &str",
+                        ));
+                    }
+                }
+                app = Some(value);
                 Ok(())
             } else if meta.path.is_ident("sync") {
                 sync = true;
@@ -1313,18 +1343,63 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
                 }
                 Ok(())
             } else {
-                Err(meta
-                    .error("unsupported orm attribute; expected table, unique(...) or index(...)"))
+                Err(meta.error(
+                    "unsupported orm attribute; expected table, app, unique(...) or index(...)",
+                ))
             }
         })?;
     }
 
-    let table = table.ok_or_else(|| {
-        Error::new_spanned(
+    let table = if let Some(table) = table {
+        validate_identifier(&table.value(), table.span(), "table")?;
+        quote!(#table)
+    } else if let Some(app) = app {
+        let model_name = LitStr::new(
+            &snake_case(&input.ident.unraw().to_string()),
+            input.ident.span(),
+        );
+        validate_identifier(&model_name.value(), model_name.span(), "model table suffix")?;
+        // Each expression has its own scope, so generated names cannot collide with
+        // application items. The compiler evaluates and validates constant paths.
+        quote!({
+            const __CHE_ORM_APP: &str = #app;
+            const __CHE_ORM_MODEL: &str = #model_name;
+            const fn __che_orm_table_bytes() -> [u8; __CHE_ORM_APP.len() + 1 + __CHE_ORM_MODEL.len()] {
+                let app = __CHE_ORM_APP.as_bytes();
+                assert!(!app.is_empty(), "invalid app identifier: expected a nonempty SQL identifier");
+                let mut bytes = [0; __CHE_ORM_APP.len() + 1 + __CHE_ORM_MODEL.len()];
+                let mut i = 0;
+                while i < app.len() {
+                    assert!(
+                        app[i] == b'_' || app[i].is_ascii_alphabetic()
+                            || (i > 0 && app[i].is_ascii_digit()),
+                        "invalid app identifier: expected ASCII letters, digits or underscores, starting with a letter or underscore",
+                    );
+                    bytes[i] = app[i];
+                    i += 1;
+                }
+                bytes[i] = b'_';
+                let model = __CHE_ORM_MODEL.as_bytes();
+                let mut j = 0;
+                while j < model.len() {
+                    bytes[i + 1 + j] = model[j];
+                    j += 1;
+                }
+                bytes
+            }
+            const __CHE_ORM_BYTES: &[u8] = &__che_orm_table_bytes();
+            const __CHE_ORM_TABLE: &str = match ::core::str::from_utf8(__CHE_ORM_BYTES) {
+                Ok(table) => table,
+                Err(_) => panic!("invalid table identifier: expected ASCII"),
+            };
+            __CHE_ORM_TABLE
+        })
+    } else {
+        return Err(Error::new_spanned(
             &input.ident,
-            "Model requires #[orm(table = \"table_name\")]",
-        )
-    })?;
+            "Model requires #[orm(table = \"table_name\")] or #[orm(app = \"app_name\")]",
+        ));
+    };
     if !sync && (sync_name.is_some() || sync_version != 1) {
         return Err(Error::new_spanned(
             &input.ident,

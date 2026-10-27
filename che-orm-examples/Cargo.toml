@@ -10,7 +10,7 @@ sqlite = ["orm/sqlite"]
 postgres = ["orm/postgres"]
 
 [dependencies]
-orm = { package = "che-orm", path = "..", default-features = false }
+orm = { package = "che-orm", version = "0.3.2", path = "..", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 serde_json = "1"

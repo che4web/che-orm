@@ -1,7 +1,7 @@
 use che_orm::{Model, time::OffsetDateTime};
 
 #[derive(Debug, Model)]
-#[orm(table = "tasks", index("title"))]
+#[orm(app = super::APP_NAME, index("title"))]
 pub struct Task {
     #[orm(primary_key)]
     pub id: i64,

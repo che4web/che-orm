@@ -20,9 +20,9 @@ jobs:
         run: cargo package -p che-orm-macros -p che-orm
       - name: Test packaged API
         run: >-
-          cargo test --manifest-path target/package/che-orm-0.3.1/Cargo.toml
-          --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.1"'
-          --test public_api_examples --test uuid --test runtime --test sqlite_datetime
+          cargo test --manifest-path target/package/che-orm-0.3.2/Cargo.toml
+          --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.2"'
+          --test public_api_examples --test uuid --test runtime --test sqlite_datetime --test app_table
       - name: Invalid feature combinations
         run: |
           if cargo check -p che-orm --no-default-features; then exit 1; fi

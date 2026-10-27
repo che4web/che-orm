@@ -1,0 +1,5 @@
+error: app must be a string literal or a path to a const &str
+ --> tests/ui/model_app_expression.rs:4:13
+  |
+4 | #[orm(app = String::new())]
+  |             ^^^^^^^^^^^^^

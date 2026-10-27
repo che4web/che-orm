@@ -6,3 +6,15 @@ type = "string"
 prompt = "Database backend"
 choices = ["sqlite", "postgres"]
 default = "sqlite"
+
+[placeholders.layout]
+type = "string"
+prompt = "Application layout"
+choices = ["single", "modular"]
+default = "single"
+
+[conditional.'layout == "single"']
+ignore = ["src/apps/tasks"]
+
+[conditional.'layout == "modular"']
+ignore = ["src/models.rs"]

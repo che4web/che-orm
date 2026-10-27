@@ -11,6 +11,10 @@ Rust 1.88 or later.
 
 ## Status
 
+This checkout prepares **0.3.2**, which is not yet published. The updated
+application template requires that version; its local checks patch dependencies
+to this checkout. See [releasing](docs/releasing.md).
+
 Both backends provide an async pool, CRUD facade, transactions, relations,
 serializers, and compiled migrations. SQLite uses `deadpool-sqlite`; PostgreSQL
 uses `tokio-postgres` / `deadpool-postgres` with native TLS.
@@ -33,23 +37,25 @@ transport-independent delivery; HTTP belongs to `che-rest` and Tauri invoke to
 
 ## Quick Start
 
-Generate an application with SQLite/PostgreSQL selection, a model and compiled
-migrations using `cargo-generate`:
+Generate an application with SQLite/PostgreSQL and `single`/`modular` layout
+selection, a model and compiled migrations using `cargo-generate`:
 
 ```bash
 cargo install cargo-generate --locked
 cargo generate --git https://github.com/che4web/che-orm templates/che-orm --name my-app
 cd my-app
+cargo run --bin manage -- makemigrations --name initial
 cargo run --bin manage -- migrate
 cargo run
 ```
 
 For PostgreSQL, create the database and set `CHE_ORM_DATABASE_URL` before migrating.
+Create additional app modules with `cargo run --bin manage -- createapp blog`.
 See the [template guide](docs/en/template.md) for local generation and project layout.
 
 ```toml
 [dependencies]
-che-orm = "0.3.1"
+che-orm = "0.3.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 ```
@@ -97,7 +103,7 @@ migrations for persistent application schemas.
 Enable exactly one backend. SQLite is the default. For PostgreSQL:
 
 ```toml
-che-orm = { version = "0.3.1", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.2", default-features = false, features = ["postgres"] }
 ```
 
 The same `Database::connect(settings.database_url()).await?` call accepts a

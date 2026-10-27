@@ -4,7 +4,8 @@ use {{crate_name}}::{models::Task, settings::database_url};
 
 #[tokio::main]
 async fn main() -> Result<(), che_orm::OrmError> {
-    // Apply compiled migrations with `cargo run --bin manage -- migrate` first.
+    // Generate migrations with `cargo run --bin manage -- makemigrations --name initial`,
+    // then apply them with `cargo run --bin manage -- migrate` before running the demo.
     let database = Database::connect(database_url()).await?;
     let mut task = database
         .create::<Task>()
@@ -17,8 +18,12 @@ async fn main() -> Result<(), che_orm::OrmError> {
     println!("Loaded: {loaded:?}");
 
     task.done = true;
-    let updated = database.save(&task).await?;
-    println!("Updated: {updated:?}");
+    // save updates an existing row; use its result for managed timestamps.
+    task = database
+        .save(&task)
+        .await?
+        .ok_or_else(|| che_orm::OrmError::Interaction("task no longer exists".into()))?;
+    println!("Saved: {task:?}");
 
     let tasks = database
         .query::<Task>()
@@ -31,5 +36,8 @@ async fn main() -> Result<(), che_orm::OrmError> {
 
     let deleted = database.delete::<Task>(task.id).await?;
     println!("Deleted demo task: {deleted}");
+
+    // save never recreates a row that has been deleted.
+    assert!(database.save(&task).await?.is_none());
     Ok(())
 }

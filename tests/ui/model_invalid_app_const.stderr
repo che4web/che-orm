@@ -1,0 +1,19 @@
+error[E0080]: evaluation panicked: invalid app identifier: expected ASCII letters, digits or underscores, starting with a letter or underscore
+ --> tests/ui/model_invalid_app_const.rs:5:17
+  |
+5 | #[derive(Debug, Model)]
+  |                 ^^^^^ evaluation of `_::__CHE_ORM_MODEL_TABLE_NAME::__CHE_ORM_BYTES` failed inside this call
+  |
+note: inside `__che_orm_table_bytes`
+ --> tests/ui/model_invalid_app_const.rs:5:17
+  |
+5 | #[derive(Debug, Model)]
+  |                 ^^^^^ the failure occurred here
+
+note: erroneous constant encountered
+ --> tests/ui/model_invalid_app_const.rs:5:17
+  |
+5 | #[derive(Debug, Model)]
+  |                 ^^^^^
+  |
+  = note: this note originates in the derive macro `Model` (in Nightly builds, run with -Z macro-backtrace for more info)

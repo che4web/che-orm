@@ -58,6 +58,10 @@ it, install `cargo-generate` and run `python3 scripts/check-template.py`. This
 generates both backend variants outside the workspace, verifies their local
 dependencies and compiled history, and runs SQLite migrations and CRUD.
 After releasing, use `--published` to verify dependencies from crates.io.
+The template check also changes a model, generates and applies a follow-up
+migration, and verifies that compiled history and existing rows are preserved.
+It covers both `single` and `modular` layouts, including `createapp` and
+cross-app foreign keys. Use `--layout` and `--backend` to select one combination.
 
 Russian guides in `docs/` are the original documentation. Keep their English
 counterparts in `docs/en/` consistent when changing public behavior. Update

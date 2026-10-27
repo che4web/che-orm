@@ -1,0 +1,5 @@
+error: invalid app identifier: bad-name
+ --> tests/ui/model_invalid_app.rs:4:13
+  |
+4 | #[orm(app = "bad-name")]
+  |             ^^^^^^^^^^

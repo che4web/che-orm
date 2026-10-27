@@ -38,7 +38,14 @@ Workspace members:
 - `docs/model-sync.md`: current per-model protocol, layer boundaries and downstream Tauri integration; `docs/sync.md` documents the scoped compatibility API.
 - `docs/releasing.md` and `.github/workflows/release-check.yml`: release procedure and checks.
 - `templates/che-orm/`: cargo-generate application template with backend selection
-  and frozen compiled migrations, using the versioned che-orm API.
+  and an empty migration registry, using the versioned che-orm API. Users generate
+  the initial migration explicitly with `manage makemigrations --name initial`.
+  Starter models use `#[orm(app = super::APP_NAME)]` and the `tasks_task` table;
+  both layouts and `createapp` share the prefix constant with `AppConfig::name()`.
+- `templates/che-orm/src/bin/manage/makemigrations.rs.liquid`: application-owned
+  schema diff generation, source registry updates and stale-binary checks.
+- `templates/che-orm/src/bin/manage/createapp.rs.liquid`: app module creation
+  and automatic registration for both single and modular template layouts.
 - `scripts/check-template.py`: standalone template generation and runtime checks.
 
 ## Application Modules
@@ -72,7 +79,11 @@ that define foreign keys to them.
 - Models decode the common `Row`; custom scalar types implement
   `FromDatabaseValue`. Keep driver types in backend-specific adapters.
 - Use `#[derive(Debug, Model)]` for application models.
-- Always specify `#[orm(table = "...")]`.
+- Specify `#[orm(table = "...")]` for an exact name, or `#[orm(app = "...")]`
+  to infer `<app>_<snake_case model name>`. Explicit `table` overrides inference;
+  `app` does not register models or set their migration ownership.
+  `app` accepts a string literal or a path to a `const &str`, such as
+  `super::APP_NAME`; share that constant with `AppConfig::name()`.
 - Mark generated integer keys with `#[orm(primary_key)]`.
 - UUID keys use `#[orm(primary_key)] id: che_orm::Uuid`. INSERT builders generate
   UUIDv7 in Rust when the key is omitted; explicitly supplied keys are preserved.
