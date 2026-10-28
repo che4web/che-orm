@@ -260,10 +260,12 @@ impl Registry {
                 if column.column_type == ColumnType::Integer {
                     continue;
                 }
-                if !self
-                    .models
-                    .iter()
-                    .any(|d| d.schema.name == table && d.primary == key)
+                let self_reference = table == schema.name && key == primary;
+                if (!self_reference
+                    && !self
+                        .models
+                        .iter()
+                        .any(|d| d.schema.name == table && d.primary == key))
                     || column.column_type != ColumnType::Uuid
                 {
                     return Err(invalid("register UUID FK parents before children"));
