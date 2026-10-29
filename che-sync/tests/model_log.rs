@@ -72,6 +72,46 @@ fn registry(client: bool) -> Registry {
     })
     .unwrap()
 }
+
+#[tokio::test]
+async fn client_inspection_distinguishes_empty_initial_pull_and_tracks_dirty_entities() {
+    let server = server(database(false).await).await;
+    let client = che_sync::ModelLogClient::open(database(true).await, registry(true))
+        .await
+        .unwrap();
+    assert!(!client.has_initial_pull("tasks.task").await.unwrap());
+    assert_eq!(client.pending_count().await.unwrap(), 0);
+    assert!(client.pending_ids("tasks.task").await.unwrap().is_empty());
+    // An empty feed still initializes the projection, even with cursor zero.
+    client
+        .apply(server.changes::<Task>(0, 100).await.unwrap())
+        .await
+        .unwrap();
+    assert!(client.has_initial_pull("tasks.task").await.unwrap());
+    assert!(!client.has_initial_pull("tasks.child").await.unwrap());
+    let task = client
+        .database()
+        .create::<Task>()
+        .set(Task::TITLE, "local")
+        .set(Task::DOCUMENT, che_orm::JsonField(json!({})))
+        .set(Task::OPTIONAL_DOCUMENT, None::<che_orm::JsonField>)
+        .set(Task::NUMBER, 1_i64)
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(client.pending_count().await.unwrap(), 1);
+    assert_eq!(
+        client.pending_ids("tasks.task").await.unwrap(),
+        vec![task.id]
+    );
+    client.database().delete::<Task>(task.id).await.unwrap();
+    assert_eq!(
+        client.pending_ids("tasks.task").await.unwrap(),
+        vec![task.id]
+    );
+    assert!(client.has_initial_pull("unknown.model").await.is_err());
+    assert!(client.pending_ids("unknown.model").await.is_err());
+}
 async fn server(db: Database) -> SyncServer {
     SyncServer::open_model_logs(db, registry(false), "user", Arc::new(AllowAll))
         .await

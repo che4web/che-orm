@@ -297,10 +297,16 @@ async fn current_state_delivery_revoke_regrant_and_retained_client_drafts() {
         server: server.clone(),
         policy: policy.clone(),
     });
+    assert!(!client.has_initial_pull("messages.message").await.unwrap());
     engine.pull().await.unwrap();
+    assert!(client.has_initial_pull("messages.message").await.unwrap());
     let mut draft = client.database().get::<Message>(id).await.unwrap().unwrap();
     draft.title = "local draft".into();
     client.save(&draft).await.unwrap();
+    assert_eq!(
+        client.pending_ids("messages.message").await.unwrap(),
+        vec![id]
+    );
     f.server
         .execute(
             Grant::update()

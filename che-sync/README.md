@@ -50,6 +50,13 @@ facade to capture writes. Apply compiled role-specific migrations before opening
 existing server rows require explicit journal backfill. Never switch legacy
 databases or pending requests implicitly.
 
+Inspect local state through `ModelLogClient::has_initial_pull(model)`,
+`pending_count()` and `pending_ids(model)` rather than querying internal sync
+tables. An accepted empty first page counts as an initial pull even if its
+sequence is zero. Pending counts/IDs describe dirty entities (including local
+deletions), not transport requests or application-owned upload queues. Model
+arguments must name a registered model.
+
 `ModelLogTransport` has a stable format ID, one-time `prepare_write`, saved-payload
 `write`, and model journal `changes`. The engine treats payloads as opaque data.
 HTTP routes/headers/bodies and old REST request compatibility belong to the

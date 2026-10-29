@@ -115,6 +115,44 @@ impl ModelLogClient {
     pub fn database(&self) -> &Database {
         self.inner.database()
     }
+    /// Whether a model has received an accepted delivery page, including an empty
+    /// page at sequence zero. A numeric cursor alone cannot distinguish that case.
+    pub async fn has_initial_pull(&self, model: &str) -> Result<bool, OrmError> {
+        self.inner.registry.get(model)?;
+        if self.inner.object_mode {
+            Ok(self.inner.object_cursor(model).await?.is_some())
+        } else {
+            Ok(self.inner.cursor(Some(model)).await?.is_some())
+        }
+    }
+
+    /// Number of locally dirty entities across all models. This is not a count
+    /// of HTTP requests or of application-owned upload/draft queues.
+    pub async fn pending_count(&self) -> Result<usize, OrmError> {
+        let rows = self
+            .database()
+            .query_sql("SELECT COUNT(*) FROM _sync_dirty", vec![])
+            .await?;
+        let count: i64 = rows[0].get(0)?;
+        usize::try_from(count).map_err(|_| invalid("invalid pending entity count"))
+    }
+
+    /// Locally dirty entity IDs for a registered model, including deletions.
+    pub async fn pending_ids(&self, model: &str) -> Result<Vec<Uuid>, OrmError> {
+        self.inner.registry.get(model)?;
+        self.database()
+            .query_sql(
+                "SELECT entity_id FROM _sync_dirty WHERE model = $1 ORDER BY entity_id",
+                vec![text(model)],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                let id: String = row.get(0)?;
+                id.parse().map_err(|_| invalid("invalid pending entity ID"))
+            })
+            .collect()
+    }
     pub async fn save<M: SyncModel>(&self, model: &M) -> Result<(), OrmError> {
         self.inner.save(model).await
     }
