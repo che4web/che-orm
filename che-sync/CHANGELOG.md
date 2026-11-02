@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.2
+
+- Support self-referencing UUID models when registering model journals and
+  preserve parent references across backfill and deletion.
+- Expose initial-pull and pending-entity inspection for native consumers.
+- Restrict the SQLite-only external foreign-key fixture to the SQLite feature,
+  keeping PostgreSQL all-target and extracted-package checks buildable.
+
+## 0.1.1
+
+- Capture ordinary integer-parent CASCADE and SET NULL actions in model journals.
+- Require che-orm 0.3.3 for the configured referential-action runtime.
+
 ## 0.1.0
 
 Initial publication. Requires che-orm 0.3.2, che-sync-protocol 0.1.0 and Rust 1.88.

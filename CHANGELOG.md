@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+- Capture referential actions from ordinary integer-key parents through the
+  configured model journal runtime.
+- Keep che-sync independently versioned; its current release candidate is 0.1.2.
+
 ## Initial sync publications: 0.1.0
 
 - Prepare the first crates.io releases of `che-sync-protocol` and `che-sync`,

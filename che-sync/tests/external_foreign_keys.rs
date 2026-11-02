@@ -1,3 +1,5 @@
+#![cfg(feature = "sqlite")]
+
 use che_orm::{
     Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, ProjectState,
     SchemaSet, Uuid,

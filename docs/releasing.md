@@ -9,15 +9,32 @@ Current workspace package versions:
 | che-orm-macros | 0.3.2 |
 | che-orm | 0.3.3 |
 | che-sync-protocol | 0.1.0 |
-| che-sync | 0.1.1 |
+| che-sync | 0.1.2 |
 
-The 0.3.3 core and 0.1.1 sync patches add capture of ordinary-parent referential
-actions for model journals and integer foreign-key support. Macros and protocol
-versions are unchanged. Publish core 0.3.3 before sync 0.1.1, then downstream
-che-rest 0.3.2. The initial-publication notes below describe the previous candidate.
+Core 0.3.3 adds capture of ordinary-parent referential actions for model journals
+and integer foreign-key support. Sync 0.1.2 also includes self-referencing UUID
+models, initial-pull/pending-entity inspection and a feature guard for its
+SQLite-only foreign-key test. Macros and protocol versions are unchanged.
+Publish core 0.3.3 before sync 0.1.2, then downstream che-rest 0.3.3 and
+che-tauri 0.1.2. The initial-publication notes below describe previous candidates.
 
 `che-orm-examples` is private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.
+
+### Candidate verification (2026-11-02)
+
+- Workspace SQLite tests and documentation passed, including self-referencing
+  UUID models and ordinary integer-parent foreign-key actions.
+- All-target PostgreSQL compilation passed on Rust 1.88 after gating the
+  SQLite-only external foreign-key fixture.
+- Six sibling archives (the four ORM/sync packages, che-rest 0.3.3 and
+  che-tauri 0.1.2) packaged together. Extracted ORM/REST/sync sources passed
+  Rust 1.88 checks for SQLite/HTTP and PostgreSQL; extracted che-tauri passed
+  all-target sync checks on the current stable toolchain.
+- Native Tacit and the two-client Todo HTTP integration tests passed. Live
+  PostgreSQL integration tests were not run without a configured test server.
+- The new candidates have not been published to crates.io. Publish dependencies
+  first, then repeat each ordinary registry dry run after indexing.
 
 The 0.3.2 patch releases core and macros together. It adds app-prefixed table-name
 inference from literals or shared constants, and updates the template with
