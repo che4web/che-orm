@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Read multiple independent model journals in one consistent snapshot with explicit
+  cursors, bounded per-model quotas and history reset reporting.
+- Open read-only journal readers without initializing service rows.
+
 ## 0.1.2
 
 - Support self-referencing UUID models when registering model journals and

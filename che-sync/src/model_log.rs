@@ -330,3 +330,41 @@ pub(crate) async fn append(
     ]).await?;
     Ok(())
 }
+
+/// Independent positions supplied explicitly by the transport.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelJournalCursor {
+    pub history: Uuid,
+    #[serde(with = "journal_decimal")]
+    pub after: i64,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelJournalRequest {
+    pub model: String,
+    pub cursor: Option<ModelJournalCursor>,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ModelJournalPage {
+    Changes {
+        model: String,
+        operations: Vec<ModelOperation>,
+        cursor: ModelJournalCursor,
+        has_more: bool,
+    },
+    ResetRequired {
+        model: String,
+    },
+}
+
+mod journal_decimal {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+    pub fn serialize<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}

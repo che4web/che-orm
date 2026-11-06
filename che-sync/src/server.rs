@@ -157,33 +157,127 @@ impl SyncServer {
         Ok(server)
     }
 
+    /// Read-only journal reader. Does not initialize scope or journal rows.
+    pub fn read_model_logs(
+        db: Database,
+        registry: Registry,
+        principal: impl Into<String>,
+        policy: Arc<dyn AccessPolicy>,
+    ) -> Result<Self, OrmError> {
+        registry.require_role(che_orm::ModelRole::Server)?;
+        let principal = principal.into();
+        if principal.is_empty() {
+            return Err(invalid("empty principal"));
+        }
+        let scope = crate::model_log::MODEL_LOG_SCOPE.to_string();
+        policy.authorize_scope(&principal, &scope)?;
+        Ok(Self {
+            orm_db: db.clone(),
+            db,
+            registry,
+            scope,
+            principal,
+            policy,
+            model: None,
+            model_logs: true,
+        })
+    }
+
     pub async fn changes<M: SyncModel>(
         &self,
         after: i64,
         limit: u32,
     ) -> Result<crate::model_log::ModelChanges, OrmError> {
-        use crate::model_log::{ChangeKind, ModelChanges, ModelOperation};
         if !self.model_logs || after < 0 || !(1..=1000).contains(&limit) {
             return Err(invalid("invalid model journal request"));
         }
         self.policy.authorize_scope(&self.principal, &self.scope)?;
         let d = self.registry.typed::<M>()?.clone();
-        self.db.transaction_with_isolation(IsolationLevel::RepeatableRead, move |tx| Box::pin(async move {
-            let state = tx.query_sql(format!("SELECT sequence, history FROM {} WHERE key = 0", quote(&d.log_state_table())), vec![]).await?;
-             let state = state.first().ok_or_else(|| invalid("uninitialized model log"))?;
-             if state.get::<i64>(0)? == 0 && !tx.query_sql(format!("SELECT {} FROM {} LIMIT 1", quote(d.primary), quote(d.schema.name)), vec![]).await?.is_empty() {
-                 return Err(invalid("existing records require explicit model journal backfill"));
-             }
-            if after > state.get::<i64>(0)? { return Err(invalid("model cursor is ahead of server history")); }
-            let rows = tx.query_sql(format!("SELECT id, record_id, revision, kind, diff, created_at, schema_version FROM {} WHERE id > $1 ORDER BY id LIMIT $2", quote(&d.log_table())), vec![D::Integer(after), D::Integer(i64::from(limit) + 1)]).await?;
-            let has_more = rows.len() > limit as usize;
-            let mut operations = Vec::new();
-            for row in rows.into_iter().take(limit as usize) {
-                let kind = match row.get::<String>(3)?.as_str() { "create" => ChangeKind::Create, "update" => ChangeKind::Update, "delete" => ChangeKind::Delete, _ => return Err(invalid("invalid journal operation")) };
-                operations.push(ModelOperation { id: row.get(0)?, record_id: row.get(1)?, revision: row.get(2)?, kind, diff: decode(&row.get::<String>(4)?)?, created_at: row.get(5)?, schema_version: u32::try_from(row.get::<i64>(6)?).map_err(|_| invalid("invalid schema version"))? });
+        self.db
+            .transaction_with_isolation(IsolationLevel::RepeatableRead, move |tx| {
+                Box::pin(async move { read_model_changes(tx, &d, after, limit).await })
+            })
+            .await
+    }
+
+    /// Read independent journals in one consistent database snapshot.
+    /// The caller must authorize whole-model access to every requested model.
+    pub async fn changes_many(
+        &self,
+        requests: Vec<crate::model_log::ModelJournalRequest>,
+        limit: u32,
+    ) -> Result<Vec<crate::model_log::ModelJournalPage>, OrmError> {
+        use crate::model_log::ModelJournalPage;
+        if !self.model_logs
+            || requests.is_empty()
+            || requests.len() > 100
+            || limit < requests.len() as u32
+            || limit > 1000
+        {
+            return Err(invalid(
+                "limit must be between model count and 1000; request 1..100 models",
+            ));
+        }
+        self.policy.authorize_scope(&self.principal, &self.scope)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut descriptors = Vec::new();
+        for request in &requests {
+            if !seen.insert(&request.model) || request.cursor.as_ref().is_some_and(|c| c.after < 0)
+            {
+                return Err(invalid("duplicate model or invalid cursor"));
             }
-            Ok(ModelChanges { model: d.name.into(), history: state.get::<String>(1)?.parse().map_err(|_| invalid("invalid model history"))?, next_cursor: operations.last().map_or(after, |operation| operation.id), operations, has_more })
-        })).await
+            descriptors.push(self.registry.get(&request.model)?.clone());
+        }
+        self.db
+            .transaction_with_isolation(IsolationLevel::RepeatableRead, move |tx| {
+                Box::pin(async move {
+                    let count = requests.len() as u32;
+                    let mut pages = Vec::new();
+                    for (index, (request, descriptor)) in
+                        requests.into_iter().zip(descriptors).enumerate()
+                    {
+                        let quota = limit / count + u32::from((index as u32) < limit % count);
+                        let history = tx
+                            .query_sql(
+                                format!(
+                                    "SELECT history FROM {} WHERE key = 0",
+                                    quote(&descriptor.log_state_table())
+                                ),
+                                vec![],
+                            )
+                            .await?;
+                        let history: Uuid = history
+                            .first()
+                            .ok_or_else(|| invalid("uninitialized model log"))?
+                            .get::<String>(0)?
+                            .parse()
+                            .map_err(|_| invalid("invalid model history"))?;
+                        if request
+                            .cursor
+                            .as_ref()
+                            .is_some_and(|c| c.history != history)
+                        {
+                            pages.push(ModelJournalPage::ResetRequired {
+                                model: request.model,
+                            });
+                            continue;
+                        }
+                        let after = request.cursor.map_or(0, |c| c.after);
+                        let changes = read_model_changes(tx, &descriptor, after, quota).await?;
+                        pages.push(ModelJournalPage::Changes {
+                            model: changes.model,
+                            operations: changes.operations,
+                            cursor: crate::model_log::ModelJournalCursor {
+                                history: changes.history,
+                                after: changes.next_cursor,
+                            },
+                            has_more: changes.has_more,
+                        });
+                    }
+                    Ok(pages)
+                })
+            })
+            .await
     }
 
     /// Explicit baseline for an existing, already migrated table. Never called
@@ -1608,4 +1702,76 @@ async fn apply_patch(
         .await?;
     }
     Ok(())
+}
+
+async fn read_model_changes(
+    tx: &Transaction,
+    d: &Descriptor,
+    after: i64,
+    limit: u32,
+) -> Result<crate::model_log::ModelChanges, OrmError> {
+    use crate::model_log::{ChangeKind, ModelChanges, ModelOperation};
+    let state = tx
+        .query_sql(
+            format!(
+                "SELECT sequence, history FROM {} WHERE key = 0",
+                quote(&d.log_state_table())
+            ),
+            vec![],
+        )
+        .await?;
+    let state = state
+        .first()
+        .ok_or_else(|| invalid("uninitialized model log"))?;
+    if state.get::<i64>(0)? == 0
+        && !tx
+            .query_sql(
+                format!(
+                    "SELECT {} FROM {} LIMIT 1",
+                    quote(d.primary),
+                    quote(d.schema.name)
+                ),
+                vec![],
+            )
+            .await?
+            .is_empty()
+    {
+        return Err(invalid(
+            "existing records require explicit model journal backfill",
+        ));
+    }
+    if after > state.get::<i64>(0)? {
+        return Err(invalid("model cursor is ahead of server history"));
+    }
+    let rows = tx.query_sql(format!("SELECT id, record_id, revision, kind, diff, created_at, schema_version FROM {} WHERE id > $1 ORDER BY id LIMIT $2", quote(&d.log_table())), vec![D::Integer(after), D::Integer(i64::from(limit) + 1)]).await?;
+    let has_more = rows.len() > limit as usize;
+    let mut operations = Vec::new();
+    for row in rows.into_iter().take(limit as usize) {
+        let kind = match row.get::<String>(3)?.as_str() {
+            "create" => ChangeKind::Create,
+            "update" => ChangeKind::Update,
+            "delete" => ChangeKind::Delete,
+            _ => return Err(invalid("invalid journal operation")),
+        };
+        operations.push(ModelOperation {
+            id: row.get(0)?,
+            record_id: row.get(1)?,
+            revision: row.get(2)?,
+            kind,
+            diff: decode(&row.get::<String>(4)?)?,
+            created_at: row.get(5)?,
+            schema_version: u32::try_from(row.get::<i64>(6)?)
+                .map_err(|_| invalid("invalid schema version"))?,
+        });
+    }
+    Ok(ModelChanges {
+        model: d.name.into(),
+        history: state
+            .get::<String>(1)?
+            .parse()
+            .map_err(|_| invalid("invalid model history"))?,
+        next_cursor: operations.last().map_or(after, |operation| operation.id),
+        operations,
+        has_more,
+    })
 }

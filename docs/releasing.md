@@ -9,7 +9,11 @@ Current workspace package versions:
 | che-orm-macros | 0.3.2 |
 | che-orm | 0.3.3 |
 | che-sync-protocol | 0.1.0 |
-| che-sync | 0.1.2 |
+| che-sync | 0.1.3 |
+
+Sync 0.1.3 adds batched journal reads and a read-only journal reader. The matching
+REST adapter is che-rest 0.3.4. Core, macros and protocol versions are unchanged.
+These versions are local candidates; publication requires the checks below.
 
 Core 0.3.3 adds capture of ordinary-parent referential actions for model journals
 and integer foreign-key support. Sync 0.1.2 also includes self-referencing UUID
