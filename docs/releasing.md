@@ -13,14 +13,18 @@ Current workspace package versions:
 
 Sync 0.1.3 adds batched journal reads and a read-only journal reader. The matching
 REST adapter is che-rest 0.3.4. Core, macros and protocol versions are unchanged.
-These versions are local candidates; publication requires the checks below.
+The new sync/REST versions are local candidates; the core is already published.
+See [the 2026-11-06 verification report](release-verification-2026-11-06.md).
 
 Core 0.3.3 adds capture of ordinary-parent referential actions for model journals
 and integer foreign-key support. Sync 0.1.2 also includes self-referencing UUID
 models, initial-pull/pending-entity inspection and a feature guard for its
 SQLite-only foreign-key test. Macros and protocol versions are unchanged.
-Publish core 0.3.3 before sync 0.1.2, then downstream che-rest 0.3.3 and
-che-tauri 0.1.2. The initial-publication notes below describe previous candidates.
+Registry check on 2026-11-06 confirmed core 0.3.3, macros 0.3.2, protocol
+0.1.0, sync 0.1.2 and REST 0.3.3 are already published and not yanked.
+Do not republish those versions or move their tags. The only new candidates
+are sync 0.1.3, then REST 0.3.4; core source is unchanged since tag v0.3.3.
+The initial-publication notes below describe previous candidates.
 
 `che-orm-examples` is private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.

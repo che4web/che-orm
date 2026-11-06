@@ -5,6 +5,9 @@
 - Read multiple independent model journals in one consistent snapshot with explicit
   cursors, bounded per-model quotas and history reset reporting.
 - Open read-only journal readers without initializing service rows.
+- Add optional batched transport reads with registry-order application and
+  preservation of pending work on history reset, invalid or lost responses.
+- Keep per-model transports as the default and submitted write payloads unchanged.
 
 ## 0.1.2
 

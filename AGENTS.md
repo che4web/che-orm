@@ -320,3 +320,8 @@ cargo run -p che-orm-examples --bin serializers
 - Add or update tests for compiler output, schema changes, and runtime behavior.
 - Use ASCII in source and documentation unless existing content requires otherwise.
 - Do not commit generated `target/` artifacts or local database files.
+
+## Current publication candidate
+
+- Core che-orm 0.3.3, macros 0.3.2 and protocol 0.1.0 are already published; this candidate changes che-sync to 0.1.3 only. Do not republish unchanged packages.
+- See `docs/release-checklist.md` for checks and publication order. Package preparation and `cargo publish --dry-run` do not authorize an actual publication.

@@ -4,9 +4,13 @@ Use this checklist for every release. [The release procedure](releasing.md)
 records the planned versions, full verification commands and publication order
 for all four public crates. `che-orm-examples` is not published.
 
-The current publication preparation targets **che-sync-protocol 0.1.0** and
-**che-sync 0.1.0**. Core/macros **0.3.2** are already published and must not be
-republished. Keep the existing core tag intact; use package-specific sync tags.
+The current preparation targets **che-sync 0.1.3**, followed by downstream
+**che-rest 0.3.4**. Core **0.3.3**, macros **0.3.2**, protocol **0.1.0** and
+sync **0.1.2** are already published (registry checked 2026-11-06). Core source
+is unchanged since its published tag. Keep those versions and tags intact.
+
+See [the current verification report](release-verification-2026-11-06.md) for
+completed checks, artifacts and the remaining registry publication gate.
 
 ## Prepare
 
@@ -22,7 +26,7 @@ republished. Keep the existing core tag intact; use package-specific sync tags.
 ## Verify
 
 ```bash
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p che-orm --no-default-features --features postgres
@@ -52,7 +56,7 @@ the new macros are published, patch only that dependency to the unpacked macro
 archive (use the release's macro and core versions in these paths):
 
 ```bash
-cargo test --manifest-path target/package/che-orm-0.3.2/Cargo.toml \
+cargo test --manifest-path target/package/che-orm-0.3.3/Cargo.toml \
   --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.2"' \
   --test public_api_examples --test uuid --test runtime --test sqlite_datetime --test app_table
 ```
@@ -63,36 +67,28 @@ Inspect the macro archive with:
 cargo package --manifest-path che-orm-macros/Cargo.toml --list
 ```
 
-## Publish
+## Publish this candidate
 
-1. Publish `che-orm-macros`:
-
-   ```bash
-   cargo publish --manifest-path che-orm-macros/Cargo.toml
-   ```
-
-2. Wait until the new macro version is available in the crates.io index.
-3. Package and publish the core crate:
+1. Review the verification report linked in [releasing.md](releasing.md), commit
+   the prepared sources, and ensure the worktree is clean.
+2. From the ORM workspace:
 
    ```bash
-   cargo package
-    cargo test --manifest-path target/package/che-orm-0.3.2/Cargo.toml --test public_api_examples --test uuid --test runtime --test sqlite_datetime --test app_table
-   cargo publish
+   cargo publish --dry-run -p che-sync --locked
+   cargo publish -p che-sync --locked
    ```
 
-4. For a versioned sync release, publish `che-sync-protocol`, wait for its registry availability, then publish
-   `che-sync` (which also requires the new core version):
+3. Wait for che-sync 0.1.3 to appear in the registry index. Then from che-rest:
 
    ```bash
-   cargo publish -p che-sync-protocol
-   cargo publish -p che-sync
+   cargo publish --dry-run --locked
+   cargo publish --locked
    ```
 
-5. Verify the published documentation and create the matching Git tag.
-   For the initial sync release, dry-run and publish protocol first, wait for its
-   registry availability, then dry-run and publish sync. Their package versions
-   remain 0.1.0; wire protocol versions are independent. See the dedicated
-   [publication steps](releasing.md#initial-sync-publication-010).
+4. Verify crate pages and docs.rs builds before creating new tags
+   `che-sync-v0.1.3` and REST `v0.3.4`. Do not move old tags.
 
-Do not publish if the package contents, generated SQL, or migration changes are
-not understood.
+Preparing archives or running a dry run does not publish a crate. Before sync
+0.1.3 is indexed, the ordinary REST dry run cannot resolve that dependency;
+use the sibling archive verifier for preparation. Repeat the registry dry run
+after sync publication. Do not republish the unchanged core/macros/protocol.

@@ -3,7 +3,7 @@
 Native offline-first synchronization for che-orm: current/shadow client tables,
 durable delivery, server revisions and journal, and three-way field merging.
 
-Requires **Rust 1.88+**, **che-orm 0.3.2** and **che-sync-protocol 0.1.0**.
+Requires **Rust 1.88+**, **che-orm 0.3.3** and **che-sync-protocol 0.1.0**.
 Licensed under MIT. See the [changelog](CHANGELOG.md) and
 [Rust API documentation](https://docs.rs/che-sync).
 
@@ -13,16 +13,16 @@ SQLite is enabled by default:
 
 ```toml
 [dependencies]
-che-sync = "0.1.0"
-che-orm = "0.3.2"
+che-sync = "0.1.3"
+che-orm = "0.3.3"
 ```
 
 For PostgreSQL, disable defaults on both crates and select exactly one backend:
 
 ```toml
 [dependencies]
-che-sync = { version = "0.1.0", default-features = false, features = ["postgres"] }
-che-orm = { version = "0.3.2", default-features = false, features = ["postgres"] }
+che-sync = { version = "0.1.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
 ```
 
 When developing with local checkouts, use the same local ORM dependency for all
@@ -33,6 +33,18 @@ Shared `#[orm(sync)]` models are registered with `SchemaSet::client_model` or
 `server_model`. Only clients create shadow tables. Use the configured
 `SyncClient::database()` or `SyncServer::database()` handle to capture ordinary
 ORM writes transactionally.
+
+## Batched protocol-2 reads
+
+Version 0.1.3 adds `SyncServer::read_model_logs` and `changes_many` for
+read-only access to existing per-model journals in one database snapshot.
+`ModelLogTransport::changes_many` is optional: the default keeps individual
+model reads. The engine passes explicit durable positions, validates batch
+membership and applies pages in registry order through existing merge/cursor
+transactions. History reset blocks new submissions without deleting pending
+work. Writes retain their adapter identity and saved payloads. HTTP endpoints
+and credentials remain in che-rest 0.3.4; protocol versions and database schemas
+are unchanged. See [the model sync guide](https://github.com/che4web/che-orm/blob/main/docs/model-sync.md).
 
 ## Protocol 2: per-model journals
 
