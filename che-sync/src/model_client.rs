@@ -45,6 +45,14 @@ pub trait ModelLogTransport: Send + Sync {
     ) -> TransportFuture<'a, crate::object_log::ObjectChanges> {
         Box::pin(async { Err(invalid("transport does not support object protocol 3")) })
     }
+    /// Optional batched protocol-2 read. None retains per-model transport behavior.
+    fn changes_many<'a>(
+        &'a self,
+        _models: Vec<ModelJournalRequest>,
+        _limit: u32,
+    ) -> TransportFuture<'a, Option<Vec<ModelJournalPage>>> {
+        Box::pin(async { Ok(None) })
+    }
     fn changes<'a>(
         &'a self,
         model: &'a str,
@@ -224,6 +232,81 @@ impl<T: ModelLogTransport> ModelLogEngine<T> {
     }
     async fn pull_inner(&self) -> Result<SyncReport, OrmError> {
         let mut report = SyncReport::default();
+        if !self.client.inner.object_mode {
+            let mut models = Vec::new();
+            for d in self.client.inner.registry.models.iter() {
+                let cursor = self.client.inner.cursor(Some(d.name)).await?;
+                models.push(ModelJournalRequest {
+                    model: d.name.into(),
+                    cursor: cursor.map(|c| ModelJournalCursor {
+                        history: c.epoch,
+                        after: c.sequence,
+                    }),
+                });
+            }
+            let limit = self
+                .page_size
+                .saturating_mul(models.len() as u32)
+                .min(1000)
+                .max(models.len() as u32);
+            if let Some(pages) = self.transport.changes_many(models.clone(), limit).await? {
+                let mut indexed = std::collections::BTreeMap::new();
+                let mut count = 0;
+                for page in pages {
+                    let name = match &page {
+                        ModelJournalPage::Changes {
+                            model, operations, ..
+                        } => {
+                            count += operations.len();
+                            model
+                        }
+                        ModelJournalPage::ResetRequired { model } => model,
+                    }
+                    .clone();
+                    if !models.iter().any(|m| m.model == name)
+                        || indexed.insert(name, page).is_some()
+                    {
+                        return Err(invalid("unexpected or duplicate model in batch response"));
+                    }
+                }
+                if indexed.len() != models.len() || count > limit as usize {
+                    return Err(invalid("incomplete or oversized batch response"));
+                }
+                // Apply in registry order regardless of response ordering. Each model
+                // commits its own durable cursor alongside the existing merge logic.
+                for request in models {
+                    match indexed
+                        .remove(&request.model)
+                        .ok_or_else(|| invalid("missing journal page"))?
+                    {
+                        ModelJournalPage::ResetRequired { .. } => report.blocked = true,
+                        ModelJournalPage::Changes {
+                            model,
+                            operations,
+                            cursor,
+                            has_more,
+                        } => {
+                            let received = operations.len();
+                            let page = ModelChanges {
+                                model,
+                                operations,
+                                history: cursor.history,
+                                next_cursor: cursor.after,
+                                has_more,
+                            };
+                            if self.client.apply(page).await? {
+                                report.received_changes += received;
+                                report.has_more |= has_more;
+                            } else {
+                                report.blocked = true;
+                            }
+                        }
+                    }
+                }
+                report.conflicts = self.client.conflicts().await?.len();
+                return Ok(report);
+            }
+        }
         for d in self.client.inner.registry.models.iter() {
             if self.client.inner.object_mode {
                 let cursor = self.client.inner.object_cursor(d.name).await?;

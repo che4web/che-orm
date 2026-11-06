@@ -1172,3 +1172,130 @@ async fn opaque_delivery_scenario(legacy: bool) {
         .is_empty()
     );
 }
+
+#[tokio::test]
+async fn batch_pull_keeps_positions_and_pending_work_on_reset_or_invalid_response() {
+    use che_sync::{ModelLogClient, ModelLogTransport, TransportFuture, model_log::*};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Batch {
+        server: SyncServer,
+        mode: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<Vec<ModelJournalRequest>>>>,
+    }
+    impl ModelLogTransport for Batch {
+        fn id(&self) -> &'static str {
+            "test.batch"
+        }
+        fn write<'a>(
+            &'a self,
+            _: &'a ModelWrite,
+            _: &'a serde_json::Value,
+        ) -> TransportFuture<'a, ModelWriteResult> {
+            Box::pin(async { panic!("pull must not send writes") })
+        }
+        fn changes<'a>(&'a self, _: &'a str, _: i64, _: u32) -> TransportFuture<'a, ModelChanges> {
+            Box::pin(async { panic!("batch pull must not read individual models") })
+        }
+        fn changes_many<'a>(
+            &'a self,
+            models: Vec<ModelJournalRequest>,
+            limit: u32,
+        ) -> TransportFuture<'a, Option<Vec<ModelJournalPage>>> {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push(models.clone());
+                let mut pages = self.server.changes_many(models, limit).await?;
+                match self.mode.load(Ordering::SeqCst) {
+                    1 => {
+                        pages[0] = ModelJournalPage::ResetRequired {
+                            model: "tasks.task".into(),
+                        }
+                    }
+                    2 => {
+                        pages.pop();
+                    }
+                    3 => pages.push(pages[0].clone()),
+                    4 => return Err(che_orm::OrmError::Interaction("lost response".into())),
+                    _ => {}
+                }
+                pages.reverse(); // Application order comes from the registry.
+                Ok(Some(pages))
+            })
+        }
+    }
+    let server = server(database(false).await).await;
+    let task = server
+        .database()
+        .create::<Task>()
+        .set(Task::TITLE, "remote")
+        .set(Task::DOCUMENT, che_orm::JsonField(json!({})))
+        .set(Task::OPTIONAL_DOCUMENT, None::<che_orm::JsonField>)
+        .set(Task::NUMBER, 1_i64)
+        .execute()
+        .await
+        .unwrap();
+    server
+        .database()
+        .create::<Child>()
+        .set(Child::TASK_ID, task.id)
+        .set(Child::LABEL, "child")
+        .execute()
+        .await
+        .unwrap();
+    let client = ModelLogClient::open(database(true).await, registry(true))
+        .await
+        .unwrap();
+    let mode = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(vec![]));
+    let engine = client.engine(Batch {
+        server: server.clone(),
+        mode: mode.clone(),
+        requests: requests.clone(),
+    });
+    let report = engine.pull().await.unwrap();
+    assert_eq!(report.received_changes, 2);
+    assert!(!report.blocked);
+    assert!(client.has_initial_pull("tasks.child").await.unwrap());
+    client
+        .database()
+        .update::<Task>(task.id)
+        .set(Task::TITLE, "local draft")
+        .execute()
+        .await
+        .unwrap();
+    let before = client.cursor::<Task>().await.unwrap();
+    let pending = client.pending_count().await.unwrap();
+    assert!(pending > 0);
+    mode.store(1, Ordering::SeqCst);
+    assert!(engine.pull().await.unwrap().blocked);
+    assert_eq!(client.cursor::<Task>().await.unwrap(), before);
+    assert_eq!(client.pending_count().await.unwrap(), pending);
+    assert_eq!(
+        client
+            .database()
+            .get::<Task>(task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "local draft"
+    );
+    for invalid in [2, 3, 4] {
+        mode.store(invalid, Ordering::SeqCst);
+        assert!(engine.pull().await.is_err());
+        assert_eq!(client.cursor::<Task>().await.unwrap(), before);
+        assert_eq!(client.pending_count().await.unwrap(), pending);
+    }
+    assert!(
+        requests.lock().unwrap()[0]
+            .iter()
+            .all(|m| m.cursor.is_none())
+    );
+    assert!(
+        requests.lock().unwrap()[1]
+            .iter()
+            .all(|m| m.cursor.is_some())
+    );
+}

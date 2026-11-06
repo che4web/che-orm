@@ -246,6 +246,12 @@ The runnable server/client example is in the sibling
 and server migrations. Keep existing initial migrations unchanged; startup does
 not apply them. See its README for two-device launch and manual GUI checks.
 
+## Batched model journals
+
+- `SyncServer::read_model_logs` opens a read-only journal reader without initializing service rows. `changes_many` validates explicit per-model cursors and reads journals in one repeatable-read transaction; identifiers come only from the registered descriptors. No global cursor table or cross-model transaction ordering is introduced.
+- `ModelLogTransport::changes_many` defaults to `None`, preserving per-model adapters. Protocol-2 `ModelLogEngine` optionally batches positions, validates response membership/count, and applies pages in registry order through existing per-model merge/cursor transactions. Protocol 3 remains separate.
+- History resets block new writes without clearing local data or pending submissions. Preserve adapter identity and immutable payloads when enabling batch reads; HTTP routes and authentication belong in che-rest. Test reset/lost-response/invalid-batch preservation with `cargo test -p che-sync --test model_log`.
+
 ## Verification
 
 When changing the application template, install `cargo-generate` and run

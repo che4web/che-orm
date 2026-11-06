@@ -61,6 +61,27 @@ reviewed follow-up migration and explicitly call `backfill_model_log::<Todo>()`
 before serving journals/new writes. Startup and journal GET never backfill.
 The framework cannot infer ownership conversion from old scopes.
 
+## Optional batched reads
+
+`ModelLogTransport::changes_many(models, limit)` can return one delivery page
+per requested protocol-2 model. Its default is `None`, retaining individual
+`changes` calls. The engine supplies explicit `ModelJournalRequest` positions
+from durable storage, including history UUIDs and null initial cursors. Its total
+limit is `min(page_size * model_count, 1000)`, at least the model count.
+
+Before application the engine rejects missing, duplicate, unexpected or
+oversized batch membership. Pages are then applied in registry order through the
+existing per-model merge/cursor transaction. This is not a cross-model atomic
+commit: successful earlier models retain their progress if a later model fails.
+`ResetRequired` marks synchronization blocked, preserves local work and prevents
+new submissions. Already submitted operations still settle first in `sync_once`.
+
+On the server, `SyncServer::read_model_logs` avoids journal initialization;
+`changes_many` uses existing logs and a repeatable-read transaction with equal
+quotas. Persistent positions remain per model; there is no global ordering or
+new cursor table. HTTP registration and opt-in transport live in che-rest; see
+[the REST guide](../../che-rest/docs/model-sync.md#optional-batched-downloads).
+
 ## Local writes and bounded synchronization
 
 ```rust,ignore
