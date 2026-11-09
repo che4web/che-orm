@@ -42,6 +42,28 @@ struct Setting {
     value: String,
 }
 
+#[derive(Debug, Model)]
+#[orm(table = "role_nodes", sync, sync_name = "tasks.node")]
+struct Node {
+    #[orm(primary_key)]
+    id: Uuid,
+    #[orm(foreign_key = Node, on_delete = "set null")]
+    parent_id: Option<Uuid>,
+}
+
+#[test]
+fn registry_accepts_self_references_and_requires_other_parents_first() {
+    let client = Registry::from_schema(&SchemaSet::new().client_model::<Node>()).unwrap();
+    client.check_model::<Node>().unwrap();
+    let server = Registry::from_schema(&SchemaSet::new().server_model::<Node>()).unwrap();
+    server.check_model::<Node>().unwrap();
+    Registry::new().register::<Node>().unwrap();
+
+    assert!(Registry::new().register::<Child>().is_err());
+    assert!(Registry::from_schema(&SchemaSet::new().server_model::<Child>()).is_err());
+    Registry::from_schema(&schema(ModelRole::Server)).unwrap();
+}
+
 fn schema(role: ModelRole) -> SchemaSet {
     let schema = SchemaSet::new().model::<Setting>();
     match role {

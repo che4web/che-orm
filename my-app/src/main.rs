@@ -1,0 +1,43 @@
+use che_orm::Database;
+
+use my_app::{models::Task, settings::database_url};
+
+#[tokio::main]
+async fn main() -> Result<(), che_orm::OrmError> {
+    // Generate migrations with `cargo run --bin manage -- makemigrations --name initial`,
+    // then apply them with `cargo run --bin manage -- migrate` before running the demo.
+    let database = Database::connect(database_url()).await?;
+    let mut task = database
+        .create::<Task>()
+        .set(Task::TITLE, "Try che-orm")
+        .execute()
+        .await?;
+    println!("Created: {task:?}");
+
+    let loaded = database.get::<Task>(task.id).await?;
+    println!("Loaded: {loaded:?}");
+
+    task.done = true;
+    // save updates an existing row; use its result for managed timestamps.
+    task = database
+        .save(&task)
+        .await?
+        .ok_or_else(|| che_orm::OrmError::Interaction("task no longer exists".into()))?;
+    println!("Saved: {task:?}");
+
+    let tasks = database
+        .query::<Task>()
+        .filter(Task::DONE.eq(true))
+        .order_by(Task::ID.desc())
+        .limit(20)
+        .all(&database)
+        .await?;
+    println!("Completed tasks: {tasks:?}");
+
+    let deleted = database.delete::<Task>(task.id).await?;
+    println!("Deleted demo task: {deleted}");
+
+    // save never recreates a row that has been deleted.
+    assert!(database.save(&task).await?.is_none());
+    Ok(())
+}

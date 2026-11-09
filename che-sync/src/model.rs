@@ -252,7 +252,8 @@ impl Registry {
         {
             return Err(invalid("duplicate sync model"));
         }
-        // UUID parents precede children. Integer references belong to ordinary,
+        // UUID parents precede children, except for self-references.
+        // Integer references belong to ordinary,
         // externally managed tables and are enforced by the database FK.
         for column in &schema.columns {
             if let Some(fk) = &column.references {

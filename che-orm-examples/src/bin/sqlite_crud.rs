@@ -32,8 +32,15 @@ async fn main() -> Result<(), orm::OrmError> {
         .await?;
 
     alice.name = "Alice Cooper".into();
-    let saved = database.save(&alice).await?;
-    println!("saved existing user: {saved:?}");
+    // save updates an existing row; use the returned model for managed timestamps.
+    let created_at = alice.created_at;
+    alice = database
+        .save(&alice)
+        .await?
+        .ok_or_else(|| orm::OrmError::Interaction("Alice no longer exists".into()))?;
+    assert_eq!(alice.name, "Alice Cooper");
+    assert_eq!(alice.created_at, created_at);
+    println!("saved existing user: {alice:?}");
 
     let users = database
         .query::<ExampleUser>()
@@ -50,6 +57,10 @@ async fn main() -> Result<(), orm::OrmError> {
     println!("posts for Alice: {posts:?}");
 
     let _ = database.get::<ExampleUser>(bob.id).await?;
+
+    // save never recreates a missing row.
+    database.delete::<ExampleUser>(bob.id).await?;
+    assert!(database.save(&bob).await?.is_none());
 
     Ok(())
 }
