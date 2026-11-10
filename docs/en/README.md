@@ -12,11 +12,11 @@ the same async high-level API.
 - [Models and schema](models.md): model derives, fields, relations, and serializers.
 - [ImageField](image-field.md): a complete model-to-upload example, storage keys, URLs and cleanup.
 - [SQLite runtime](sqlite.md): connections, CRUD, queries, relations, and transactions.
-- [Compiled migrations](atlas.md): application-owned migration registries and the example CLI.
+- [Compiled migrations](migrations.md): application-owned migration registries and the example CLI.
 - [Compile-tested API examples](api-examples.md): models, relations, serializers, and queries.
 - [Per-model synchronization](../model-sync.md): protocol-2 journals, shared UUID
   models, transport ownership and Tauri integration (English).
-- [Shared-object synchronization](../../../che-rest/docs/object-sync.md): explicit
+- [Shared-object synchronization](https://github.com/che4web/che-rest/blob/main/docs/object-sync.md): explicit
   protocol-3 delivery with per-object permissions (English).
 - [Scoped synchronization compatibility](../sync.md): legacy scoped feeds,
   snapshots and explicit full loading (English).

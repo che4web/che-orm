@@ -29,6 +29,13 @@ The initial-publication notes below describe previous candidates.
 `che-orm-examples` is private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.
 
+## Historical candidate notes
+
+The following notes record earlier release preparations, not the current
+publication plan. Do not run their publication commands for this candidate.
+Use [Publication](#publication) and the [release checklist](release-checklist.md)
+for the current sync-only release.
+
 ### Candidate verification (2026-11-02)
 
 - Workspace SQLite tests and documentation passed, including self-referencing
@@ -50,7 +57,7 @@ inference from literals or shared constants, and updates the template with
 The template requires the published core 0.3.2. Sync package versions remain
 0.1.0 for their initial publication; they have not previously been published.
 
-## Initial sync publication: 0.1.0
+### Initial sync publication: 0.1.0 (historical)
 
 `che-sync-protocol` is transport/backend independent. `che-sync` depends on
 `che-sync-protocol 0.1.0` and `che-orm 0.3.2`. Both require Rust 1.88.
@@ -175,24 +182,24 @@ two-client HTTP test do not replace manual GUI or deployment migration review.
 For an existing installation, rehearse its compiled follow-up migration on a
 copy of its database. Verify revisions, scope ownership, UUIDs, tombstones,
 receipts, cursors and pending edits as described in [sync.md](sync.md) and the
-[protocol-2 migration guidance](../../che-rest/docs/model-sync.md#rehearsing-an-existing-installations-migration).
+[protocol-2 migration guidance](https://github.com/che4web/che-rest/blob/main/docs/model-sync.md#rehearsing-an-existing-installations-migration).
 Fresh-database tests do not validate this application-specific upgrade.
 
 ## Publication
 
-Commit the verified release, then publish in dependency order. Wait for each
-dependency to become available in the registry before publishing its consumers:
+The current candidate publishes **che-sync 0.1.3 only** from this workspace.
+Core 0.3.3, macros 0.3.2 and protocol 0.1.0 are already published; do not
+republish them or move their tags. Review and commit the verified release first:
 
 ```bash
-cargo publish -p che-orm-macros
-cargo publish -p che-orm
-python3 scripts/check-template.py --published
+cargo publish --dry-run -p che-sync --locked
+cargo publish -p che-sync --locked
 ```
 
-The published core tag is `v0.3.2`. For the separate initial sync release, follow
-the 0.1.0 publication section above.
+After che-sync 0.1.3 is indexed, the downstream che-rest 0.3.4 candidate can
+pass its ordinary registry dry run and be published from its own checkout.
+Verify crate pages and docs.rs before creating the new `che-sync-v0.1.3` tag.
+The published core tag remains `v0.3.3`.
 
-`cargo publish --dry-run -p PACKAGE` can be used before each step once its
-dependencies are available. The multi-package `cargo package` check above
-validates the release together using Cargo's temporary package registry even
-before those dependencies have been published.
+Packaging and dry runs are verification only, not authorization to publish.
+See the [release checklist](release-checklist.md) for the publication gates.

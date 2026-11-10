@@ -2,9 +2,10 @@
 
 The template in `templates/che-orm` creates a standalone Rust application using
 [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/). Requires
-Rust 1.88 or later. The application requires `che-orm 0.3.2` or later from crates.io.
-Until 0.3.2 is published, verify the template with local patches using
-`python3 scripts/check-template.py`.
+Rust 1.88 or later. The application requires published `che-orm 0.3.3` or later
+from crates.io. Use `python3 scripts/check-template.py` to verify local changes,
+or `python3 scripts/check-template.py --published` to verify published
+dependencies.
 
 ## Generate a Project
 
@@ -100,7 +101,7 @@ Review operations before applying them. Data backfills and explicit renames may
 need manual edits. Preserve applied migration
 identities and checksums. The template uses structural operations compiled for
 the selected backend; it never recalculates the initial migration from
-`Task::schema()`. See [compiled migrations](atlas.md).
+`Task::schema()`. See [compiled migrations](migrations.md).
 
 The demo saves materialized objects with `Database::save(&model)` and
 `Transaction::save(&model)`, available since 0.3.1.

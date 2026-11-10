@@ -3,13 +3,13 @@
 Enable exactly one backend. SQLite is enabled by default:
 
 ```toml
-che-orm = "0.3.2"
+che-orm = "0.3.3"
 ```
 
 For PostgreSQL, disable defaults:
 
 ```toml
-che-orm = { version = "0.3.2", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
 ```
 
 Enabling both features, or neither, is a compilation error. There is one

@@ -2,9 +2,10 @@
 
 Шаблон в `templates/che-orm` создаёт самостоятельное Rust-приложение через
 [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/). Требуется
-Rust 1.88 или новее. Приложение требует `che-orm 0.3.2` или новее с crates.io.
-До публикации 0.3.2 проверяйте шаблон с локальными patches командой
-`python3 scripts/check-template.py`.
+Rust 1.88 или новее. Приложение требует опубликованный `che-orm 0.3.3`
+или новее с crates.io. Для проверки шаблона с локальными изменениями используйте
+`python3 scripts/check-template.py`, с опубликованными зависимостями —
+`python3 scripts/check-template.py --published`.
 
 ## Создание проекта
 
@@ -103,7 +104,7 @@ cargo run --bin manage -- migrate
 идентичности и checksums применённых миграций. Шаблон хранит структурированные
 операции, которые компилируются для выбранного backend; `Task::schema()` не
 используется для пересчёта первоначальной миграции.
-Подробнее: [compiled migrations](atlas.md).
+Подробнее: [compiled migrations](migrations.md).
 
 Шаблон сохраняет готовый объект через `Database::save(&model)` и
 `Transaction::save(&model)`, доступные с версии 0.3.1.

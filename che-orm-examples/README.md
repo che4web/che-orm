@@ -1,7 +1,7 @@
 # ORM API examples
 
 Run these commands from the che-orm repository root. The examples use the async
-che-orm 0.3.2 API and a database selected by `CHE_ORM_DATABASE_URL` (default:
+che-orm 0.3.3 API and a database selected by `CHE_ORM_DATABASE_URL` (default:
 `app.db`). Apply the frozen compiled migration before running database examples:
 
 ```bash

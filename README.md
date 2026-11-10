@@ -1,53 +1,164 @@
 # che-orm
 
-Этот checkout готовит **0.3.2**, которая ещё не опубликована. Обновлённый шаблон
-требует эту версию; локальные проверки подменяют зависимости этим checkout.
-См. [подготовку релиза](docs/releasing.md).
+**Русский** | [English](README.en.md)
 
-Documentation: [English](README.en.md) | **Русский**
+Экспериментальная типизированная ORM для Rust с единым async API для SQLite
+и PostgreSQL. Backend выбирается при компиляции. Требуется **Rust 1.88+**.
 
-Экспериментальная типизированная ORM для Rust. SQLite или PostgreSQL выбирается
-при компиляции; обе БД используют одинаковые модели и высокоуровневый async API.
-Требуется Rust 1.88 или новее.
-
-## Синхронизация и приложения
-
-`che-sync` добавляет офлайн-изменения, current/shadow-таблицы, неизменяемые
-ожидающие запросы и слияние полей для UUID-моделей. Для новых клиентов используйте
-[модельные журналы протокола 2](docs/model-sync.md): `ModelLogClient`,
-`SchemaSet::client_model` / `server_model`, независимые курсоры и доступ ко всей
-модели. Scoped-протокол со snapshot/full_load остаётся
-[отдельным путём совместимости](docs/sync.md).
-
-`che-orm` отвечает за данные и транзакции, `che-sync` — за синхронизацию.
-HTTP и REST-маппинг принадлежат `che-rest`; Tauri-команды — `che-tauri`.
-Готовый [Todo-сервер и desktop-клиент](../che-tauri/examples/todo-sync/README.md)
-показывает офлайн-работу двух устройств, конфликты и явные compiled migrations.
+Текущая опубликованная версия `che-orm` — **0.3.3**. Проект находится
+в разработке; перед обновлением см. [CHANGELOG](CHANGELOG.md).
 
 ## Возможности
 
-- `#[derive(Model)]` для генерации метаданных модели и typed fields.
-- SQL AST и параметризованная генерация `SELECT`, `INSERT`, `UPDATE`, `DELETE`.
-- Генерация `CREATE TABLE`, индексов и ограничений.
-- Async-пулы SQLite и PostgreSQL, PostgreSQL TLS и типизированные ошибки.
-- High-level `get`, `all`, `create`, `update`, `delete` и typed `query` facade.
-- Низкоуровневые `insert`, `fetch_all`, `fetch_one` и произвольный `QueryAst`.
-- Транзакции с commit/rollback.
-- Foreign keys с каскадным удалением и typed `fetch_by` для связанных строк.
-- Версионированные compiled migrations и `manage` CLI приложения-примера.
-- Разделение моделей по application-модулям через `AppConfig` и `AppRegistry`.
-- `OffsetDateTime` и managed-поля `auto_now_add` / `auto_now`.
-- `f64` и `Option<f64>`: SQLite `REAL`, PostgreSQL `DOUBLE PRECISION`, числовые фильтры и параметризованная запись.
-- Защита от пустых mutation-запросов и случайных массовых update/delete.
+- **Типизированные модели и запросы.** `#[derive(Model)]` создаёт метаданные
+  и поля для фильтрации и записи. CRUD строится из Rust-выражений;
+  значения передаются в SQL как параметры.
+- **Один async API для SQLite и PostgreSQL.** Модели, CRUD и транзакции
+  используют общий интерфейс; backend выбирается feature-флагом при сборке.
+- **Миграции как часть приложения.** Изменения схемы хранятся в компилируемых
+  миграциях. Шаблон включает CLI для их генерации и применения, а модели
+  группируются в модули приложения через `AppConfig` / `AppRegistry`.
+- **Явная загрузка связей и сериализация.** `select_related` и
+  `prefetch_related` загружают связанные данные до сериализации.
+  `ModelSerializer` работает с готовыми данными и не обращается к базе.
+- **Типы для прикладных данных.** Целочисленные и UUIDv7-ключи, необязательные поля,
+  перечисления с `CHECK`, JSON, временные метки и ключи изображений `ImageField`.
 
-Проект находится в разработке. Для обеих БД реализованы CRUD, транзакции,
-загрузка связей и выполнение compiled migrations.
+**Офлайн-синхронизация — отдельное расширение.** `che-sync` добавляет
+синхронизацию UUID-моделей между клиентом и сервером, не привязывая ORM
+к HTTP или Tauri. Подробнее — [ниже](#синхронизация-и-интеграции).
 
-## Быстрый старт
+## Модель и использование в приложении
 
-Готовое приложение с выбором SQLite/PostgreSQL, структуры `single`/`modular`,
-моделью и compiled migrations
-можно создать через `cargo-generate`:
+Добавьте зависимости в `Cargo.toml`. SQLite включён по умолчанию:
+
+```toml
+[dependencies]
+che-orm = "0.3.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+### Опишите модель
+
+В `src/main.rs` объявите обычную Rust-структуру. `Model` создаст метаданные
+таблицы и типизированные поля `User::EMAIL`, `User::NAME` и `User::ID`:
+
+```rust
+use che_orm::Model;
+
+#[derive(Debug, Model)]
+#[orm(table = "users")]
+struct User {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(unique)]
+    email: String,
+    name: String,
+}
+```
+
+### Используйте модель
+
+В том же файле добавьте подключение и операции с данными. Этот пример
+запускается на временной SQLite-базе без дополнительной настройки.
+`create_table` здесь нужен только для демонстрации; для постоянной схемы
+приложения используйте [миграции](docs/migrations.md).
+
+```rust
+use che_orm::Database;
+
+#[tokio::main]
+async fn main() -> Result<(), che_orm::OrmError> {
+    let database = Database::connect_in_memory().await?;
+    database.create_table::<User>().await?;
+
+    let mut user = database
+        .create::<User>()
+        .set(User::EMAIL, "alice@example.test")
+        .set(User::NAME, "Alice")
+        .execute()
+        .await?;
+
+    let users = database
+        .query::<User>()
+        .filter(User::NAME.eq("Alice"))
+        .all(&database)
+        .await?;
+    println!("{users:?}");
+
+    user.name = "Alice Smith".into();
+    database.save(&user).await?;
+
+    database.delete::<User>(user.id).await?;
+    Ok(())
+}
+```
+
+`database.save(&user)` сохраняет все обычные поля объекта по первичному ключу,
+а не только изменённые. Метод возвращает `Option<User>`: обновлённую запись
+или `None`, если строка уже удалена. Исходный объект не изменяется;
+для создания новой записи используйте `create`.
+
+Вместо изменения объекта и `save` можно обновить только выбранные поля:
+
+```rust
+let updated = database
+    .update::<User>(user.id)
+    .set(User::NAME, "Alice Cooper")
+    .execute()
+    .await?;
+```
+
+### Транзакции
+
+Операции внутри callback выполняются через `tx`, на одном соединении.
+Успешный результат фиксирует изменения; ошибка откатывает транзакцию.
+Например, обновление существующего пользователя:
+
+```rust
+database
+    .transaction(|tx| Box::pin(async move {
+        tx.update::<User>(user.id)
+            .set(User::NAME, "Alice Cooper")
+            .execute()
+            .await?;
+        Ok(())
+    }))
+    .await?;
+```
+
+### PostgreSQL
+
+Модели и CRUD-код остаются прежними. Замените зависимость в `Cargo.toml`:
+
+```toml
+che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
+```
+
+Создайте базу PostgreSQL и задайте URL со своими реквизитами:
+
+```bash
+export CHE_ORM_DATABASE_URL='postgresql://user:password@localhost:5432/my_app'
+```
+
+В `main` замените `connect_in_memory` подключением по URL:
+
+```rust
+let url = std::env::var("CHE_ORM_DATABASE_URL")
+    .expect("CHE_ORM_DATABASE_URL must be set");
+let database = Database::connect(&url).await?;
+```
+
+При сборке должен быть включён ровно один флаг: `sqlite` или `postgres`.
+`default-features = false` отключает SQLite по умолчанию. Приложение само
+читает URL; `connect` открывает пул, но не создаёт базу.
+Подробнее о TLS и особенностях backend — [в руководстве](docs/backends.md).
+
+## Готовое приложение из шаблона
+
+Вместо ручного подключения можно сгенерировать проект. Шаблон предлагает
+SQLite или PostgreSQL, структуру `single` или `modular`, стартовую модель
+и CLI миграций:
 
 ```bash
 cargo install cargo-generate --locked
@@ -58,411 +169,95 @@ cargo run --bin manage -- migrate
 cargo run
 ```
 
-Для PostgreSQL перед миграцией создайте БД и задайте `CHE_ORM_DATABASE_URL`.
-Новые модули создаются командой `cargo run --bin manage -- createapp blog`.
-Локальная генерация и устройство проекта описаны в
-[руководстве по шаблону](docs/template.md).
-
-Добавьте зависимость:
-
-```toml
-[dependencies]
-che-orm = "0.3.2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-time = { version = "0.3", features = ["formatting", "parsing"] }
-```
-
-Опишите модель:
-
-```rust
-use che_orm::Model;
-use time::OffsetDateTime;
-
-#[derive(Debug, Model)]
-#[orm(table = "users", index("name"))]
-struct User {
-    #[orm(primary_key)]
-    id: i64,
-    #[orm(unique)]
-    email: String,
-    name: String,
-    is_active: bool,
-    #[orm(auto_now_add)]
-    created_at: OffsetDateTime,
-    #[orm(auto_now)]
-    updated_at: OffsetDateTime,
-}
-```
-
-Используйте модель через async SQLite database:
-
-```rust
-use che_orm::Database;
-
-#[tokio::main]
-async fn main() -> Result<(), che_orm::OrmError> {
-    let database = Database::connect("app.db").await?;
-    database.create_table::<User>().await?;
-
-    let user = database
-        .create::<User>()
-        .set(User::EMAIL, "alice@example.test")
-        .set(User::NAME, "Alice")
-        .set(User::IS_ACTIVE, true)
-        .execute()
-        .await?;
-
-    let users = database
-        .query::<User>()
-        .filter(User::NAME.eq("Alice"))
-        .all(&database)
-        .await?;
-    let loaded = database.get::<User>(user.id).await?;
-    println!("{users:?}");
-    println!("{loaded:?}");
-    Ok(())
-}
-```
-
-Managed timestamp-поля не передаются в `INSERT`: их значения создаёт SQLite.
-`updated_at` автоматически добавляется ORM в каждый update-запрос.
-
-## Выбор backend
-
-Включается ровно один feature. SQLite выбран по умолчанию. Для PostgreSQL:
-
-```toml
-che-orm = { version = "0.3.2", default-features = false, features = ["postgres"] }
-```
-
-В обоих случаях приложение вызывает
-`Database::connect(settings.database_url()).await?`. Настройка содержит SQLite
-путь или PostgreSQL URL. Модели, CRUD, связи, сериализаторы и async-транзакции
-используют общий API. Выбора типа БД во время выполнения нет.
-
-Подробнее: [backend и PostgreSQL](docs/backends.md).
-
-Синхронизация также поддерживает оба backend: общие UUID-модели регистрируются
-как `client_model` / `server_model`, а настроенные database handles фиксируют
-обычные ORM-записи. См. [протокол 2](docs/model-sync.md) для модельных журналов
-и [scoped API](docs/sync.md) для сохранённого snapshot/full_load-пути.
-
-## Первичные ключи UUIDv7
-
-Для UUID-ключа используйте `Uuid` вместо `i64`:
-
-```rust
-use che_orm::{Model, Uuid};
-
-#[derive(Debug, Model)]
-#[orm(table = "uuid_users")]
-struct User {
-    #[orm(primary_key)]
-    id: Uuid,
-    name: String,
-}
-```
-
-`database.create::<User>().set(User::NAME, "Alice").execute().await?`
-генерирует UUIDv7 в Rust, если ключ не передан. То же делает `User::insert()`
-при преобразовании в AST. Явный ключ задаётся через `.set(User::ID, uuid)`;
-`database.insert(&model)` сохраняет `model.id`. Явно переданный UUID
-сохраняется независимо от его версии.
-
-SQLite хранит UUID как `BLOB` из 16 байт, PostgreSQL DDL использует `UUID`,
-а JSON-сериализаторы возвращают UUID-строки. `get`, `update`, `delete`,
-типизированные транзакции, фильтры и загрузка связей работают с типом ключа
-модели. Внешние ключи к UUID-моделям имеют тип `Uuid` или `Option<Uuid>`;
-`on_delete = "set null"` используется только с optional-ключами.
-
-`#[derive(Model)]` задаёт ассоциированный тип `Model::PrimaryKey` автоматически.
-В ручных реализациях нужен `type PrimaryKey = i64` или `Uuid`.
-`WriteMode` по умолчанию использует целочисленный ключ; для явно типизированного
-UUID-режима записи используется `WriteMode<Uuid>`. В вызовах сериализатора
-`WriteMode::Patch { id: user.id }` тип выводится автоматически.
-
-Новые UUID-модели добавляются через миграции приложения. Замена существующего
-целочисленного ключа на UUID требует явного преобразования данных и внешних
-ключей: смена Rust-типа сама по себе не преобразует сохранённые значения.
-
-## Enum choices
-
-Для фиксированного набора строк используйте `DbEnum`. Одно значение variant используется в JSON,
-SQLite и schema metadata:
-
-```rust
-use che_orm::{DbEnum, Model};
-
-#[derive(Debug, Clone, Copy, DbEnum)]
-enum TaskStatus {
-    Draft,
-    #[db_enum(rename = "in_progress")]
-    InProgress,
-    Done,
-}
-
-#[derive(Debug, Model)]
-#[orm(table = "tasks")]
-struct Task {
-    #[orm(primary_key)]
-    id: i64,
-    status: TaskStatus,
-}
-```
-
-`DbEnum` generates `Serialize` and `Deserialize`; do not derive the serde traits separately. It
-stores values as `TEXT` and emits a `CHECK` constraint for the declared choices.
-
-## ImageField
-
-Если у записи есть картинка, объявите поле как `Option<ImageField>`:
-
-```rust
-use che_orm::{ImageField, Model};
-
-#[derive(Debug, Model)]
-#[orm(table = "boards")]
-struct Board {
-    #[orm(primary_key)]
-    id: i64,
-    preview: Option<ImageField>,
-}
-```
-
-В SQLite поле `preview` — nullable `TEXT`: там хранится, например,
-`board-previews/a1b2.png`. Это **относительный путь внутри хранилища**, а не
-PNG и не адрес в браузере. Папку с файлами и HTTP-маршруты настраивает
-`che-rest::media`; сам `che-orm` только сохраняет и читает ключ.
-
-Поле доступно на чтение в JSON, но не принимается в JSON-запросах к модели.
-Загружать файл нужно через объявленное в ViewSet image-действие, а не через
-`ImageField::new(...)`: этот конструктор **не создаёт и не проверяет файл**.
-
-Полный пример модели, загрузки, URL, удаления и миграции существующих данных:
-**[пошаговое руководство по ImageField](docs/image-field.md)**.
-
-## Пул
-
-По умолчанию создаётся пул размером 4:
-
-```rust
-let database = Database::connect("app.db").await?;
-```
-
-Размер можно задать явно:
-
-```rust
-let database = Database::connect_with_pool_size("app.db", 8).await?;
-```
-
-Для in-memory SQLite используется пул размера 1:
-
-```rust
-let database = Database::connect_in_memory().await?;
-```
-
-Это важно: разные SQLite-соединения с `:memory:` имеют разные базы данных.
-
-## CRUD и транзакции
-
-Основной facade автоматически ограничивает update/delete primary key:
-
-```rust
-let updated = database
-    .update::<User>(user.id)
-    .set(User::NAME, "Alice Cooper")
-    .execute()
-    .await?;
-
-let deleted = database.delete::<User>(user.id).await?;
-assert!(deleted);
-```
-
-Чтобы сохранить все обычные поля уже загруженного объекта:
-
-```rust
-let mut user = database.get::<User>(user_id).await?.unwrap();
-user.name = "Alice Cooper".into();
-let saved = database.save(&user).await?; // Option<User>
-```
-
-`save` обновляет существующую строку по primary key и возвращает `None`, если
-строки нет. Метод сохраняет `auto_now_add`, обновляет `auto_now` и возвращает
-модель из `RETURNING`; исходный объект не изменяется. Для новой строки используйте
-`create` или `insert`. В транзакции доступен `tx.save(&user).await?`.
-
-Для сложных условий и массовых операций используйте низкоуровневый AST.
-`UPDATE` и `DELETE` должны иметь фильтр. Массовую операцию нужно разрешить
-явно через `.allow_all()`:
-
-```rust
-let query = User::update()
-    .set(User::NAME, "New name")
-    .filter(User::ID.eq(1))
-    .into_ast()?;
-
-database.execute(query).await?;
-```
-
-Транзакции используют общий async API для обеих БД:
-
-```rust
-database
-    .transaction(|tx| Box::pin(async move {
-        tx.delete::<User>(user.id).await?;
-        Ok(())
-    }))
-    .await?;
-```
-
-Ошибка closure вызывает rollback, успешное выполнение вызывает commit.
-
-## Связанные модели
-
-Foreign key задаётся на поле дочерней модели:
-
-```rust
-#[derive(Debug, Model)]
-#[orm(table = "posts")]
-struct Post {
-    #[orm(primary_key)]
-    id: i64,
-    #[orm(foreign_key = User, on_delete = "cascade")]
-    user_id: i64,
-    title: String,
-}
-```
-
-Загрузить записи `has_many` можно через typed helper:
-
-```rust
-let user = database
-    .create::<User>()
-    .set(User::EMAIL, "alice@example.test")
-    .set(User::NAME, "Alice")
-    .set(User::IS_ACTIVE, true)
-    .execute()
-    .await?;
-let user_id = user.id;
-let posts = database.fetch_by(Post::USER_ID, user_id).await?;
-```
-
-Для нескольких пользователей используйте `fetch_by_many`, а не вызывайте
-`fetch_by` в цикле: это устраняет N+1 запросов.
-
-```rust
-let users = database.all::<User>().await?;
-let user_ids = users.iter().map(|user| user.id);
-let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
-```
-
-Дочерние строки затем группируются по `post.user_id` в памяти. Пустой набор
-возвращает пустой список без запроса. ORM автоматически разбивает ключи на
-порции с учётом лимита bind-параметров выбранного backend.
-
-`fetch_by` строит обычный параметризованный `SELECT`. SQLite foreign keys
-включаются для каждого соединения пула автоматически. Поэтому
-`on_delete = "cascade"` будет работать и при удалении пользователя.
-
-`Post::USER` описывает forward relation, а `Post::USER.reverse()` имеет
-reverse name `post_set` по умолчанию. Связанные модели загружаются через typed
-queryset:
-
-```rust
-let users = database
-    .query::<User>()
-    .prefetch_related(Post::USER.reverse())
-    .all(&database)
-    .await?;
-```
-
-Результат `prefetch_related` содержит `Loaded<User, (LoadedMany<Post, _>,)>` и
-можно передать в `ModelSerializer`; serializer получает только
-материализованные данные и не имеет доступа к `Database`.
-
-## Примеры
-
-В workspace есть crate `che-orm-examples`:
+Для PostgreSQL перед миграцией создайте базу и задайте `CHE_ORM_DATABASE_URL`.
+Новый модуль приложения: `cargo run --bin manage -- createapp blog`.
+Подробнее — [руководство по шаблону](docs/template.md).
+
+## Миграции
+
+Изменение Rust-модели само по себе не меняет существующую базу.
+Схема развивается через **компилируемые миграции** — Rust-модули с операциями,
+которые хранятся в проекте и компилируются вместе с приложением.
+
+В шаблоне уже есть CLI `manage`. Он сравнивает зарегистрированные модели
+с состоянием предыдущих миграций, **а не с живой базой**. После создания
+начальной миграции каждый следующий цикл выглядит так:
 
 ```bash
-cargo run -p che-orm-examples --bin schema
+cargo run --bin manage -- makemigrations --name update_models
+# Проверьте сгенерированные операции перед применением.
+cargo run --bin manage -- migrate
+cargo run --bin manage -- migrate status
+```
+
+Добавляйте файлы из `src/migrations/` в Git. Переименования и заполнение
+существующих данных могут требовать ручной правки операций. Применённые
+миграции не редактируйте: БД хранит их идентификаторы и контрольные суммы.
+На деплое `migrate` запускается отдельным шагом, до старта приложения.
+
+Для просмотра изменений без записи файлов и проверки в CI:
+
+```bash
+cargo run --bin manage -- makemigrations --dry-run
+cargo run --bin manage -- makemigrations --check
+```
+
+Генерация не требует подключения к БД; `--check` завершается с ошибкой,
+если модели требуют новой миграции. `manage` — часть приложения из шаблона,
+а не CLI, устанавливаемый зависимостью `che-orm`.
+Свой реестр, API применения и особенности backend описаны
+в [руководстве по миграциям](docs/migrations.md).
+
+## Синхронизация и интеграции
+
+`che-sync` позволяет работать с UUID-моделями локально без сети, а затем
+синхронизировать изменения с сервером. Поддерживает повторную отправку
+ожидающих запросов и слияние полей. Работает с SQLite и PostgreSQL.
+
+- [Синхронизация моделей](docs/model-sync.md) — доступ ко всей модели
+  (протокол 2).
+- [Общие объекты](https://github.com/che4web/che-rest/blob/main/docs/object-sync.md)
+  — права на отдельные объекты (протокол 3).
+- [API совместимости](docs/sync.md) — прежний scoped-протокол со снимками данных.
+
+`che-orm` отвечает за данные и транзакции, `che-sync` — за синхронизацию.
+HTTP и REST-маппинг принадлежат `che-rest`, Tauri-команды — `che-tauri`.
+См. [Todo-сервер и desktop-клиент](https://github.com/che4web/che-tauri/tree/main/examples/todo-sync)
+для примера работы двух устройств.
+
+## Документация
+
+- [Пошаговое руководство](docs/tutorial.md)
+- [Модели, поля, связи и сериализаторы](docs/models.md)
+- [Подключения, CRUD и транзакции](docs/sqlite.md)
+- [Миграции приложения](docs/migrations.md)
+- [ImageField: модель, загрузка и хранение файлов](docs/image-field.md)
+- [Примеры API, проверяемые компиляцией (English)](docs/en/api-examples.md)
+- [Английские руководства](docs/en/README.md)
+- [Список изменений](CHANGELOG.md), [участие в разработке](CONTRIBUTING.md),
+  [безопасность](SECURITY.md)
+
+## Примеры и проверка
+
+Из корня репозитория:
+
+```bash
 cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin sqlite_crud
 cargo run -p che-orm-examples --bin transactions
 cargo run -p che-orm-examples --bin serializers
 ```
 
-## Миграции
-
-CLI миграций находится в `che-orm-examples`, а не в library crate:
-
-```bash
-cargo run -p che-orm-examples --bin manage -- schema
-cargo run -p che-orm-examples --bin manage -- migrate
-cargo run -p che-orm-examples --bin manage -- migrate status
-```
-
-Пример содержит frozen compiled baseline в `che-orm-examples/migrations/`.
-Его `manage` не генерирует новые миграции: после изменения моделей обновите
-реестр миграций приложения. `migrate` применяет compiled операции отдельно от
-запуска сервера; `Database::create_table()` используйте только для тестов и
-локальных экспериментов. Приложения на `che-rest` могут генерировать compiled
-операции собственным `manage makemigrations`.
-
-## Applications
-
-Модели можно группировать по приложениям, как в Django:
-
-```rust
-pub struct AccountsApp;
-
-impl che_orm::AppConfig for AccountsApp {
-    fn name() -> &'static str { "accounts" }
-
-    fn schema() -> che_orm::SchemaSet {
-        che_orm::SchemaSet::new().model::<User>()
-    }
-}
-
-let registry = che_orm::AppRegistry::new()
-    .register::<AccountsApp>()
-    .register::<ContentApp>();
-```
-
-Каждое приложение хранит свои модели и возвращает свой `SchemaSet`. Общий
-registry используется application-owned migration CLI. Регистрируйте
-приложения в порядке зависимостей: сначала таблицы-родители, затем модели с
-foreign keys.
-
-## Backend status
-
-| Backend | SQL compiler | Pool/executor |
-| --- | --- | --- |
-| SQLite | Да | Да, async `deadpool-sqlite` |
-| PostgreSQL | Да | Да, async `deadpool-postgres`, TLS |
-
-Для проверки PostgreSQL-сборки без SQLite:
-
-```bash
-cargo test -p che-orm --no-default-features --features postgres
-```
-
-Runtime-тесты с настоящим сервером запускаются отдельно с `TEST_POSTGRES_URL`:
-
-```bash
-cargo test -p che-orm --no-default-features --features postgres --test runtime -- --ignored
-```
-
-Features `sqlite` и `postgres` взаимоисключающие.
-
-## Проверка проекта
+Приложение-пример содержит замороженные миграции и не поддерживает
+`makemigrations`. Для своего приложения используйте шаблон выше.
 
 ```bash
 cargo fmt --check
 cargo test --workspace
+cargo test -p che-orm --no-default-features --features postgres
 cargo doc --workspace --no-deps
 ```
 
-Русская документация: [`docs/models.md`](docs/models.md),
-[`docs/sqlite.md`](docs/sqlite.md), [`docs/atlas.md`](docs/atlas.md) и
-[`docs/tutorial.md`](docs/tutorial.md). Английская версия: [`docs/en/`](docs/en/README.md).
+Runtime-тестам PostgreSQL нужен работающий сервер и `TEST_POSTGRES_URL`;
+они запускаются отдельно с `--test runtime -- --ignored`.
+Полные проверки публикации описаны в [подготовке релиза](docs/releasing.md).

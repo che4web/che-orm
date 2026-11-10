@@ -8,7 +8,7 @@ The scoped `SyncClient` / `SyncEngine` snapshot API remains a separate
 
 Objects shared through per-object permissions use the explicit protocol-3
 object delivery API: `ModelLogClient::open_objects`, `SyncServer::object_changes`,
-and neutral `object_log` events. See the [object-sync contract](../../che-rest/docs/object-sync.md).
+and neutral `object_log` events. See the [object-sync contract](https://github.com/che4web/che-rest/blob/main/docs/object-sync.md).
 Protocol 2 retains whole-model authorization and its existing database/outbox
 contract; upgrades are explicit and refuse submitted operations.
 
@@ -80,7 +80,7 @@ On the server, `SyncServer::read_model_logs` avoids journal initialization;
 `changes_many` uses existing logs and a repeatable-read transaction with equal
 quotas. Persistent positions remain per model; there is no global ordering or
 new cursor table. HTTP registration and opt-in transport live in che-rest; see
-[the REST guide](../../che-rest/docs/model-sync.md#optional-batched-downloads).
+[the REST guide](https://github.com/che4web/che-rest/blob/main/docs/model-sync.md#optional-batched-downloads).
 
 ## Local writes and bounded synchronization
 
@@ -143,7 +143,7 @@ Adapters own old payload-key compatibility through `legacy_payload_key`.
 For REST, reuse `che_rest::sync_http::{RestModelTransport, RestResource}` with
 feature `sync-http`; do not add HTTP handling to this workspace. That adapter
 uses reqwest 0.12 and preserves old `rest-request:*` payloads. See the
-[REST protocol guide](../../che-rest/docs/model-sync.md) for serializer mapping,
+[REST protocol guide](https://github.com/che4web/che-rest/blob/main/docs/model-sync.md) for serializer mapping,
 wire values, authorization and migration rehearsal. Integers/revisions/cursors
 use decimal strings; nullable JSON distinguishes SQL NULL and JSON null.
 
@@ -162,7 +162,7 @@ tables: TauriApi build rejects ordinary local/cache resources mapped to declared
 sync tables. Separate runtimes and related trigger/cascade effects still need
 application isolation. Use a separate client database for each server/account.
 
-The complete [Todo server and desktop client](../../che-tauri/examples/todo-sync/README.md)
+The complete [Todo server and desktop client](https://github.com/che4web/che-tauri/blob/main/examples/todo-sync/README.md)
 uses frozen migrations, offline SQLite, manual synchronization and conflict
 selection. Its own Cargo workspace is outside the ORM workspace's test scope.
 

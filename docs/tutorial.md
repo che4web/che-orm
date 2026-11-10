@@ -165,7 +165,7 @@ let users_with_posts = database
 
 Результат имеет тип `Loaded<User, (LoadedMany<Post, PostUserRelation>,)>`.
 Для связи в обратную сторону используйте `select_related`, который формирует
-JOIN и возвращает `WithOne<Post, User>`:
+JOIN и возвращает список `WithOne<Post, User, PostUserRelation>`:
 
 ```rust
 let posts_with_user = database
@@ -227,10 +227,11 @@ cargo run -p che-orm-examples --bin manage -- migrate status
 ```
 
 Пример содержит замороженный `0001_initial` отдельно для SQLite и PostgreSQL.
-Его `manage` не генерирует миграции. В своём приложении храните реестр compiled
-операций, добавляйте новые миграции через `Migration::new` и применяйте их через
-`Database::migrate`. Не меняйте идентичности и checksums уже применённых миграций.
-Подробности: [compiled migrations](atlas.md).
+Его `manage` не генерирует миграции. В своём приложении используйте
+`manage makemigrations` из [шаблона](template.md) либо храните собственный реестр
+операций и применяйте его через `Database::migrate`. Не меняйте идентичности
+и checksums уже применённых миграций.
+Подробности: [compiled migrations](migrations.md).
 
 ## 7. Изучите runnable examples
 
@@ -244,4 +245,4 @@ cargo run -p che-orm-examples --bin transactions
 ```
 
 Следующие справочные материалы: [модели и схема](models.md),
-[SQLite runtime](sqlite.md) и [compiled migrations](atlas.md).
+[SQLite runtime](sqlite.md) и [compiled migrations](migrations.md).

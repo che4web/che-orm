@@ -3,13 +3,13 @@
 Включается ровно один backend. SQLite выбран по умолчанию:
 
 ```toml
-che-orm = "0.3.2"
+che-orm = "0.3.3"
 ```
 
 Для PostgreSQL:
 
 ```toml
-che-orm = { version = "0.3.2", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
 ```
 
 Оба features одновременно или отсутствие обоих — ошибка компиляции. Типы
