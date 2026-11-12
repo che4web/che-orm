@@ -295,17 +295,26 @@ by `post.user_id` in memory.
 
 Typed eager-loading wrappers are available on querysets:
 
+`database.query::<M>()` returns a `BoundQuery` that borrows that database.
+Its terminal methods use the same database, including after relation loading:
+replace `.all(&database)`, `.first(&database)` and `.count(&database)` with
+`.all()`, `.first()` and `.count()` respectively.
+
+Standalone `DatabaseQuery::new(M::query())` values remain database-independent
+and still accept an explicit database when executed. Use these for REST ViewSet
+queryset declarations; `database.fetch_all(M::query())` is also unchanged.
+
 ```rust
 let posts = database
     .query::<Post>()
     .select_related(Post::USER)
-    .all(&database)
+    .all()
     .await?;
 
 let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -321,7 +330,7 @@ let posts = database
     .query::<Post>()
     .select_related(Post::AUTHOR)
     .select_related(Post::EDITOR)
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -336,7 +345,7 @@ let posts = database
     .select_related(Post::USER)
     .filter(Post::USER.related_field(User::NAME).eq("Alice"))
     .order_by(Post::USER.related_field(User::NAME).asc())
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -374,7 +383,7 @@ let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
     .prefetch_related(Audit::USER.reverse())
-    .all(&database)
+    .all()
     .await?;
 
 let response = UserWithPostsAndAuditsSerializer::many(users);

@@ -7,6 +7,12 @@ pub(crate) type Pool = deadpool_postgres::Pool;
 pub(crate) const MAX_PARAMETERS: usize = 60_000;
 
 pub(crate) async fn connect(url: String, size: usize) -> Result<Pool, OrmError> {
+    let pool = connect_lazy(url, size)?;
+    Session::acquire(&pool).await?;
+    Ok(pool)
+}
+
+pub(crate) fn connect_lazy(url: String, size: usize) -> Result<Pool, OrmError> {
     if size == 0 {
         return Err(OrmError::Configuration("pool size must be positive".into()));
     }
@@ -28,7 +34,6 @@ pub(crate) async fn connect(url: String, size: usize) -> Result<Pool, OrmError> 
         .runtime(Runtime::Tokio1)
         .build()
         .map_err(|error| OrmError::Configuration(error.to_string()))?;
-    Session::acquire(&pool).await?;
     Ok(pool)
 }
 

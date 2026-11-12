@@ -145,6 +145,31 @@ pub enum IsolationLevel {
 }
 
 impl Database {
+    /// Creates a pool without opening a connection. Configuration is validated
+    /// immediately; connectivity is checked on first use. Useful for offline
+    /// schema/API metadata discovery, which must not execute database queries.
+    pub fn connect_lazy(url: impl Into<String>) -> Result<Self, OrmError> {
+        let url = url.into();
+        let size = if url == ":memory:" || url == "sqlite://:memory:" {
+            1
+        } else {
+            4
+        };
+        Self::connect_lazy_with_pool_size(url, size)
+    }
+
+    /// Creates an unconnected pool with an explicit positive connection limit.
+    /// Like [`Self::connect_lazy`], this checks configuration, not connectivity.
+    pub fn connect_lazy_with_pool_size(
+        url: impl Into<String>,
+        size: usize,
+    ) -> Result<Self, OrmError> {
+        Ok(Self {
+            pool: backend::connect_lazy(url.into(), size)?,
+            runtime: None,
+        })
+    }
+
     pub async fn connect(url: impl Into<String>) -> Result<Self, OrmError> {
         let url = url.into();
         let size = if url == ":memory:" || url == "sqlite://:memory:" {
@@ -330,8 +355,10 @@ impl Database {
             .rows_affected
             == 1)
     }
-    pub fn query<M: Model>(&self) -> DatabaseQuery<M> {
-        DatabaseQuery::new(M::query())
+    /// Builds a query bound to this database; execute it with `.all()`,
+    /// `.first()` or `.count()` without passing the database again.
+    pub fn query<M: Model>(&self) -> crate::BoundQuery<'_, DatabaseQuery<M>> {
+        crate::BoundQuery::new(self, DatabaseQuery::new(M::query()))
     }
     pub async fn fetch_by<M, T, V>(
         &self,

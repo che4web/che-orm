@@ -1,0 +1,27 @@
+{
+  "backend": "postgres",
+  "server_version": "18.6",
+  "live_server": true,
+  "test_postgres_url_set": true,
+  "default_features": false,
+  "include_ignored": true,
+  "aggregation": "Sum of Cargo test-binary and doctest summaries per package; feature-gated SQLite tests are excluded.",
+  "packages": [
+    {
+      "package": "che-orm",
+      "command": "cargo test -p che-orm --no-default-features --features postgres -- --include-ignored",
+      "exit_code": 0,
+      "passed": 61,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "package": "che-sync",
+      "command": "cargo test -p che-sync --no-default-features --features postgres -- --include-ignored",
+      "exit_code": 0,
+      "passed": 20,
+      "failed": 0,
+      "ignored": 0
+    }
+  ]
+}

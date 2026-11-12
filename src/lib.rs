@@ -75,6 +75,7 @@ pub use tokio_postgres;
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod backend;
+mod datetime;
 mod image;
 mod json;
 pub mod migration;
@@ -88,6 +89,11 @@ mod types;
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod connection;
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod bound_query;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use bound_query::BoundQuery;
 
 pub use image::ImageField;
 pub use migration::*;

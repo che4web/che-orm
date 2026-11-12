@@ -22,22 +22,97 @@ let database = che_orm::Database::connect_in_memory().await?;
 An in-memory database must use a pool size of 1, otherwise every connection
 receives a separate `:memory:` database.
 
+## Known parallel-read performance limitation
+
+Increasing the pool does not necessarily improve SQLite throughput. A local
+investigation of unindexed sorting over 10,000 rows reproduced worse throughput
+with eight connections than with four, including in plain `rusqlite` without
+HTTP, model decoding or serializers.
+
+The investigated bundled build (`libsqlite3-sys` 0.35.0, SQLite 3.50.2) enables
+`SQLITE_ENABLE_MEMORY_MANAGEMENT`. In SQLite's default page-cache implementation
+this forces caches into a common management group with a shared LRU mutex; it
+does not mean that the application enabled SQLite's shared-cache mode. This can
+limit concurrent reads inside one process. Memory allocation statistics have a
+separate shared mutex and became another measured bottleneck after removing the
+page-cache limitation in an isolated experimental build.
+
+**No performance build flags, initialization API or pool defaults have been
+changed to address this limitation.** Disabling the build option affects global
+cache-memory release behavior; disabling statistics affects memory accounting and
+related controls and must happen before SQLite initialization. Neither experiment
+disabled thread safety. Do not apply process-global changes from connection
+checkout or assume a Cargo configuration in a dependency controls downstream
+application builds.
+
+For now, index frequent sorting/range fields, inspect `EXPLAIN QUERY PLAN`, and
+measure pool sizes against the application's actual workload. Canonical datetime
+TEXT enables ordinary indexes but does not remove full scans or SQLite's internal
+contention. Identical JSON also does not imply identical SQL projections or counts.
+See the sibling checkout's
+[benchmark investigation](../../../che-rest/benchmarks/cli_fullstack/SQLITE-PERFORMANCE.md)
+for conditions, paired experiments and the correction to the initial datetime
+parsing hypothesis. These findings concern SQLite, not PostgreSQL.
+
 ## Timestamp comparisons
 
-`OffsetDateTime` and `Option<OffsetDateTime>` remain RFC3339 `TEXT` columns.
-Derived timestamp fields use `COLLATE che_datetime` in filters and ordering,
-including joined fields. Each ORM connection registers this collation, which
-compares instants at nanosecond precision. Existing values with different
-fractional precision or UTC offsets work without rewriting data or migrations.
-PostgreSQL continues to use native timestamp comparisons.
+`OffsetDateTime` and `Option<OffsetDateTime>` use canonical UTC `TEXT`:
+`2026-01-01T00:00:00.000000000Z`. The fractional part always has nine digits,
+and the UTC year must be in `0000..=9999`. Typed writes preserve nanoseconds.
+Managed SQL defaults have SQLite's millisecond clock precision, padded to the
+same width. Nullable fields still store SQL NULL.
 
-For hand-written ASTs, use `ColumnRef::datetime(table, column)`; manually declared
-timestamp fields use `ModelField::datetime(table, column)`. `ColumnRef::new` and
-`ModelField::new` retain ordinary SQL comparison semantics. Raw SQL must request
-`COLLATE che_datetime` explicitly. External SQLite connections executing that SQL
-must also register the collation. Existing binary text indexes cannot serve
-chronological comparisons; declare a matching `COLLATE che_datetime` index in an
-application-owned migration when needed.
+Filters, joins and ordering use ordinary binary text comparison; no custom
+collation or per-comparison datetime parsing is needed. Ordinary indexes such
+as `#[orm(index("created_at"))]` can serve datetime sorting and range predicates.
+`ColumnRef::datetime` and `ModelField::datetime` remain available for typed ASTs.
+PostgreSQL still uses native TIMESTAMPTZ; JSON still uses RFC 3339 and does not
+require nine fractional digits.
+
+### Breaking change: migrate existing SQLite databases
+
+Do not run the new application against mixed-format dates. Stop writers, back
+up the database, and apply an explicit follow-up compiled migration **before
+serving traffic**. Opening a database never rewrites its data. A schema diff
+cannot detect stored text formats, so `makemigrations` alone is not sufficient.
+
+```rust
+MigrationOperation::NormalizeSqliteDateTimes {
+    table: "tasks_task".into(),
+    columns: vec!["created_at".into(), "updated_at".into()],
+}
+```
+
+Freeze table and physical column names in the migration source; do not discover
+them from current models at startup. Include every datetime column, including
+nullable and renamed `db_column` fields, sync current/shadow tables and journal
+timestamp columns. Do not rewrite JSON, opaque pending requests or wire payloads.
+
+The operation parses RFC 3339 with Rust (not SQLite `strftime`, which would lose
+submillisecond precision), normalizes offsets, preserves NULLs, and rebuilds the
+table using its historical schema. Managed defaults are refreshed; known indexes
+and foreign keys are preserved. Invalid timestamps, out-of-range UTC years and
+unique-key collisions fail the migration atomically without advancing history.
+Leap seconds and more than nine fractional digits are rejected rather than
+silently rounded; resolve such values explicitly before retrying.
+Explicit SQL defaults must first be reviewed and temporarily removed with
+`AlterColumn`; restore only canonical defaults after normalization with another
+`AlterColumn`. Triggers/views follow the usual migration rebuild
+rules: explicitly drop and recreate them rather than bypassing safety checks.
+The normalization operation is a no-op on PostgreSQL.
+
+External writers, imports and raw SQL must obey the same 30-character UTC
+contract, or bind `DatabaseValue::DateTime`. Legacy values can still be decoded,
+but mixed formats are **not** safe for SQL comparisons. Replace custom
+`COLLATE che_datetime` indexes/SQL with ordinary indexes/SQL in reviewed migrations;
+the runtime no longer registers that collation. SQL plans containing the
+migration-only `che_datetime_utc` function must run through the migration executor.
+
+For an isolated performance comparison, run:
+
+```bash
+cargo test --release -p che-orm --test datetime_benchmark -- --ignored --nocapture
+```
 
 An offset without a limit compiles to `LIMIT -1 OFFSET ...` on SQLite.
 
@@ -79,7 +154,7 @@ let users = database
     .filter(User::IS_ACTIVE.eq(true))
     .order_by(User::NAME.asc())
     .limit(20)
-    .all(&database)
+    .all()
     .await?;
 
 let updated = database
@@ -161,13 +236,13 @@ let users = database
     .filter(User::IS_ACTIVE.eq(true))
     .order_by(User::NAME.asc())
     .limit(20)
-    .all(&database)
+    .all()
     .await?;
 
 let first = database
     .query::<User>()
     .filter(User::EMAIL.eq("alice@example.test"))
-    .first(&database)
+    .first()
     .await?;
 ```
 
@@ -250,7 +325,7 @@ cascades to its posts.
 let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all(&database)
+    .all()
     .await?;
 ```
 

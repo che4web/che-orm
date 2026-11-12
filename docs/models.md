@@ -302,17 +302,26 @@ let posts = database.fetch_by_many(Post::USER_ID, user_ids).await?;
 
 Для queryset доступны typed eager-loading wrappers:
 
+`database.query::<M>()` возвращает `BoundQuery`, который хранит ссылку на эту
+базу, в том числе после загрузки связей. Вместо `.all(&database)`,
+`.first(&database)` и `.count(&database)` используйте `.all()`, `.first()` и
+`.count()` соответственно.
+
+Независимые `DatabaseQuery::new(M::query())` по-прежнему принимают базу при
+выполнении; используйте их для объявления queryset в REST ViewSet.
+Вызов `database.fetch_all(M::query())` также не изменился.
+
 ```rust
 let posts = database
     .query::<Post>()
     .select_related(Post::USER)
-    .all(&database)
+    .all()
     .await?;
 
 let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -328,7 +337,7 @@ let posts = database
     .query::<Post>()
     .select_related(Post::AUTHOR)
     .select_related(Post::EDITOR)
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -343,7 +352,7 @@ let posts = database
     .select_related(Post::USER)
     .filter(Post::USER.related_field(User::NAME).eq("Alice"))
     .order_by(Post::USER.related_field(User::NAME).asc())
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -381,7 +390,7 @@ let users = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
     .prefetch_related(Audit::USER.reverse())
-    .all(&database)
+    .all()
     .await?;
 
 let response = UserWithPostsAndAuditsSerializer::many(users);

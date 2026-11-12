@@ -56,7 +56,7 @@ async fn main() -> Result<(), orm::OrmError> {
         database
             .query::<ExampleUser>()
             .filter(ExampleUser::EMAIL.eq(rolled_back_email))
-            .first(&database)
+            .first()
             .await?
             .is_none()
     );

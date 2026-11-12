@@ -865,7 +865,7 @@ async fn sqlite_select_related_chains_multiple_aliases() {
         .query::<DualPost>()
         .select_related(DualPost::AUTHOR)
         .select_related(DualPost::EDITOR)
-        .all(&database)
+        .all()
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -877,7 +877,7 @@ async fn sqlite_select_related_chains_multiple_aliases() {
         .select_related(DualPost::AUTHOR)
         .filter(DualPost::AUTHOR.related_field(User::NAME).eq("Author"))
         .order_by(DualPost::AUTHOR.related_field(User::NAME).asc())
-        .all(&database)
+        .all()
         .await
         .unwrap();
     assert_eq!(filtered.len(), 1);
@@ -986,7 +986,7 @@ fn compiles_sqlite_create_table_from_model() {
 
     assert_eq!(
         compiled.sql,
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL CHECK (length(name) > 0), is_active INTEGER NOT NULL DEFAULT true, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE (email))"
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL CHECK (length(name) > 0), is_active INTEGER NOT NULL DEFAULT true, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000000Z'), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000000Z'), UNIQUE (email))"
     );
     assert_eq!(
         schema.indexes,
@@ -1076,7 +1076,7 @@ async fn sqlite_facade_supports_crud_and_typed_queries() {
     let users = database
         .query::<User>()
         .filter(User::IS_ACTIVE.eq(true))
-        .all(&database)
+        .all()
         .await
         .unwrap();
     assert_eq!(users.len(), 1);
@@ -1390,7 +1390,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let post_with_user = database
         .query::<Post>()
         .select_related(Post::USER)
-        .all(&database)
+        .all()
         .await
         .unwrap();
     assert_eq!(post_with_user.len(), 1);
@@ -1422,7 +1422,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let posts_with_users = database
         .query::<Post>()
         .select_related(Post::USER)
-        .all(&database)
+        .all()
         .await
         .unwrap();
     assert_eq!(posts_with_users.len(), 2);
@@ -1432,7 +1432,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
         .query::<User>()
         .prefetch_related(Post::USER.reverse())
         .prefetch_related(Audit::USER.reverse())
-        .all(&database)
+        .all()
         .await
         .unwrap();
     let alice = users_with_two_relations
@@ -1446,7 +1446,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let nested_users = database
         .query::<User>()
         .prefetch_related(Post::USER.reverse().prefetch(Comment::POST.reverse()))
-        .all(&database)
+        .all()
         .await
         .unwrap();
     let nested_user = nested_users
@@ -1477,7 +1477,7 @@ async fn sqlite_relations_enforce_foreign_keys_and_fetch_by_field() {
     let users_with_posts = database
         .query::<User>()
         .prefetch_related(Post::USER.reverse())
-        .all(&database)
+        .all()
         .await
         .unwrap();
     let alice = users_with_posts
@@ -1564,7 +1564,7 @@ async fn sqlite_optional_foreign_key_uses_left_join_and_set_null() {
     let rows = database
         .query::<OptionalPost>()
         .select_related(OptionalPost::USER)
-        .all(&database)
+        .all()
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -1624,7 +1624,7 @@ async fn sqlite_optional_join_uses_primary_key_metadata() {
     let rows = database
         .query::<OptionalPostWithLatePrimaryKey>()
         .select_related(OptionalPostWithLatePrimaryKey::USER)
-        .all(&database)
+        .all()
         .await
         .unwrap();
     assert_eq!(rows.iter().filter(|row| row.related.is_some()).count(), 1);

@@ -64,9 +64,6 @@ impl SqlDialect for PostgresDialect {
 
 pub struct SqliteDialect;
 impl SqlDialect for SqliteDialect {
-    fn datetime_collation(output: &mut String) {
-        output.push_str(" COLLATE che_datetime");
-    }
     fn offset_without_limit(output: &mut String) {
         output.push_str(" LIMIT -1");
     }
@@ -89,7 +86,7 @@ impl SqlDialect for SqliteDialect {
     fn identity_primary_key(_output: &mut String) {}
 
     fn timestamp_default(output: &mut String) {
-        output.push_str("(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))");
+        output.push_str(crate::datetime::SQLITE_DATETIME_DEFAULT);
     }
 }
 

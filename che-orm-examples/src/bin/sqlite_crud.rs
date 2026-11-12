@@ -45,7 +45,7 @@ async fn main() -> Result<(), orm::OrmError> {
     let users = database
         .query::<ExampleUser>()
         .filter(ExampleUser::EMAIL.eq(alice_email))
-        .all(&database)
+        .all()
         .await?;
 
     for user in users {

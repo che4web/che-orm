@@ -7,6 +7,12 @@ pub(crate) type Pool = deadpool_sqlite::Pool;
 pub(crate) const MAX_PARAMETERS: usize = 900;
 
 pub(crate) async fn connect(url: String, size: usize) -> Result<Pool, OrmError> {
+    let pool = connect_lazy(url, size)?;
+    Session::acquire(&pool).await?;
+    Ok(pool)
+}
+
+pub(crate) fn connect_lazy(url: String, size: usize) -> Result<Pool, OrmError> {
     if size == 0 {
         return Err(OrmError::Configuration("pool size must be positive".into()));
     }
@@ -21,7 +27,6 @@ pub(crate) async fn connect(url: String, size: usize) -> Result<Pool, OrmError> 
     let pool = config
         .create_pool(Runtime::Tokio1)
         .map_err(|error| OrmError::Configuration(error.to_string()))?;
-    Session::acquire(&pool).await?;
     Ok(pool)
 }
 
@@ -41,19 +46,6 @@ impl Session {
                     connection.execute_batch("ROLLBACK")?;
                 }
                 connection.execute_batch("PRAGMA foreign_keys = ON")?;
-                connection.create_collation("che_datetime", |left, right| {
-                    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-                    // Keep a total order even if application-owned raw SQL stored invalid text.
-                    match (
-                        OffsetDateTime::parse(left, &Rfc3339),
-                        OffsetDateTime::parse(right, &Rfc3339),
-                    ) {
-                        (Ok(left), Ok(right)) => left.cmp(&right),
-                        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
-                        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-                        (Err(_), Err(_)) => left.cmp(right),
-                    }
-                })?;
                 Ok(())
             })
             .await?;
@@ -151,12 +143,9 @@ fn params(query: &CompiledQuery) -> Result<Vec<rusqlite::types::Value>, OrmError
                 DatabaseValue::Binary(value) => Value::Blob(value.clone()),
                 DatabaseValue::Boolean(value) => Value::Integer(i64::from(*value)),
                 DatabaseValue::Uuid(value) => Value::Blob(value.as_bytes().to_vec()),
-                DatabaseValue::DateTime(value) => Value::Text(
-                    value
-                        .to_offset(time::UtcOffset::UTC)
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .map_err(|error| OrmError::Interaction(error.to_string()))?,
-                ),
+                DatabaseValue::DateTime(value) => {
+                    Value::Text(crate::datetime::sqlite_datetime(*value)?)
+                }
                 DatabaseValue::Null => Value::Null,
             })
         })

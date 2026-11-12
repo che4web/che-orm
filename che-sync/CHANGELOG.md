@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- **Breaking:** require che-orm 0.4.0 and its bound-query Database/Transaction
+  types. Adapt internal row reads without changing sync protocol versions.
+- Existing SQLite installations require explicit application-owned datetime
+  normalization migrations, including current/shadow/journal columns. Preserve
+  opaque submitted requests, receipts, cursors and pending work.
+
 ## 0.1.3
 
 - Read multiple independent model journals in one consistent snapshot with explicit

@@ -351,7 +351,7 @@ mod runtime {
             .order_by(M::primary_key().asc())
             .limit(10)
             .offset(0)
-            .all(db)
+            .all()
             .await
     }
 
@@ -370,7 +370,7 @@ mod runtime {
             .order_by(M::primary_key().asc())
             .limit(10)
             .offset(0)
-            .all(db)
+            .all()
             .await
     }
 
@@ -503,7 +503,7 @@ mod runtime {
         let parents = db
             .query::<User>()
             .prefetch_related(Post::USER.reverse())
-            .all(&db)
+            .all()
             .await
             .unwrap();
         assert_eq!(parents.len(), 901);
@@ -585,7 +585,7 @@ mod runtime {
         assert_eq!(
             db.query::<User>()
                 .filter(User::ID.in_values([first.id, second.id]))
-                .all(&db)
+                .all()
                 .await
                 .unwrap()
                 .len(),
@@ -722,7 +722,7 @@ mod runtime {
             .query::<Post>()
             .select_related(Post::USER)
             .select_related(Post::EDITOR)
-            .all(&db)
+            .all()
             .await
             .unwrap();
         assert_eq!(joined[0].relations.0.related.id, user.id);
@@ -731,7 +731,7 @@ mod runtime {
             .query::<Comment>()
             .select_related(Comment::POST)
             .select_related(Comment::REVIEWER)
-            .all(&db)
+            .all()
             .await
             .unwrap();
         assert_eq!(mixed[0].relations.0.related.id, post.id);
@@ -740,7 +740,7 @@ mod runtime {
             .query::<Comment>()
             .select_related(Comment::REVIEWER)
             .select_related(Comment::POST)
-            .all(&db)
+            .all()
             .await
             .unwrap();
         assert_eq!(mixed[0].relations.0.related.id, editor.id);
@@ -749,7 +749,7 @@ mod runtime {
             .query::<User>()
             .filter(User::ID.eq(user.id))
             .prefetch_related(Post::USER.reverse())
-            .all(&db)
+            .all()
             .await
             .unwrap();
         let json = UserWithPostsSerializer::to_json(parents.into_iter().next().unwrap()).unwrap();
@@ -758,7 +758,7 @@ mod runtime {
             .query::<User>()
             .filter(User::ID.eq(user.id))
             .prefetch_related(Post::USER.reverse().prefetch(Comment::POST.reverse()))
-            .all(&db)
+            .all()
             .await
             .unwrap();
         let json =
@@ -772,7 +772,7 @@ mod runtime {
             .filter(User::ID.eq(user.id))
             .prefetch_related(Post::USER.reverse())
             .prefetch_related(OptionalPost::USER.reverse())
-            .all(&db)
+            .all()
             .await
             .unwrap();
         assert_eq!(multi[0].relations.0.related[0].id, post.id);

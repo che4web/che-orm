@@ -88,7 +88,7 @@ let users = database
     .query::<User>()
     .filter(User::NAME.eq("Alice"))
     .order_by(User::EMAIL.asc())
-    .all(&database)
+    .all()
     .await?;
 
 let loaded = database.get::<User>(user.id).await?;
@@ -96,14 +96,15 @@ println!("{users:?}");
 println!("{loaded:?}");
 ```
 
-`filter` creates a parameterized SQL condition. Queryset terminal methods such
-as `all`, `first`, and `count` receive `&Database`:
+`filter` creates a parameterized SQL condition. A query created by
+`database.query()` already borrows that database, so terminal methods such as
+`all`, `first`, and `count` do not take another `&Database`:
 
 ```rust
 let first = database
     .query::<User>()
     .filter(User::EMAIL.eq("alice@example.test"))
-    .first(&database)
+    .first()
     .await?;
 ```
 
@@ -155,7 +156,7 @@ ORM performs a user query and one batch query for posts.
 let users_with_posts = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -167,7 +168,7 @@ a list of `WithOne<Post, User, PostUserRelation>`:
 let posts_with_user = database
     .query::<Post>()
     .select_related(Post::USER)
-    .all(&database)
+    .all()
     .await?;
 ```
 

@@ -133,9 +133,40 @@ fn apply_single_operation_migration(
                     assert_rebuild_objects_match_history(connection, table, migration_state)?;
                 }
                 let plan = SqliteSchemaEditor::plan(operation, migration_state)?;
-                for statement in &plan.statements {
-                    connection.execute_batch(statement)?;
+                let normalizing = matches!(
+                    operation,
+                    MigrationOperation::NormalizeSqliteDateTimes { .. }
+                );
+                if normalizing {
+                    use crate::rusqlite::functions::FunctionFlags;
+                    connection.create_scalar_function(
+                        "che_datetime_utc",
+                        1,
+                        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                        |context| {
+                            let value: Option<String> = context.get(0)?;
+                            value
+                                .map(|value| {
+                                    crate::datetime::normalize_sqlite_datetime(&value).map_err(
+                                        |error| {
+                                            crate::rusqlite::Error::UserFunctionError(Box::new(
+                                                error,
+                                            ))
+                                        },
+                                    )
+                                })
+                                .transpose()
+                        },
+                    )?;
                 }
+                let result = plan
+                    .statements
+                    .iter()
+                    .try_for_each(|statement| connection.execute_batch(statement));
+                if normalizing {
+                    connection.remove_function("che_datetime_utc", 1)?;
+                }
+                result?;
                 *migration_state = plan.resulting_state;
             }
         }
@@ -428,45 +459,7 @@ pub fn pending_operation_migrations<'a>(
     graph: &'a MigrationGraph,
     applied: &HashMap<(String, String), String>,
 ) -> Result<Vec<&'a Migration>, Box<dyn std::error::Error + Send + Sync>> {
-    graph.validate_heads()?;
-    let registered = graph
-        .ordered()
-        .map(|migration| {
-            (
-                (migration.id.app.clone(), migration.id.name.clone()),
-                migration,
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    for ((app, name), checksum) in applied {
-        match registered.get(&(app.clone(), name.clone())) {
-            Some(migration) if migration.checksum == *checksum => {}
-            Some(_) => return Err(format!("divergent operation migration {app}:{name}").into()),
-            None => return Err(format!("missing operation migration {app}:{name}").into()),
-        }
-    }
-    for migration in graph.ordered() {
-        let key = (migration.id.app.clone(), migration.id.name.clone());
-        if !applied.contains_key(&key) {
-            continue;
-        }
-        for dependency in &migration.dependencies {
-            let dependency_key = (dependency.app.clone(), dependency.name.clone());
-            if !applied.contains_key(&dependency_key) {
-                return Err(format!(
-                    "inconsistent operation migration history: applied {}:{} is missing dependency {}:{}",
-                    migration.id.app, migration.id.name, dependency.app, dependency.name
-                )
-                .into());
-            }
-        }
-    }
-    Ok(graph
-        .ordered()
-        .filter(|migration| {
-            !applied.contains_key(&(migration.id.app.clone(), migration.id.name.clone()))
-        })
-        .collect())
+    crate::migration::pending_operation_migrations(graph, applied)
 }
 
 const OPERATION_MIGRATION_HISTORY_SQL: &str = "CREATE TABLE IF NOT EXISTS che_migration_history (app TEXT NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_on TEXT NOT NULL, PRIMARY KEY (app, name));";

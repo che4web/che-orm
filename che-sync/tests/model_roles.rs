@@ -301,7 +301,19 @@ async fn revoked_scope_blocks_existing_orm_handles_and_transactions() {
         .await
         .unwrap();
     let handle = server.database().clone();
+    let query_before_revocation = handle.query::<Task>();
     allowed.store(false, Ordering::SeqCst);
+    assert!(query_before_revocation.all().await.is_err());
+    assert!(handle.query::<Task>().first().await.is_err());
+    assert!(handle.query::<Task>().count().await.is_err());
+    assert!(
+        handle
+            .query::<Task>()
+            .prefetch_related(Child::TASK.reverse())
+            .all()
+            .await
+            .is_err()
+    );
     assert!(handle.get::<Task>(task.id).await.is_err());
     assert!(handle.all::<Task>().await.is_err());
     assert!(handle.count::<Task>().await.is_err());
@@ -315,7 +327,7 @@ async fn revoked_scope_blocks_existing_orm_handles_and_transactions() {
         handle
             .query::<Child>()
             .select_related(Child::TASK)
-            .all(&handle)
+            .all()
             .await
             .is_err()
     );

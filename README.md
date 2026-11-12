@@ -8,6 +8,10 @@
 Текущая опубликованная версия `che-orm` — **0.3.3**. Проект находится
 в разработке; перед обновлением см. [CHANGELOG](CHANGELOG.md).
 
+Этот checkout готовит **0.4.0** (ещё не опубликована): bound-query API и формат
+SQLite datetime изменились несовместимо. До публикации новых ORM/Sync/REST
+используйте согласованные локальные зависимости. См. [план выпуска](docs/releasing.md).
+
 ## Возможности
 
 - **Типизированные модели и запросы.** `#[derive(Model)]` создаёт метаданные
@@ -34,7 +38,7 @@
 
 ```toml
 [dependencies]
-che-orm = "0.3.3"
+che-orm = "0.4.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -82,7 +86,7 @@ async fn main() -> Result<(), che_orm::OrmError> {
     let users = database
         .query::<User>()
         .filter(User::NAME.eq("Alice"))
-        .all(&database)
+        .all()
         .await?;
     println!("{users:?}");
 
@@ -132,7 +136,7 @@ database
 Модели и CRUD-код остаются прежними. Замените зависимость в `Cargo.toml`:
 
 ```toml
-che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.4.0", default-features = false, features = ["postgres"] }
 ```
 
 Создайте базу PostgreSQL и задайте URL со своими реквизитами:
@@ -226,6 +230,8 @@ HTTP и REST-маппинг принадлежат `che-rest`, Tauri-коман�
 для примера работы двух устройств.
 
 ## Документация
+
+- [Результаты бенчмарков и условия измерений](benchmarks/README.md)
 
 - [Пошаговое руководство](docs/tutorial.md)
 - [Модели, поля, связи и сериализаторы](docs/models.md)

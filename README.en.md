@@ -8,6 +8,10 @@ PostgreSQL. The backend is selected at compile time. Requires **Rust 1.88+**.
 The current published `che-orm` version is **0.3.3**. The project is under
 development; check the [changelog](CHANGELOG.md) before upgrading.
 
+This checkout prepares **0.4.0** (not yet published), with breaking bound-query
+and SQLite datetime-storage changes. Use matching local dependencies until the
+new core/sync/REST versions are published; see [release preparation](docs/releasing.md).
+
 ## Features
 
 - **Typed models and queries.** `#[derive(Model)]` generates metadata and
@@ -34,7 +38,7 @@ Add the dependencies to `Cargo.toml`. SQLite is enabled by default:
 
 ```toml
 [dependencies]
-che-orm = "0.3.3"
+che-orm = "0.4.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -82,7 +86,7 @@ async fn main() -> Result<(), che_orm::OrmError> {
     let users = database
         .query::<User>()
         .filter(User::NAME.eq("Alice"))
-        .all(&database)
+        .all()
         .await?;
     println!("{users:?}");
 
@@ -132,7 +136,7 @@ database
 Models and CRUD code stay the same. Replace the dependency in `Cargo.toml`:
 
 ```toml
-che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.4.0", default-features = false, features = ["postgres"] }
 ```
 
 Create a PostgreSQL database and set the URL with your credentials:
@@ -226,6 +230,8 @@ See the [Todo server and desktop client](https://github.com/che4web/che-tauri/tr
 for a two-device example.
 
 ## Documentation
+
+- [Benchmark results and methodology](benchmarks/README.md)
 
 - [Step-by-step tutorial](docs/en/tutorial.md)
 - [Models, fields, relations and serializers](docs/en/models.md)

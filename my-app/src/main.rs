@@ -30,7 +30,7 @@ async fn main() -> Result<(), che_orm::OrmError> {
         .filter(Task::DONE.eq(true))
         .order_by(Task::ID.desc())
         .limit(20)
-        .all(&database)
+        .all()
         .await?;
     println!("Completed tasks: {tasks:?}");
 

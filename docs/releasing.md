@@ -7,14 +7,20 @@ Current workspace package versions:
 | Package | Version |
 | --- | --- |
 | che-orm-macros | 0.3.2 |
-| che-orm | 0.3.3 |
+| che-orm | 0.4.0 (unpublished candidate) |
 | che-sync-protocol | 0.1.0 |
-| che-sync | 0.1.3 |
+| che-sync | 0.2.0 (unpublished candidate) |
 
-Sync 0.1.3 adds batched journal reads and a read-only journal reader. The matching
-REST adapter is che-rest 0.3.4. Core, macros and protocol versions are unchanged.
-The new sync/REST versions are local candidates; the core is already published.
-See [the 2026-11-06 verification report](release-verification-2026-11-06.md).
+Registry audit on 2026-11-12 confirms published core 0.3.3, macros 0.3.2,
+protocol 0.1.0, sync 0.1.3 and REST 0.3.4, all non-yanked; che-tauri has no
+registry entry. See [the registry audit](registry-audit-2026-11-12.json).
+Completed preparation checks and remaining gates are recorded in the
+[2026-11-12 verification report](release-verification-2026-11-12.md).
+The new candidates are core 0.4.0, sync 0.2.0 and REST 0.4.0. Bound queries and
+SQLite datetime storage are breaking changes; bump minor versions under 0.x.
+Macros/protocol source and original manifests match their published archives:
+keep their versions and do not republish them. che-tauri's unused 0.1.1 candidate
+can remain unchanged while its dependencies move to this new core/sync line.
 
 Core 0.3.3 adds capture of ordinary-parent referential actions for model journals
 and integer foreign-key support. Sync 0.1.2 also includes self-referencing UUID
@@ -22,8 +28,8 @@ models, initial-pull/pending-entity inspection and a feature guard for its
 SQLite-only foreign-key test. Macros and protocol versions are unchanged.
 Registry check on 2026-11-06 confirmed core 0.3.3, macros 0.3.2, protocol
 0.1.0, sync 0.1.2 and REST 0.3.3 are already published and not yanked.
-Do not republish those versions or move their tags. The only new candidates
-are sync 0.1.3, then REST 0.3.4; core source is unchanged since tag v0.3.3.
+Do not republish those versions or move their tags. The former sync 0.1.3 and
+REST 0.3.4 candidates have since been published; they cannot identify this source.
 The initial-publication notes below describe previous candidates.
 
 `che-orm-examples` is private (`publish = false`). Package the four public
@@ -34,7 +40,7 @@ crates explicitly rather than using `cargo package --workspace`.
 The following notes record earlier release preparations, not the current
 publication plan. Do not run their publication commands for this candidate.
 Use [Publication](#publication) and the [release checklist](release-checklist.md)
-for the current sync-only release.
+for the current coordinated release.
 
 ### Candidate verification (2026-11-02)
 
@@ -187,19 +193,21 @@ Fresh-database tests do not validate this application-specific upgrade.
 
 ## Publication
 
-The current candidate publishes **che-sync 0.1.3 only** from this workspace.
-Core 0.3.3, macros 0.3.2 and protocol 0.1.0 are already published; do not
-republish them or move their tags. Review and commit the verified release first:
+Publish only after separate explicit authorization, dependency-order verification
+and review of application-owned SQLite upgrades. Current order is **che-orm
+0.4.0**, **che-sync 0.2.0**, then downstream **che-rest 0.4.0**. Already published
+versions/tags remain untouched. Review and commit the verified release first:
 
 ```bash
+cargo publish --dry-run -p che-orm --locked
+# Publish core only with separate approval; wait for indexing before sync dry run.
 cargo publish --dry-run -p che-sync --locked
-cargo publish -p che-sync --locked
 ```
 
-After che-sync 0.1.3 is indexed, the downstream che-rest 0.3.4 candidate can
-pass its ordinary registry dry run and be published from its own checkout.
-Verify crate pages and docs.rs before creating the new `che-sync-v0.1.3` tag.
-The published core tag remains `v0.3.3`.
+After core 0.4.0 and sync 0.2.0 are published and indexed, REST 0.4.0 can pass
+its ordinary registry dry run. Verify registry/docs.rs before creating any new
+tags. Keep `v0.3.3`, `che-sync-v0.1.3` and REST `v0.3.4` intact. che-tauri's
+initial publication is a separate decision; Tacit 0.1.14 remains an application.
 
 Packaging and dry runs are verification only, not authorization to publish.
 See the [release checklist](release-checklist.md) for the publication gates.

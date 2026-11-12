@@ -103,6 +103,17 @@ that define foreign keys to them.
   `on_delete = "set null"` only with optional keys.
 - Use `#[orm(auto_now_add)]` and `#[orm(auto_now)]` only with `OffsetDateTime`.
 - `auto_now` is updated by ORM-generated UPDATE statements. Raw SQL does not update it.
+- SQLite datetime storage is canonical UTC TEXT with exactly nine fractional
+  digits and UTC years 0000..9999. Typed bindings preserve nanoseconds; SQLite
+  managed defaults pad their millisecond clock to the same 30-character format.
+  JSON remains RFC 3339 and PostgreSQL remains native TIMESTAMPTZ. Do not restore
+  per-comparison parsing or `COLLATE che_datetime`; ordinary indexes serve dates.
+  Existing databases require an explicit application-owned follow-up migration
+  using `NormalizeSqliteDateTimes` with frozen physical table/column names before
+  running the new application. Never normalize at startup or rewrite frozen
+  migration sources/checksums. Review custom defaults, triggers, views, sync
+  current/shadow/journal columns and external raw writers separately; never
+  rewrite opaque pending payloads. See `docs/en/sqlite.md` for the transition.
 - `Option<T>` maps to a nullable SQL column.
 - `JsonField(Value)` stores JSON as SQL TEXT and serializes as a JSON value.
   It supports typed writes and decoding; application validation owns JSON shape.
@@ -323,5 +334,5 @@ cargo run -p che-orm-examples --bin serializers
 
 ## Current publication candidate
 
-- Core che-orm 0.3.3, macros 0.3.2 and protocol 0.1.0 are already published; this candidate changes che-sync to 0.1.3 only. Do not republish unchanged packages.
+- Registry checked 2026-11-12: core 0.3.3, macros 0.3.2, protocol 0.1.0, sync 0.1.3 and REST 0.3.4 are published. Breaking bound-query/datetime candidates are core 0.4.0, sync 0.2.0 and REST 0.4.0. Macros/protocol are unchanged; do not republish them or reuse old versions/tags. che-tauri has no registry entry and retains its unused 0.1.1 candidate. See docs/registry-audit-2026-11-12.json.
 - See `docs/release-checklist.md` for checks and publication order. Package preparation and `cargo publish --dry-run` do not authorize an actual publication.

@@ -309,7 +309,7 @@ where
 {
     db.query::<M>()
         .select_related(relation)
-        .all(db)
+        .all()
         .await
         .unwrap()
 }
@@ -323,7 +323,7 @@ where
 {
     db.query::<M>()
         .select_related(relation)
-        .all(db)
+        .all()
         .await
         .unwrap()
 }
@@ -450,7 +450,7 @@ async fn portable_runtime_crud_transactions_relations_and_migrations() {
         db.query::<Account>()
             .filter(Account::SCORE.gt(12.5))
             .limit(1)
-            .count(&db)
+            .count()
             .await
             .unwrap(),
         1
@@ -522,7 +522,7 @@ async fn portable_runtime_crud_transactions_relations_and_migrations() {
         db.query::<Post>()
             .select_related(Post::USER)
             .filter(alias.eq("Alice"))
-            .count(&db)
+            .count()
             .await
             .unwrap(),
         1
@@ -533,7 +533,7 @@ async fn portable_runtime_crud_transactions_relations_and_migrations() {
             .select_related(Post::USER)
             .filter(alias.eq("Alice"))
             .order_by(Post::USER.related_field(Account::NAME).asc())
-            .all(&db)
+            .all()
             .await
             .unwrap()
             .len(),
@@ -543,7 +543,7 @@ async fn portable_runtime_crud_transactions_relations_and_migrations() {
         .query::<Post>()
         .select_related(Post::USER)
         .select_related(Post::EDITOR)
-        .all(&db)
+        .all()
         .await
         .unwrap();
     assert_eq!(multiple[0].relations.0.related.id, alice.id);
@@ -563,7 +563,7 @@ async fn portable_runtime_crud_transactions_relations_and_migrations() {
         .query::<Account>()
         .filter(Account::ID.eq(alice.id))
         .prefetch_related(Post::USER.reverse().prefetch(Comment::POST.reverse()))
-        .all(&db)
+        .all()
         .await
         .unwrap();
     let json = AccountWithPosts::to_json(nested.into_iter().next().unwrap()).unwrap();
@@ -576,7 +576,7 @@ async fn portable_runtime_crud_transactions_relations_and_migrations() {
         .filter(Account::ID.eq(alice.id))
         .prefetch_related(Post::USER.reverse())
         .prefetch_related(OptionalPost::USER.reverse())
-        .all(&db)
+        .all()
         .await
         .unwrap();
     assert_eq!(multi[0].relations.0.related[0].id, post.id);

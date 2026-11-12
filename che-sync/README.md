@@ -3,7 +3,8 @@
 Native offline-first synchronization for che-orm: current/shadow client tables,
 durable delivery, server revisions and journal, and three-way field merging.
 
-Requires **Rust 1.88+**, **che-orm 0.3.3** and **che-sync-protocol 0.1.0**.
+Requires **Rust 1.88+**, **che-orm 0.4.0** and **che-sync-protocol 0.1.0**.
+This checkout prepares unpublished 0.2.0; use matching local paths until release.
 Licensed under MIT. See the [changelog](CHANGELOG.md) and
 [Rust API documentation](https://docs.rs/che-sync).
 
@@ -13,16 +14,16 @@ SQLite is enabled by default:
 
 ```toml
 [dependencies]
-che-sync = "0.1.3"
-che-orm = "0.3.3"
+che-sync = "0.2.0"
+che-orm = "0.4.0"
 ```
 
 For PostgreSQL, disable defaults on both crates and select exactly one backend:
 
 ```toml
 [dependencies]
-che-sync = { version = "0.1.3", default-features = false, features = ["postgres"] }
-che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
+che-sync = { version = "0.2.0", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.4.0", default-features = false, features = ["postgres"] }
 ```
 
 When developing with local checkouts, use the same local ORM dependency for all
@@ -43,7 +44,7 @@ model reads. The engine passes explicit durable positions, validates batch
 membership and applies pages in registry order through existing merge/cursor
 transactions. History reset blocks new submissions without deleting pending
 work. Writes retain their adapter identity and saved payloads. HTTP endpoints
-and credentials remain in che-rest 0.3.4; protocol versions and database schemas
+and credentials remain in che-rest 0.4.0; protocol versions and database schemas
 are unchanged. See [the model sync guide](https://github.com/che4web/che-orm/blob/main/docs/model-sync.md).
 
 ## Protocol 2: per-model journals

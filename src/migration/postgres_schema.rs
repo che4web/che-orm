@@ -44,17 +44,14 @@ impl DeferredForeignKey {
             })?;
         add_foreign_key(&self.table, column)
     }
-    #[cfg(feature = "postgres")]
     pub(crate) fn exists(&self, state: &ProjectState) -> bool {
         self.source(state)
             .is_some_and(|column| column.references.is_some())
     }
-    #[cfg(feature = "postgres")]
     pub(crate) fn ready(&self, state: &ProjectState) -> bool {
         self.source(state)
             .is_some_and(|column| foreign_ready(column, state))
     }
-    #[cfg(feature = "postgres")]
     pub(crate) fn follow(&mut self, operation: &MigrationOperation) {
         match operation {
             MigrationOperation::RenameTable { old_name, new_name } if self.table == *old_name => {
@@ -269,6 +266,53 @@ fn constraints(table: &TableState, pending_columns: &BTreeSet<usize>) -> Vec<Str
 }
 
 impl PostgresSchemaEditor {
+    /// Plans a complete historical migration, resolving deferred foreign keys
+    /// in the same order as the executor. Unlike planning isolated operations,
+    /// this handles cyclic table creation and changes to pending references.
+    pub fn plan_migration(
+        operations: &[MigrationOperation],
+        before: &ProjectState,
+    ) -> Result<PostgresOperationPlan, MigrationError> {
+        let mut state = before.clone();
+        let mut statements = Vec::new();
+        let mut deferred = Vec::<DeferredForeignKey>::new();
+        for operation in operations {
+            let plan = Self::plan_with_deferred(operation, &state, &deferred)?;
+            statements.extend(plan.statements);
+            if let MigrationOperation::AlterColumn {
+                table, old_column, ..
+            } = operation
+            {
+                deferred.retain(|key| key.table != *table || key.column != old_column.name);
+            }
+            for key in &mut deferred {
+                key.follow(operation);
+            }
+            state = plan.resulting_state;
+            deferred.retain(|key| key.exists(&state));
+            deferred.extend(plan.deferred_foreign_keys);
+            let mut waiting = Vec::new();
+            for key in deferred {
+                if key.ready(&state) {
+                    statements.push(key.statement(&state)?);
+                } else {
+                    waiting.push(key);
+                }
+            }
+            deferred = waiting;
+        }
+        if !deferred.is_empty() {
+            return Err(MigrationError::InvalidState(
+                "migration leaves unresolved PostgreSQL foreign keys".into(),
+            ));
+        }
+        Ok(PostgresOperationPlan {
+            statements,
+            deferred_foreign_keys: deferred,
+            resulting_state: state,
+        })
+    }
+
     pub fn plan(
         operation: &MigrationOperation,
         before: &ProjectState,
@@ -471,6 +515,7 @@ impl PostgresSchemaEditor {
                 }
                 statements.push(sql);
             }
+            MigrationOperation::NormalizeSqliteDateTimes { .. } => {}
             MigrationOperation::RunSql { forward, .. } => statements.push(forward.clone()),
         }
         Ok(PostgresOperationPlan {

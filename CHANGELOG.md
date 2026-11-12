@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+- **Breaking:** Database/Transaction query builders now bind their execution
+  context; call `.all()`, `.first()`, `.count()` etc. without passing the database
+  again. Keep unbound `Model::query()` / `DatabaseQuery` contracts distinct.
+
+- Add `Database::connect_lazy` and `connect_lazy_with_pool_size` for offline
+  metadata discovery; configuration is checked without opening a connection.
+- Add `PostgresSchemaEditor::plan_migration` to preview a complete migration,
+  including deferred foreign keys, and backend-neutral migration-history
+  validation while preserving the SQLite compatibility entry point.
+
+- **Breaking:** SQLite datetime values now use fixed-width UTC TEXT with nine
+  fractional digits (`YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`, UTC years 0000..9999).
+  Ordinary comparisons and indexes replace the parsing `che_datetime` collation.
+  JSON RFC 3339 and PostgreSQL TIMESTAMPTZ are unchanged.
+- Add explicit `NormalizeSqliteDateTimes` compiled migrations to normalize old
+  values losslessly and refresh managed defaults using transactional table
+  rebuilds. Existing SQLite databases must migrate before application startup;
+  opening a database does not normalize it. Review custom defaults and external
+  writers separately. See `docs/en/sqlite.md`.
+- Add datetime correctness, migration rollback, index-plan regression tests and
+  an opt-in release-mode comparison benchmark.
+
 ## 0.3.3
 
 - Capture referential actions from ordinary integer-key parents through the

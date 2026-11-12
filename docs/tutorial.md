@@ -91,7 +91,7 @@ let users = database
     .query::<User>()
     .filter(User::NAME.eq("Alice"))
     .order_by(User::EMAIL.asc())
-    .all(&database)
+    .all()
     .await?;
 
 let loaded = database.get::<User>(user.id).await?;
@@ -99,14 +99,15 @@ println!("{users:?}");
 println!("{loaded:?}");
 ```
 
-`filter` создаёт параметризованное SQL-условие. Терминальные методы queryset,
-такие как `all`, `first` и `count`, получают `&Database`:
+`filter` создаёт параметризованное SQL-условие. Запрос из `database.query()` уже
+хранит ссылку на базу: `all`, `first` и `count` не требуют повторной передачи
+`&Database`:
 
 ```rust
 let first = database
     .query::<User>()
     .filter(User::EMAIL.eq("alice@example.test"))
-    .first(&database)
+    .first()
     .await?;
 ```
 
@@ -159,7 +160,7 @@ println!("{posts:?}");
 let users_with_posts = database
     .query::<User>()
     .prefetch_related(Post::USER.reverse())
-    .all(&database)
+    .all()
     .await?;
 ```
 
@@ -171,7 +172,7 @@ JOIN и возвращает список `WithOne<Post, User, PostUserRelation>
 let posts_with_user = database
     .query::<Post>()
     .select_related(Post::USER)
-    .all(&database)
+    .all()
     .await?;
 ```
 

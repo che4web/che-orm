@@ -1,6 +1,9 @@
 #![cfg(feature = "sqlite")]
 
-use che_orm::{Database, DatabaseValue, Model, PostgresDialect, QueryAst, SqlCompiler};
+use che_orm::{
+    Database, DatabaseValue, Migration, MigrationGraph, MigrationId, MigrationOperation, Model,
+    ModelState, PostgresDialect, QueryAst, SqlCompiler,
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Model)]
@@ -28,9 +31,25 @@ fn instant(value: &str) -> OffsetDateTime {
 }
 
 #[tokio::test]
-async fn legacy_timestamps_compare_and_sort_without_rewriting_rows() {
+async fn explicit_migration_normalizes_legacy_timestamps_before_comparing_and_sorting() {
     let db = Database::connect_in_memory().await.unwrap();
-    db.create_table::<Timestamp>().await.unwrap();
+    let model = ModelState {
+        key: che_orm::ModelKey {
+            app: "dates".into(),
+            name: "Timestamp".into(),
+        },
+        table: (&Timestamp::schema()).into(),
+    };
+    let initial = Migration::new(MigrationId { app: "dates".into(), name: "0001_initial".into() }, vec![], vec![
+        MigrationOperation::RunSql {
+            forward: "CREATE TABLE datetime_regressions (id INTEGER PRIMARY KEY, occurred_at TEXT, created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))".into(),
+            reverse: None,
+            state_operations: vec![MigrationOperation::CreateModel { model }],
+        },
+    ]);
+    db.migrate(MigrationGraph::new(vec![initial.clone()]).unwrap())
+        .await
+        .unwrap();
     let values = [
         Some("2026-01-01T00:00:00Z"),
         Some("2026-01-01T00:00:00.1Z"),
@@ -48,6 +67,20 @@ async fn legacy_timestamps_compare_and_sort_without_rewriting_rows() {
         .await
         .unwrap();
     }
+    let normalization = Migration::new(
+        MigrationId {
+            app: "dates".into(),
+            name: "0002_canonical_datetime".into(),
+        },
+        vec![initial.id.clone()],
+        vec![MigrationOperation::NormalizeSqliteDateTimes {
+            table: "datetime_regressions".into(),
+            columns: vec!["occurred_at".into(), "created".into()],
+        }],
+    );
+    db.migrate(MigrationGraph::new(vec![initial, normalization]).unwrap())
+        .await
+        .unwrap();
     let exact = instant("2026-01-01T00:00:00Z");
     let rows = db
         .fetch_all(
@@ -95,7 +128,7 @@ async fn legacy_timestamps_compare_and_sort_without_rewriting_rows() {
         1
     );
 
-    // SQLite's historical millisecond default must compare equal to its decoded value.
+    // Normalized historical defaults compare equal to their decoded values.
     let created = rows[0].created;
     assert!(
         !db.fetch_all(Timestamp::query().filter(Timestamp::CREATED.eq(created)))
@@ -110,7 +143,10 @@ async fn legacy_timestamps_compare_and_sort_without_rewriting_rows() {
         )
         .await
         .unwrap();
-    assert_eq!(raw[0].get::<String>(0).unwrap(), "2026-01-01T00:00:00.000Z");
+    assert_eq!(
+        raw[0].get::<String>(0).unwrap(),
+        "2026-01-01T00:00:00.000000000Z"
+    );
 
     db.create_table::<TimestampLink>().await.unwrap();
     for id in 1..=6 {
@@ -126,7 +162,7 @@ async fn legacy_timestamps_compare_and_sort_without_rewriting_rows() {
         .select_related(TimestampLink::TIMESTAMP)
         .filter(related_at.gt(Some(exact)))
         .order_by(related_at.asc())
-        .all(&db)
+        .all()
         .await
         .unwrap();
     assert_eq!(

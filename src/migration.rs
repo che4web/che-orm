@@ -7,6 +7,45 @@ mod postgres_schema;
 #[cfg(feature = "sqlite")]
 pub mod sqlite_executor;
 pub use postgres_schema::{DeferredForeignKey, PostgresOperationPlan, PostgresSchemaEditor};
+
+/// Validates checksums and dependency history without accessing either backend.
+pub fn pending_operation_migrations<'a>(
+    graph: &'a MigrationGraph,
+    applied: &std::collections::HashMap<(String, String), String>,
+) -> Result<Vec<&'a Migration>, Box<dyn std::error::Error + Send + Sync>> {
+    graph.validate_heads()?;
+    let registered = graph
+        .ordered()
+        .map(|migration| {
+            (
+                (migration.id.app.clone(), migration.id.name.clone()),
+                migration,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for ((app, name), checksum) in applied {
+        match registered.get(&(app.clone(), name.clone())) {
+            Some(migration) if migration.checksum == *checksum => {}
+            Some(_) => return Err(format!("divergent operation migration {app}:{name}").into()),
+            None => return Err(format!("missing operation migration {app}:{name}").into()),
+        }
+    }
+    for migration in graph.ordered() {
+        if applied.contains_key(&(migration.id.app.clone(), migration.id.name.clone())) {
+            for dependency in &migration.dependencies {
+                if !applied.contains_key(&(dependency.app.clone(), dependency.name.clone())) {
+                    return Err(format!("inconsistent operation migration history: applied {}:{} is missing dependency {}:{}", migration.id.app, migration.id.name, dependency.app, dependency.name).into());
+                }
+            }
+        }
+    }
+    Ok(graph
+        .ordered()
+        .filter(|migration| {
+            !applied.contains_key(&(migration.id.app.clone(), migration.id.name.clone()))
+        })
+        .collect())
+}
 #[cfg(feature = "postgres")]
 pub(crate) mod postgres_executor;
 
@@ -1040,6 +1079,11 @@ fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
             render_schema_object_kind(*kind),
             render_string(name)
         ),
+        MigrationOperation::NormalizeSqliteDateTimes { table, columns } => format!(
+            "MigrationOperation::NormalizeSqliteDateTimes {{ table: {}, columns: {} }}",
+            render_string(table),
+            render_strings(columns)
+        ),
         MigrationOperation::RunSql {
             forward,
             reverse,
@@ -1060,6 +1104,13 @@ fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
 /// A migration state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationOperation {
+    /// Rebuilds a SQLite table, normalizing the named DateTime columns to
+    /// fixed-width UTC TEXT and refreshing managed timestamp defaults.
+    /// Invalid values fail the migration atomically. PostgreSQL is unchanged.
+    NormalizeSqliteDateTimes {
+        table: String,
+        columns: Vec<String>,
+    },
     CreateModel {
         model: ModelState,
     },
@@ -1151,7 +1202,8 @@ fn operation_has_distinct_field_names(operation: &MigrationOperation) -> bool {
         } => state_operations
             .iter()
             .any(operation_has_distinct_field_names),
-        MigrationOperation::DropTable { .. }
+        MigrationOperation::NormalizeSqliteDateTimes { .. }
+        | MigrationOperation::DropTable { .. }
         | MigrationOperation::RemoveColumn { .. }
         | MigrationOperation::RenameTable { .. }
         | MigrationOperation::RenameColumn { .. }
@@ -1253,6 +1305,11 @@ fn encode_table(bytes: &mut Vec<u8>, table: &TableState, include_field_name: boo
 
 fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation, include_field_name: bool) {
     match operation {
+        MigrationOperation::NormalizeSqliteDateTimes { table, columns } => {
+            bytes.push(16);
+            encode_string(bytes, table);
+            encode_string_list(bytes, columns);
+        }
         MigrationOperation::CreateModel { model } => {
             bytes.push(12);
             encode_string(bytes, &model.key.app);
@@ -1574,6 +1631,31 @@ impl MigrationOperation {
             Self::RemoveUniqueConstraint { table, columns } => {
                 let table = table_mut(state, table)?;
                 remove_constraint(&mut table.unique_constraints, columns, &table.name, false)?;
+            }
+            Self::NormalizeSqliteDateTimes { table, columns } => {
+                let table = table_mut(state, table)?;
+                if columns.is_empty() {
+                    return Err(MigrationError::InvalidState(
+                        "datetime normalization requires explicit columns".into(),
+                    ));
+                }
+                let mut seen = BTreeSet::new();
+                for name in columns {
+                    let column = &table.columns[column_index(table, name)?];
+                    if column.column_type != ColumnType::DateTime || !seen.insert(name) {
+                        return Err(MigrationError::InvalidState(format!(
+                            "invalid or duplicate datetime column {}.{name}",
+                            table.name
+                        )));
+                    }
+                    // Arbitrary SQL defaults require an application-owned AlterColumn.
+                    if column.default.is_some() {
+                        return Err(MigrationError::InvalidState(format!(
+                            "review and remove the explicit default on {}.{name} before datetime normalization",
+                            table.name
+                        )));
+                    }
+                }
             }
             Self::BackfillColumn {
                 table,
@@ -2173,7 +2255,8 @@ impl SqliteSchemaEditor {
             | MigrationOperation::RemoveUniqueConstraint { table, .. }
             | MigrationOperation::AddColumn { table, .. }
             | MigrationOperation::RemoveColumn { table, .. }
-            | MigrationOperation::AlterColumn { table, .. } => Some(table),
+            | MigrationOperation::AlterColumn { table, .. }
+            | MigrationOperation::NormalizeSqliteDateTimes { table, .. } => Some(table),
             _ => None,
         }
     }
@@ -2276,7 +2359,17 @@ fn rebuild_table_statements(
             .join(", ");
         let sources = copied_columns
             .iter()
-            .map(|(_, source)| quote_identifier(source))
+            .map(|(_, source)| {
+                let source_sql = quote_identifier(source);
+                match operation {
+                    MigrationOperation::NormalizeSqliteDateTimes { columns, .. }
+                        if columns.iter().any(|column| column == source) =>
+                    {
+                        format!("che_datetime_utc({source_sql})")
+                    }
+                    _ => source_sql,
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         statements.push(format!(
@@ -2376,7 +2469,8 @@ fn column_definition_sql(column: &ColumnState) -> String {
         sql.push_str(" UNIQUE");
     }
     if (column.auto_now_add || column.auto_now) && column.default.is_none() {
-        sql.push_str(" DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))");
+        sql.push_str(" DEFAULT ");
+        sql.push_str(crate::datetime::SQLITE_DATETIME_DEFAULT);
     }
     if let Some(default) = &column.default {
         sql.push_str(" DEFAULT ");
