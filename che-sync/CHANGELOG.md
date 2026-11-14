@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- **Breaking:** require Rust 1.89 to match che-orm's patched bundled SQLite driver.
+
 - **Breaking:** remove the `che_sync::SchemaRole` compatibility alias. Use
   `che_orm::ModelRole` for registry migrations and object-delivery schemas.
 

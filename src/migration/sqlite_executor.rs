@@ -121,10 +121,11 @@ fn apply_single_operation_migration(
                     | AuthAction::Attach { .. }
                     | AuthAction::Detach { .. } => Authorization::Deny,
                     _ => Authorization::Allow,
-                }));
+                }))?;
                 let result = connection.execute_batch(forward);
-                connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                let reset = connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
                 result?;
+                reset?;
                 operation.state_forwards(migration_state)?;
             }
             _ => {

@@ -3,18 +3,18 @@
 Включается ровно один backend. SQLite выбран по умолчанию:
 
 ```toml
-che-orm = "0.3.3"
+che-orm = "0.4.0"
 ```
 
 Для PostgreSQL:
 
 ```toml
-che-orm = { version = "0.3.3", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.4.0", default-features = false, features = ["postgres"] }
 ```
 
 Оба features одновременно или отсутствие обоих — ошибка компиляции. Типы
 `Database`, `Transaction`, CRUD-builders, модели и сериализаторы одинаковые.
-PostgreSQL-сборка не зависит от `rusqlite`. Требуется Rust 1.88 или новее.
+PostgreSQL-сборка не зависит от `rusqlite`. Требуется Rust 1.89 или новее.
 
 ## Подключение
 

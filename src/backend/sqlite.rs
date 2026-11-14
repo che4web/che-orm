@@ -1,10 +1,46 @@
 use crate::{CompiledQuery, DatabaseValue, ExecuteResult, MigrationGraph, OrmError, Row};
-use deadpool_sqlite::{Config, Object, Runtime};
+use deadpool::managed::{self, Metrics, RecycleError};
+use deadpool_sync::SyncWrapper;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-pub(crate) type Pool = deadpool_sqlite::Pool;
+pub(crate) type Pool = managed::Pool<Manager>;
+type Object = managed::Object<Manager>;
 pub(crate) const MAX_PARAMETERS: usize = 900;
+
+/// Keep pool management independent of the rusqlite release cycle.
+#[derive(Debug)]
+pub(crate) struct Manager {
+    path: String,
+}
+
+impl managed::Manager for Manager {
+    type Type = SyncWrapper<rusqlite::Connection>;
+    type Error = rusqlite::Error;
+
+    async fn create(&self) -> Result<Self::Type, Self::Error> {
+        let path = self.path.clone();
+        SyncWrapper::new(deadpool::Runtime::Tokio1, move || {
+            rusqlite::Connection::open(path)
+        })
+        .await
+    }
+
+    async fn recycle(
+        &self,
+        connection: &mut Self::Type,
+        _: &Metrics,
+    ) -> managed::RecycleResult<Self::Error> {
+        if connection.is_mutex_poisoned() {
+            return Err(RecycleError::message("SQLite connection mutex is poisoned"));
+        }
+        connection
+            .interact(|connection| connection.query_row("SELECT 1", [], |_| Ok(())))
+            .await
+            .map_err(|error| RecycleError::message(error.to_string()))??;
+        Ok(())
+    }
+}
 
 pub(crate) async fn connect(url: String, size: usize) -> Result<Pool, OrmError> {
     let pool = connect_lazy(url, size)?;
@@ -22,12 +58,13 @@ pub(crate) fn connect_lazy(url: String, size: usize) -> Result<Pool, OrmError> {
             "an in-memory SQLite database requires pool size 1".into(),
         ));
     }
-    let mut config = Config::new(path);
-    config.pool = Some(deadpool_sqlite::PoolConfig::new(size));
-    let pool = config
-        .create_pool(Runtime::Tokio1)
-        .map_err(|error| OrmError::Configuration(error.to_string()))?;
-    Ok(pool)
+    Pool::builder(Manager {
+        path: path.to_owned(),
+    })
+    .max_size(size)
+    .runtime(deadpool::Runtime::Tokio1)
+    .build()
+    .map_err(|error| OrmError::Configuration(error.to_string()))
 }
 
 #[derive(Clone)]
@@ -150,4 +187,59 @@ fn params(query: &CompiledQuery) -> Result<Vec<rusqlite::types::Value>, OrmError
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_sqlite_includes_wal_memory_disclosure_fix() {
+        assert!(rusqlite::version_number() >= 3_054_000);
+    }
+
+    #[tokio::test]
+    async fn recycled_connections_rollback_unfinished_transactions_and_restore_foreign_keys() {
+        let pool = connect(":memory:".into(), 1).await.unwrap();
+        let first = Session::acquire(&pool).await.unwrap();
+        first
+            .batch("CREATE TABLE committed (id INTEGER); PRAGMA foreign_keys = OFF; BEGIN; CREATE TABLE uncommitted (id INTEGER)")
+            .await
+            .unwrap();
+        drop(first);
+
+        let next = Session::acquire(&pool).await.unwrap();
+        next.interact(|connection| {
+            assert!(connection.is_autocommit());
+            let enabled: i64 = connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+            assert_eq!(enabled, 1);
+            let tables: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'uncommitted'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(tables, 0);
+            // A healthy pooled connection is reused, not silently replaced.
+            connection.execute("INSERT INTO committed VALUES (1)", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn poisoned_connections_are_discarded_instead_of_reused() {
+        let pool = connect(":memory:".into(), 1).await.unwrap();
+        let first = Session::acquire(&pool).await.unwrap();
+        let result = first
+            .interact::<(), _>(|_| panic!("poison the SQLite connection"))
+            .await;
+        assert!(matches!(result, Err(OrmError::Interaction(_))));
+        drop(first);
+
+        let next = Session::acquire(&pool).await.unwrap();
+        next.batch("CREATE TABLE healthy (id INTEGER)")
+            .await
+            .unwrap();
+    }
 }

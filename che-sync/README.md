@@ -3,7 +3,7 @@
 Native offline-first synchronization for che-orm: current/shadow client tables,
 durable delivery, server revisions and journal, and three-way field merging.
 
-Requires **Rust 1.88+**, **che-orm 0.4.0** and **che-sync-protocol 0.1.0**.
+Requires **Rust 1.89+**, **che-orm 0.4.0** and **che-sync-protocol 0.1.0**.
 This checkout prepares unpublished 0.2.0; use matching local paths until release.
 Licensed under MIT. See the [changelog](CHANGELOG.md) and
 [Rust API documentation](https://docs.rs/che-sync).

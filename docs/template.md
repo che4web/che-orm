@@ -2,7 +2,7 @@
 
 Шаблон в `templates/che-orm` создаёт самостоятельное Rust-приложение через
 [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/). Требуется
-Rust 1.88 или новее. Приложение требует опубликованный `che-orm 0.3.3`
+Rust 1.89 или новее. Приложение требует опубликованный `che-orm 0.4.0`
 или новее с crates.io. Для проверки шаблона с локальными изменениями используйте
 `python3 scripts/check-template.py`, с опубликованными зависимостями —
 `python3 scripts/check-template.py --published`.

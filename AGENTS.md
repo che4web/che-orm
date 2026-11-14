@@ -295,7 +295,7 @@ The explicit runtime test requires TEST_POSTGRES_URL and a live PostgreSQL
 server; absence of the variable is an error. The sample PostgreSQL build uses
 `-p che-orm-examples --no-default-features --features postgres`.
 
-For release changes, follow `docs/releasing.md`: verify Rust 1.88, both backend
+For release changes, follow `docs/releasing.md`: verify Rust 1.89, both backend
 builds and all four public package archives. `che-orm-examples` is not published;
 use explicit package selection rather than `cargo package --workspace`.
 

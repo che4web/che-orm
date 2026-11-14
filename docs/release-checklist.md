@@ -13,7 +13,8 @@ must not be republished. See [registry audit](registry-audit-2026-11-12.json).
 The [2026-11-06 report](release-verification-2026-11-06.md) is historical, not
 verification of these breaking-change candidates. Require application-owned
 datetime migrations before deployment. Preparation does not authorize publication.
-See [the current preparation report](release-verification-2026-11-12.md).
+See [the current preparation report](release-verification-2026-11-14.md), including
+the patched SQLite dependency and Rust 1.89 requirement.
 
 ## Prepare
 
@@ -39,8 +40,8 @@ cargo test -p che-sync --no-default-features --features postgres --test runtime 
 cargo doc --workspace --no-deps
 cargo run -p che-orm-examples --bin manage -- schema
 cargo run -p che-sync --example offline
-cargo +1.88.0 check --workspace --all-targets --locked
-cargo +1.88.0 check -p che-orm -p che-sync --all-targets --locked --no-default-features --features postgres
+cargo +1.89.0 check --workspace --all-targets --locked
+cargo +1.89.0 check -p che-orm -p che-sync --all-targets --locked --no-default-features --features postgres
 ```
 
 The ignored PostgreSQL tests require `TEST_POSTGRES_URL` and a live database

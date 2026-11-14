@@ -6,7 +6,9 @@
 let database = che_orm::Database::connect("app.db").await?;
 ```
 
-`Database` contains a `deadpool-sqlite::Pool`. The default pool size is 4.
+`Database` uses a managed `deadpool` pool with a `deadpool-sync` adapter for
+`rusqlite`. The default pool size is 4. Blocking SQLite calls run off the async
+runtime threads. Bundled SQLite is at least 3.54.0 (RUSTSEC-2026-0459 fixed).
 To configure it:
 
 ```rust

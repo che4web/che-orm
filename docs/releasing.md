@@ -15,7 +15,8 @@ Registry audit on 2026-11-12 confirms published core 0.3.3, macros 0.3.2,
 protocol 0.1.0, sync 0.1.3 and REST 0.3.4, all non-yanked; che-tauri has no
 registry entry. See [the registry audit](registry-audit-2026-11-12.json).
 Completed preparation checks and remaining gates are recorded in the
-[2026-11-12 verification report](release-verification-2026-11-12.md).
+[2026-11-14 verification report](release-verification-2026-11-14.md).
+The new candidates require Rust 1.89, including the patched bundled SQLite driver.
 The new candidates are core 0.4.0, sync 0.2.0 and REST 0.4.0. Bound queries and
 SQLite datetime storage are breaking changes; bump minor versions under 0.x.
 Macros/protocol source and original manifests match their published archives:
@@ -150,7 +151,7 @@ replacement/history rewind is outside them.
 
 ## Verification
 
-The `Release checks` workflow verifies SQLite, live PostgreSQL, Rust 1.88 and
+The `Release checks` workflow verifies SQLite, live PostgreSQL, Rust 1.89 and
 the contents of the publishable archives. Run the equivalent checks locally
 before tagging. SQLite and PostgreSQL are mutually exclusive features.
 
@@ -161,8 +162,8 @@ cargo doc --workspace --no-deps --locked
 cargo run -p che-orm-examples --bin manage --locked -- schema
 cargo run -p che-sync --example offline --locked
 python3 scripts/check-template.py
-cargo +1.88.0 check --workspace --all-targets --locked
-cargo +1.88.0 check -p che-orm -p che-sync --all-targets --locked --no-default-features --features postgres
+cargo +1.89.0 check --workspace --all-targets --locked
+cargo +1.89.0 check -p che-orm -p che-sync --all-targets --locked --no-default-features --features postgres
 cargo package -p che-orm-macros -p che-orm -p che-sync-protocol -p che-sync --locked
 ```
 

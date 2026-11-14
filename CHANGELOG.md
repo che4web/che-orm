@@ -2,6 +2,12 @@
 
 ## 0.4.0 (unreleased)
 
+- **Security / breaking:** require Rust 1.89 and rusqlite 0.41.1 with patched
+  bundled SQLite (libsqlite3-sys >=0.39.0, RUSTSEC-2026-0459). Replace the
+  version-coupled deadpool-sqlite adapter with an internal manager on deadpool
+  and deadpool-sync; preserve lazy connection, URI, transaction and pool behavior.
+- Update the locked rustix dependency to 1.1.6 (RUSTSEC-2026-0486).
+
 - **Breaking:** remove the deprecated `Database::typed_transaction` alias; use
   `Database::transaction`. Remove the SQLite-specific
   `migration::sqlite_executor::pending_operation_migrations` forwarding function;

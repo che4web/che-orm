@@ -62,6 +62,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.89.0
       - run: cargo check --workspace --all-targets --locked
       - run: cargo check -p che-orm -p che-sync --all-targets --locked --no-default-features --features postgres

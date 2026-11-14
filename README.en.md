@@ -3,7 +3,7 @@
 [Русский](README.md) | **English**
 
 An experimental typed ORM for Rust with a shared async API for SQLite and
-PostgreSQL. The backend is selected at compile time. Requires **Rust 1.88+**.
+PostgreSQL. The backend is selected at compile time. Requires **Rust 1.89+**.
 
 The current published `che-orm` version is **0.3.3**. The project is under
 development; check the [changelog](CHANGELOG.md) before upgrading.

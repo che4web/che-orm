@@ -20,7 +20,7 @@ jobs:
         run: cargo package -p che-orm-macros -p che-orm
       - name: Test packaged API
         run: >-
-          cargo test --manifest-path target/package/che-orm-0.3.2/Cargo.toml
+          cargo test --manifest-path target/package/che-orm-0.4.0/Cargo.toml
           --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.2"'
           --test public_api_examples --test uuid --test runtime --test sqlite_datetime --test app_table
       - name: Invalid feature combinations
@@ -63,6 +63,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: '1.88.0'
+          toolchain: '1.89.0'
       - run: cargo check -p che-orm --locked
       - run: cargo check -p che-orm --locked --no-default-features --features postgres

@@ -2,7 +2,7 @@
 
 The template in `templates/che-orm` creates a standalone Rust application using
 [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/). Requires
-Rust 1.88 or later. The application requires published `che-orm 0.3.3` or later
+Rust 1.89 or later. The application requires published `che-orm 0.4.0` or later
 from crates.io. Use `python3 scripts/check-template.py` to verify local changes,
 or `python3 scripts/check-template.py --published` to verify published
 dependencies.

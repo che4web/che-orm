@@ -2,7 +2,7 @@
 name = "che-sync"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 description = "Durable offline-first synchronization engine for che-orm"
 repository = "https://github.com/che4web/che-orm"
