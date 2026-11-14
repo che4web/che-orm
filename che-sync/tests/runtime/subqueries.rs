@@ -40,7 +40,7 @@ impl Fixture {
             .unwrap()
             .register::<Child>()
             .unwrap();
-        migrate(&db, &registry, SchemaRole::Server).await.unwrap();
+        migrate(&db, &registry, ModelRole::Server).await.unwrap();
         db.create_table::<Candidate>().await.unwrap();
         let mut ids = Vec::new();
         for (title, scope, deleted) in [
@@ -345,7 +345,7 @@ async fn client_runtime_hides_tombstones_inside_subqueries_and_captured_writes()
         .unwrap()
         .register::<Child>()
         .unwrap();
-    migrate(&db, &registry, SchemaRole::Client).await.unwrap();
+    migrate(&db, &registry, ModelRole::Client).await.unwrap();
     db.create_table::<Candidate>().await.unwrap();
     let note = db
         .create::<Note>()

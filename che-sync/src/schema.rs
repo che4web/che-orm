@@ -1,13 +1,10 @@
 use crate::Registry;
-use che_orm::{MigrationError, MigrationOperation, ProjectState, SyncRegistration};
-
-/// Compatibility name for the ORM database model role.
-pub use che_orm::ModelRole as SchemaRole;
+use che_orm::{MigrationError, MigrationOperation, ModelRole, ProjectState, SyncRegistration};
 
 impl Registry {
     /// Freeze these operations in application-owned compiled migrations.
     /// ORM role registrations include them automatically in ProjectState.
-    pub fn migration_operations(&self, role: SchemaRole) -> Vec<MigrationOperation> {
+    pub fn migration_operations(&self, role: ModelRole) -> Vec<MigrationOperation> {
         self.require_role(role)
             .expect("sync registry role mismatch");
         let registrations = self
@@ -34,7 +31,7 @@ impl Registry {
     pub fn extend_migration_state(
         &self,
         state: &mut ProjectState,
-        role: SchemaRole,
+        role: ModelRole,
     ) -> Result<(), MigrationError> {
         self.require_role(role)
             .map_err(|error| MigrationError::InvalidState(error.to_string()))?;

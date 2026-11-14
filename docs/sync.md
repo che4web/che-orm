@@ -120,10 +120,10 @@ shadow identity. Include these tables in the planner's desired ProjectState:
 let desired = ProjectState::from_app_schemas(app_registry.app_schemas())?;
 ```
 
-For legacy registrations, `registry.migration_operations(SchemaRole::Client)`
+For legacy registrations, `registry.migration_operations(che_orm::ModelRole::Client)`
 and `extend_migration_state` remain available. Extending a state that already
 contains the identical sync infrastructure is idempotent; a different layout is
-an error. `SchemaRole` is a compatibility alias for `che_orm::ModelRole`.
+an error. Use `che_orm::ModelRole` for both ORM and sync registration roles.
 
 When adopting the derived model API in an existing normalized schema, retain
 the stable wire names and physical columns. Removing service fields from the Rust

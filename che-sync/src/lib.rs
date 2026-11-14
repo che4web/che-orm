@@ -18,7 +18,6 @@ pub use client::{Resolution, SyncClient, SyncTransaction};
 pub use engine::{LoadRequired, SyncEngine, SyncReport, SyncTransport, TransportFuture};
 pub use model::{Field, Registry, SyncModel};
 pub use model_client::{ModelLogClient, ModelLogEngine, ModelLogTransport};
-pub use schema::SchemaRole;
 pub use server::{AccessPolicy, AllowAll, PostCommitEffect, PreparedEffect, SyncServer};
 
 use che_orm::OrmError;

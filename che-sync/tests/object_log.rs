@@ -1,9 +1,9 @@
 use che_orm::{
-    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, OrmError,
-    ProjectState, SchemaSet, Transaction, TransactionFuture, Uuid, ValidatedWrite,
+    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, ModelRole,
+    OrmError, ProjectState, SchemaSet, Transaction, TransactionFuture, Uuid, ValidatedWrite,
 };
 use che_sync::{
-    AllowAll, ModelLogClient, ModelLogTransport, Registry, SchemaRole, SyncServer, TransportFuture,
+    AllowAll, ModelLogClient, ModelLogTransport, Registry, SyncServer, TransportFuture,
     model_log::*, object_log::*,
 };
 use std::sync::Arc;
@@ -24,16 +24,16 @@ struct Grant {
     readable: bool,
     changeable: bool,
 }
-fn schema(role: SchemaRole) -> SchemaSet {
+fn schema(role: ModelRole) -> SchemaSet {
     match role {
-        SchemaRole::Client => SchemaSet::new().client_model::<Message>(),
-        SchemaRole::Server => SchemaSet::new().server_model::<Message>().model::<Grant>(),
+        ModelRole::Client => SchemaSet::new().client_model::<Message>(),
+        ModelRole::Server => SchemaSet::new().server_model::<Message>().model::<Grant>(),
     }
 }
-fn registry(role: SchemaRole) -> Registry {
+fn registry(role: ModelRole) -> Registry {
     Registry::from_schema(&schema(role)).unwrap()
 }
-async fn migrate(db: &Database, role: SchemaRole) {
+async fn migrate(db: &Database, role: ModelRole) {
     let state = ProjectState::from_app_schemas([("messages", &schema(role))]).unwrap();
     let first = MigrationId {
         app: "messages".into(),
@@ -106,8 +106,8 @@ impl Fixture {
                 Some((admin, names)),
             )
         };
-        migrate(&server, SchemaRole::Server).await;
-        migrate(&client, SchemaRole::Client).await;
+        migrate(&server, ModelRole::Server).await;
+        migrate(&client, ModelRole::Client).await;
         Self {
             server,
             client,
@@ -236,7 +236,7 @@ async fn current_state_delivery_revoke_regrant_and_retained_client_drafts() {
     let f = Fixture::new().await;
     let server = SyncServer::open_model_logs(
         f.server.clone(),
-        registry(SchemaRole::Server),
+        registry(ModelRole::Server),
         "bob",
         Arc::new(AllowAll),
     )
@@ -287,7 +287,7 @@ async fn current_state_delivery_revoke_regrant_and_retained_client_drafts() {
     );
     let client = ModelLogClient::open_objects(
         f.client.clone(),
-        registry(SchemaRole::Client),
+        registry(ModelRole::Client),
         "server",
         "bob",
     )
@@ -364,7 +364,7 @@ async fn current_state_delivery_revoke_regrant_and_retained_client_drafts() {
     );
     let other = SyncServer::open_model_logs(
         f.server.clone(),
-        registry(SchemaRole::Server),
+        registry(ModelRole::Server),
         "carol",
         Arc::new(AllowAll),
     )
@@ -389,7 +389,7 @@ async fn current_state_delivery_revoke_regrant_and_retained_client_drafts() {
     );
     let guarded = SyncServer::open_model_logs(
         f.server.clone(),
-        registry(SchemaRole::Server),
+        registry(ModelRole::Server),
         "bob",
         Arc::new(Policy("bob")),
     )

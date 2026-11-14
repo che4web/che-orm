@@ -1,12 +1,12 @@
 #![cfg(feature = "sqlite")]
 
 use che_orm::{
-    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, OrmError,
-    TableState, Uuid,
+    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, ModelRole,
+    OrmError, TableState, Uuid,
 };
 use che_sync::{
-    AllowAll, Field, Registry, Resolution, SchemaRole, SyncClient, SyncEngine, SyncModel,
-    SyncServer, SyncTransport, TransportFuture, protocol::*,
+    AllowAll, Field, Registry, Resolution, SyncClient, SyncEngine, SyncModel, SyncServer,
+    SyncTransport, TransportFuture, protocol::*,
 };
 use std::sync::{
     Arc,
@@ -900,13 +900,13 @@ async fn validated_server_writes_use_wire_mapping_defaults_and_atomic_journal() 
     );
 }
 
-async fn database(role: SchemaRole) -> Database {
+async fn database(role: ModelRole) -> Database {
     let db = Database::connect_in_memory().await.unwrap();
     migrate(&db, role).await;
     db
 }
 
-async fn migrate(db: &Database, role: SchemaRole) {
+async fn migrate(db: &Database, role: ModelRole) {
     let mut operations = vec![
         MigrationOperation::CreateTable {
             table: TableState::from(&Task::schema()),
@@ -947,7 +947,7 @@ async fn migrate(db: &Database, role: SchemaRole) {
 
 async fn server() -> SyncServer {
     SyncServer::open(
-        database(SchemaRole::Server).await,
+        database(ModelRole::Server).await,
         registry(),
         "workspace",
         "user",
@@ -957,7 +957,7 @@ async fn server() -> SyncServer {
     .unwrap()
 }
 async fn client() -> SyncClient {
-    SyncClient::open(database(SchemaRole::Client).await, registry(), "workspace")
+    SyncClient::open(database(ModelRole::Client).await, registry(), "workspace")
         .await
         .unwrap()
 }
@@ -1493,7 +1493,7 @@ async fn remote_cascade_does_not_silently_destroy_a_local_child_edit() {
 
 #[tokio::test]
 async fn history_gap_resets_to_snapshot_and_preserves_offline_edits() {
-    let db = database(SchemaRole::Server).await;
+    let db = database(ModelRole::Server).await;
     let server = SyncServer::open(
         db.clone(),
         registry(),
@@ -1586,7 +1586,7 @@ async fn denied_policy_rolls_back_cascade_and_does_not_advance_journal() {
             }
         }
     }
-    let db = database(SchemaRole::Server).await;
+    let db = database(ModelRole::Server).await;
     let server = SyncServer::open(
         db.clone(),
         registry(),
@@ -1635,7 +1635,7 @@ async fn denied_policy_rolls_back_cascade_and_does_not_advance_journal() {
 
 #[tokio::test]
 async fn cross_scope_fk_is_rejected_without_exposing_another_scopes_data() {
-    let db = database(SchemaRole::Server).await;
+    let db = database(ModelRole::Server).await;
     let one = SyncServer::open(db.clone(), registry(), "one", "user", Arc::new(AllowAll))
         .await
         .unwrap();
@@ -1758,12 +1758,12 @@ async fn generated_sync_tables_participate_in_migration_planning() {
     let registry = registry();
     let mut state = che_orm::ProjectState::default();
     registry
-        .extend_migration_state(&mut state, SchemaRole::Client)
+        .extend_migration_state(&mut state, ModelRole::Client)
         .unwrap();
     state.validate().unwrap();
     let mut same = che_orm::ProjectState::default();
     registry
-        .extend_migration_state(&mut same, SchemaRole::Client)
+        .extend_migration_state(&mut same, ModelRole::Client)
         .unwrap();
     assert!(state.diff(&same).unwrap().is_empty());
 }
@@ -1775,7 +1775,7 @@ async fn file_database_reconnect_recovers_outbox_after_lost_reply() {
     let db = Database::connect(path.to_string_lossy().into_owned())
         .await
         .unwrap();
-    migrate(&db, SchemaRole::Client).await;
+    migrate(&db, ModelRole::Client).await;
     let a = SyncClient::open(db, registry(), "workspace").await.unwrap();
     let replica = a.replica_id();
     let t = task("persisted");
@@ -2680,7 +2680,7 @@ async fn newer_remote_revision_is_not_mistaken_for_the_deferred_acknowledgement(
             })
         }
     }
-    let db = database(SchemaRole::Server).await;
+    let db = database(ModelRole::Server).await;
     let server = SyncServer::open(
         db.clone(),
         registry(),

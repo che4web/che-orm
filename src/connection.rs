@@ -495,16 +495,6 @@ impl Database {
             }
         }
     }
-    /// Compatibility alias for [`Self::transaction`].
-    #[deprecated(since = "0.3.0", note = "use Database::transaction instead")]
-    pub async fn typed_transaction<T, F>(&self, action: F) -> Result<T, OrmError>
-    where
-        T: Send + 'static,
-        F: for<'a> FnOnce(&'a Transaction) -> TransactionFuture<'a, T> + Send,
-    {
-        self.transaction(action).await
-    }
-
     /// SQLite-only escape hatch for direct driver operations.
     #[cfg(feature = "sqlite")]
     pub async fn raw_transaction<T, F>(&self, action: F) -> Result<T, OrmError>

@@ -1,10 +1,9 @@
 use che_orm::{
-    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, OrmError,
-    TableState, Uuid,
+    Database, Migration, MigrationGraph, MigrationId, MigrationOperation, Model, ModelRole,
+    OrmError, TableState, Uuid,
 };
 use che_sync::{
-    AllowAll, Field, Registry, SchemaRole, SyncClient, SyncEngine, SyncModel, SyncServer,
-    protocol::*,
+    AllowAll, Field, Registry, SyncClient, SyncEngine, SyncModel, SyncServer, protocol::*,
 };
 use std::sync::Arc;
 
@@ -135,7 +134,7 @@ async fn database() -> (Database, Option<(Database, String)>) {
 async fn migrate(
     db: &Database,
     registry: &Registry,
-    role: SchemaRole,
+    role: ModelRole,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut ops = vec![
         MigrationOperation::CreateTable {
@@ -165,9 +164,9 @@ async fn scenario(
     second: Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = Registry::new().register::<Note>()?.register::<Child>()?;
-    migrate(&db, &registry, SchemaRole::Server).await?;
-    migrate(&first, &registry, SchemaRole::Client).await?;
-    migrate(&second, &registry, SchemaRole::Client).await?;
+    migrate(&db, &registry, ModelRole::Server).await?;
+    migrate(&first, &registry, ModelRole::Client).await?;
+    migrate(&second, &registry, ModelRole::Client).await?;
     let a = SyncClient::open(first, registry.clone(), "scope").await?;
     let b = SyncClient::open(second, registry.clone(), "scope").await?;
     let server =

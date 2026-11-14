@@ -40,7 +40,7 @@ pub fn apply_operation_migrations_to_on_connection(
             // per migration so concurrent manage processes cannot replay a
             // stale pending set after the previous commit.
             let applied = applied_operation_migrations(connection)?;
-            let pending = pending_operation_migrations(&graph, &applied)?;
+            let pending = crate::migration::pending_operation_migrations(&graph, &applied)?;
             let applied_ids = applied
                 .keys()
                 .map(|(app, name)| MigrationId {
@@ -453,13 +453,6 @@ fn sqlite_opaque_dependents(
             Err(error) => Some(Err(error)),
         })
         .collect()
-}
-
-pub fn pending_operation_migrations<'a>(
-    graph: &'a MigrationGraph,
-    applied: &HashMap<(String, String), String>,
-) -> Result<Vec<&'a Migration>, Box<dyn std::error::Error + Send + Sync>> {
-    crate::migration::pending_operation_migrations(graph, applied)
 }
 
 const OPERATION_MIGRATION_HISTORY_SQL: &str = "CREATE TABLE IF NOT EXISTS che_migration_history (app TEXT NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_on TEXT NOT NULL, PRIMARY KEY (app, name));";

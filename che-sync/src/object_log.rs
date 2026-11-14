@@ -3,10 +3,12 @@
 pub use crate::object_client::ObjectStatus;
 pub use crate::protocol::object_log::*;
 use crate::{
-    Registry, SchemaRole, SyncModel, SyncServer, encode, invalid,
+    Registry, SyncModel, SyncServer, encode, invalid,
     storage::{quote, text},
 };
-use che_orm::{DatabaseValue as D, Model, OrmError, Transaction, TransactionFuture, Uuid};
+use che_orm::{
+    DatabaseValue as D, Model, ModelRole, OrmError, Transaction, TransactionFuture, Uuid,
+};
 use std::sync::Arc;
 
 /// Application-owned ACL evaluation. No HTTP or group schema belongs in sync.
@@ -80,7 +82,7 @@ struct LocalModel {
 
 /// Freeze these operations in a *follow-up* compiled application migration.
 /// Never append to a previously applied migration or create tables at open/GET.
-pub fn migration_operations(role: SchemaRole) -> Vec<che_orm::MigrationOperation> {
+pub fn migration_operations(role: ModelRole) -> Vec<che_orm::MigrationOperation> {
     let schema = schema(role);
     che_orm::ProjectState::from_app_schemas([("che_object_sync", &schema)])
         .expect("static object-delivery schema")
@@ -93,13 +95,13 @@ pub fn migration_operations(role: SchemaRole) -> Vec<che_orm::MigrationOperation
 
 /// Declare under the stable application name `che_object_sync` so subsequent
 /// migration discovery retains the same infrastructure table identities.
-pub fn schema(role: SchemaRole) -> che_orm::SchemaSet {
+pub fn schema(role: ModelRole) -> che_orm::SchemaSet {
     match role {
-        SchemaRole::Server => che_orm::SchemaSet::new()
+        ModelRole::Server => che_orm::SchemaSet::new()
             .model::<Feed>()
             .model::<Visibility>()
             .model::<Delivery>(),
-        SchemaRole::Client => che_orm::SchemaSet::new()
+        ModelRole::Client => che_orm::SchemaSet::new()
             .model::<LocalAccess>()
             .model::<LocalModel>(),
     }

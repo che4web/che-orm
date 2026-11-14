@@ -2,6 +2,11 @@
 
 ## 0.4.0 (unreleased)
 
+- **Breaking:** remove the deprecated `Database::typed_transaction` alias; use
+  `Database::transaction`. Remove the SQLite-specific
+  `migration::sqlite_executor::pending_operation_migrations` forwarding function;
+  use `migration::pending_operation_migrations` on either backend.
+
 - **Breaking:** Database/Transaction query builders now bind their execution
   context; call `.all()`, `.first()`, `.count()` etc. without passing the database
   again. Keep unbound `Model::query()` / `DatabaseQuery` contracts distinct.
@@ -10,7 +15,7 @@
   metadata discovery; configuration is checked without opening a connection.
 - Add `PostgresSchemaEditor::plan_migration` to preview a complete migration,
   including deferred foreign keys, and backend-neutral migration-history
-  validation while preserving the SQLite compatibility entry point.
+  validation through `migration::pending_operation_migrations`.
 
 - **Breaking:** SQLite datetime values now use fixed-width UTC TEXT with nine
   fractional digits (`YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`, UTC years 0000..9999).

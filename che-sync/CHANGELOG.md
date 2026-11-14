@@ -2,6 +2,9 @@
 
 ## 0.2.0 (unreleased)
 
+- **Breaking:** remove the `che_sync::SchemaRole` compatibility alias. Use
+  `che_orm::ModelRole` for registry migrations and object-delivery schemas.
+
 - **Breaking:** require che-orm 0.4.0 and its bound-query Database/Transaction
   types. Adapt internal row reads without changing sync protocol versions.
 - Existing SQLite installations require explicit application-owned datetime
