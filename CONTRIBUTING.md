@@ -9,7 +9,9 @@ schema execution belong to backend-specific modules.
 ## Development Workflow
 
 1. Keep sample application models, registry, settings, and migrations in
-   `che-orm-examples`; the core crate must remain application-independent.
+   [`example/`](example/); the core crate must remain application-independent.
+   In `example/template-modular`, each app crate owns its migrations under
+   `apps/<app>/src/migrations/`.
 2. Use `#[derive(Debug, Model)]`, an explicit `#[orm(table = "...")]`, and one
    `#[orm(primary_key)]` field of type `i64` or `che_orm::Uuid` per model.
 3. Use application-owned compiled migrations for persisted schema changes.
@@ -41,7 +43,8 @@ cargo run -p che-sync --example offline
 The PostgreSQL runtime command requires `TEST_POSTGRES_URL` pointing at a live
 server and a role allowed to create test schemas. CI provisions a service for it.
 
-Run the examples after applying the configured migration:
+Run the ORM API examples after applying the configured migration. For the two
+template layouts, use the commands in [`example/README.md`](example/README.md).
 
 ```bash
 cargo run -p che-orm-examples --bin manage -- migrate

@@ -14,7 +14,7 @@ choices = ["single", "modular"]
 default = "single"
 
 [conditional.'layout == "single"']
-ignore = ["src/apps/tasks"]
+ignore = ["apps", "src/migrations.rs", "src/che_sync_migrations"]
 
 [conditional.'layout == "modular"']
-ignore = ["src/models.rs"]
+ignore = ["src/models.rs", "src/migrations"]

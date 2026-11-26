@@ -89,17 +89,6 @@ fn foreign_ready(column: &ColumnState, state: &ProjectState) -> bool {
         .is_some_and(|table| reference_target_ready(table, target_column))
 }
 
-fn reference_target_ready(table: &TableState, column: &str) -> bool {
-    table
-        .columns
-        .iter()
-        .any(|candidate| candidate.name == column && (candidate.primary_key || candidate.unique))
-        || table
-            .unique_constraints
-            .iter()
-            .any(|columns| columns.len() == 1 && columns[0] == column)
-}
-
 fn name(table: &str, kind: &str, columns: &[String]) -> String {
     crate::schema::schema_object_name(
         table,
@@ -273,6 +262,14 @@ impl PostgresSchemaEditor {
         operations: &[MigrationOperation],
         before: &ProjectState,
     ) -> Result<PostgresOperationPlan, MigrationError> {
+        Self::plan_with_external_targets(operations, before, &BTreeSet::new())
+    }
+
+    pub(super) fn plan_with_external_targets(
+        operations: &[MigrationOperation],
+        before: &ProjectState,
+        external: &BTreeSet<String>,
+    ) -> Result<PostgresOperationPlan, MigrationError> {
         let mut state = before.clone();
         let mut statements = Vec::new();
         let mut deferred = Vec::<DeferredForeignKey>::new();
@@ -301,10 +298,22 @@ impl PostgresSchemaEditor {
             }
             deferred = waiting;
         }
-        if !deferred.is_empty() {
-            return Err(MigrationError::InvalidState(
-                "migration leaves unresolved PostgreSQL foreign keys".into(),
-            ));
+        for key in deferred.drain(..) {
+            let external_target = key
+                .source(&state)
+                .and_then(|column| column.references.as_ref())
+                .and_then(ForeignKeyState::target_parts)
+                .is_some_and(|(table, _)| {
+                    external.contains(table) && !state.tables().iter().any(|t| t.name == table)
+                });
+            if !external_target {
+                return Err(MigrationError::InvalidState(
+                    "migration leaves unresolved PostgreSQL foreign keys".into(),
+                ));
+            }
+            // Like the executor, emit the constraint at the end of this file.
+            // Only the live database can validate an externally managed key.
+            statements.push(key.statement(&state)?);
         }
         Ok(PostgresOperationPlan {
             statements,
@@ -330,6 +339,7 @@ impl PostgresSchemaEditor {
         let mut statements = Vec::new();
         let mut deferred = Vec::new();
         match operation {
+            MigrationOperation::RenameModel { .. } => {}
             MigrationOperation::CreateModel { model } => {
                 create(&model.table, before, &mut statements, &mut deferred)?
             }

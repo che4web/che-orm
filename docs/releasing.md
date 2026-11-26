@@ -33,7 +33,7 @@ Do not republish those versions or move their tags. The former sync 0.1.3 and
 REST 0.3.4 candidates have since been published; they cannot identify this source.
 The initial-publication notes below describe previous candidates.
 
-`che-orm-examples` is private (`publish = false`). Package the four public
+The crates in `example/` are private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.
 
 ## Historical candidate notes

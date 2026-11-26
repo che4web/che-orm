@@ -174,7 +174,11 @@ cargo run
 ```
 
 Для PostgreSQL перед миграцией создайте базу и задайте `CHE_ORM_DATABASE_URL`.
-Новый модуль приложения: `cargo run --bin manage -- createapp blog`.
+В `single` миграции лежат в `src/migrations/`. В `modular` каждый модуль —
+отдельный Cargo-крейт: например, миграции задач лежат в
+`apps/tasks/src/migrations/`. Корневой `manage migrate` применяет их по общему
+графу зависимостей. Команда `cargo run --bin manage -- createapp blog` создаёт
+Rust-модуль в `single` и отдельный крейт в `modular`.
 Подробнее — [руководство по шаблону](docs/template.md).
 
 ## Миграции
@@ -254,8 +258,14 @@ cargo run -p che-orm-examples --bin transactions
 cargo run -p che-orm-examples --bin serializers
 ```
 
-Приложение-пример содержит замороженные миграции и не поддерживает
-`makemigrations`. Для своего приложения используйте шаблон выше.
+Эти команды запускают [`example/orm-api`](example/orm-api/) с одной начальной
+Rust-миграцией для SQLite и PostgreSQL. Если уже применяли старую SQL-миграцию,
+укажите новую базу через `CHE_ORM_DATABASE_URL`.
+
+В [`example/`](example/) также есть два готовых приложения из шаблона:
+[`template-single`](example/template-single/) и
+[`template-modular`](example/template-modular/). У каждого своя SQLite-база
+по умолчанию и начальная миграция, которую нужно применить перед запуском.
 
 ```bash
 cargo fmt --check

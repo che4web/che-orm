@@ -15,6 +15,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test -p template-modular-app-tasks --features sqlite
       - run: cargo doc --workspace --no-deps
       - name: Package core and macros
         run: cargo package -p che-orm-macros -p che-orm
@@ -54,6 +55,8 @@ jobs:
       - run: cargo test -p che-sync --no-default-features --features postgres
       - run: cargo test -p che-sync --no-default-features --features postgres --test runtime -- --ignored
       - run: cargo check -p che-orm-examples --no-default-features --features postgres --all-targets
+      - run: cargo test -p template-single -p template-modular --no-default-features --features postgres
+      - run: cargo test -p template-modular-app-tasks --features postgres
       - run: cargo doc -p che-orm --no-default-features --features postgres --no-deps
       - name: No SQLite driver dependency
         run: cargo tree -p che-orm --no-default-features --features postgres -e normal | python3 -c 'import sys; assert "rusqlite" not in sys.stdin.read()'

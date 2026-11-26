@@ -1,0 +1,17 @@
+[package]
+name = "che-orm-examples"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["sqlite"]
+sqlite = ["orm/sqlite"]
+postgres = ["orm/postgres"]
+
+[dependencies]
+orm = { package = "che-orm", version = "0.4.0", path = "../..", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }

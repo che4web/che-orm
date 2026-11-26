@@ -155,6 +155,306 @@ async fn fixture() -> (Database, Option<(Database, String)>) {
 }
 
 #[derive(Debug, Model)]
+#[orm(table = "generation_nodes")]
+struct GenerationNode {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = GenerationNode)]
+    parent_id: Option<i64>,
+    #[orm(references = "external_parents(id)")]
+    external_id: i64,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "catalog_children")]
+struct CatalogChild {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(references = "catalog_notes(id)")]
+    note_id: i64,
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn empty_child_requires_a_real_external_key_before_commit() {
+    let db = Database::connect_in_memory().await.unwrap();
+    let state =
+        ProjectState::from_app_schema("children", &SchemaSet::new().model::<CatalogChild>());
+    let policy = che_orm::GenerationPolicy {
+        strict_external: true,
+        external_keys: [("catalog_notes".into(), "id".into())].into(),
+        ..Default::default()
+    };
+    let files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate_with_policy(&state, che_orm::MigrationLayout::PerApp, "initial", &policy)
+        .unwrap();
+    let graph = MigrationGraph::new(files).unwrap();
+    for schema in [
+        None,
+        Some("CREATE TABLE catalog_notes (wrong INTEGER PRIMARY KEY)"),
+        Some("CREATE TABLE catalog_notes (id INTEGER)"),
+    ] {
+        if let Some(sql) = schema {
+            db.execute_sql(sql, vec![]).await.unwrap();
+        }
+        assert!(db.migrate(graph.clone()).await.is_err());
+        assert!(db.migration_history().await.unwrap().is_empty());
+        assert!(
+            db.query_sql("SELECT id FROM catalog_children", vec![])
+                .await
+                .is_err()
+        );
+        if schema.is_some() {
+            db.execute_sql("DROP TABLE catalog_notes", vec![])
+                .await
+                .unwrap();
+        }
+    }
+    db.execute_sql("CREATE TABLE CATALOG_NOTES (id INTEGER UNIQUE)", vec![])
+        .await
+        .unwrap();
+    assert_eq!(db.migrate(graph).await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "requires TEST_POSTGRES_URL")]
+async fn catalog_owns_sql_tables_and_rejects_destructive_replacements() {
+    use che_orm::{
+        GenerationPolicy, MigrationError, MigrationLayout, SchemaObjectKind, SchemaObjectState,
+        SqlTableContract,
+    };
+    let (db, cleanup) = fixture().await;
+    let schema = SchemaSet::new().model::<CatalogChild>();
+    let notes = SchemaObjectState {
+        app: "parents".into(),
+        kind: SchemaObjectKind::Table,
+        name: "catalog_notes".into(),
+        sql: "CREATE TABLE catalog_notes (id BIGINT PRIMARY KEY)".into(),
+    };
+    let mut state = ProjectState::from_app_schema("children", &schema);
+    state.add_schema_object(notes.clone()).unwrap();
+    let empty = MigrationGraph::new(vec![]).unwrap();
+    let policy = GenerationPolicy {
+        strict_external: true,
+        sql_tables: [(
+            notes.name.clone(),
+            SqlTableContract {
+                keys: ["id".into()].into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let initial = empty
+        .generate_with_policy(&state, MigrationLayout::PerApp, "initial", &policy)
+        .unwrap();
+    assert_eq!(initial.len(), 2);
+    assert_eq!(initial[0].id.app, "parents");
+    assert_eq!(
+        initial[1].dependencies.as_slice(),
+        std::slice::from_ref(&initial[0].id)
+    );
+    assert_eq!(
+        empty
+            .generate(&state, MigrationLayout::PerApp, "initial")
+            .unwrap(),
+        initial
+    );
+    let graph = MigrationGraph::new(initial.clone()).unwrap();
+    let mut incompatible = policy.clone();
+    incompatible
+        .sql_tables
+        .get_mut("catalog_notes")
+        .unwrap()
+        .keys
+        .clear();
+    assert!(
+        graph
+            .generate_with_policy(&state, MigrationLayout::PerApp, "unchanged", &incompatible)
+            .unwrap_err()
+            .to_string()
+            .contains("catalog_children requires catalog_notes(id)")
+    );
+    assert_eq!(
+        db.migrate_to(graph.clone(), Some(initial[1].id.clone()))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(db.migrate(graph.clone()).await.unwrap(), 0);
+    db.execute_sql("INSERT INTO catalog_notes VALUES (7)", vec![])
+        .await
+        .unwrap();
+    db.execute_sql(
+        "INSERT INTO catalog_children (id,note_id) VALUES (1,7)",
+        vec![],
+    )
+    .await
+    .unwrap();
+
+    let mut updated = ProjectState::from_app_schema("children", &schema);
+    let mut edited = notes.clone();
+    edited.sql = "CREATE TABLE catalog_notes (id BIGINT PRIMARY KEY, caption TEXT)".into();
+    updated.add_schema_object(edited.clone()).unwrap();
+    assert!(
+        matches!(graph.generate_with_policy(&updated,MigrationLayout::PerApp,"caption",&policy), Err(MigrationError::NeedsManualMigration {resource,..}) if resource == notes.name)
+    );
+    // Reviewed physical ALTER; the two state-only operations describe the new SQL.
+    let manual = Migration::new(
+        MigrationId {
+            app: "parents".into(),
+            name: "0002_caption".into(),
+        },
+        vec![initial[0].id.clone()],
+        vec![MigrationOperation::RunSql {
+            forward: "ALTER TABLE catalog_notes ADD COLUMN caption TEXT".into(),
+            reverse: None,
+            state_operations: vec![
+                MigrationOperation::DropSchemaObject {
+                    kind: notes.kind,
+                    name: notes.name,
+                },
+                MigrationOperation::CreateSchemaObject { object: edited },
+            ],
+        }],
+    );
+    let graph = MigrationGraph::new(initial.into_iter().chain([manual]).collect()).unwrap();
+    assert!(
+        graph
+            .generate_with_policy(&updated, MigrationLayout::PerApp, "again", &policy)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(db.migrate(graph).await.unwrap(), 1);
+    assert_eq!(
+        db.query_sql("SELECT id FROM catalog_notes WHERE caption IS NULL", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        7
+    );
+    if let Some((admin, schema)) = cleanup {
+        admin
+            .execute_sql(format!("DROP SCHEMA \"{schema}\" CASCADE"), vec![])
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "requires TEST_POSTGRES_URL")]
+async fn generated_migrations_preserve_opaque_rows_and_handle_external_and_self_fks() {
+    use che_orm::{MigrationLayout, SchemaObjectKind, SchemaObjectState};
+
+    let (db, cleanup) = fixture().await;
+    let mut state =
+        ProjectState::from_app_schema("app", &SchemaSet::new().model::<GenerationNode>());
+    let notes = SchemaObjectState {
+        app: "app".into(), kind: SchemaObjectKind::Table, name: "generation_notes".into(),
+        sql: "CREATE TABLE generation_notes (id BIGINT PRIMARY KEY, owner BIGINT REFERENCES generation_nodes(id))".into(),
+    };
+    state.add_schema_object(notes.clone()).unwrap();
+    let mut history = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    db.execute_sql(
+        "CREATE TABLE external_parents (id BIGINT PRIMARY KEY)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    db.migrate(MigrationGraph::new(history.clone()).unwrap())
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO external_parents VALUES (1)", vec![])
+        .await
+        .unwrap();
+    assert!(
+        db.execute_sql(
+            "INSERT INTO generation_nodes (id, external_id) VALUES (1, 404)",
+            vec![]
+        )
+        .await
+        .is_err()
+    );
+    db.execute_sql(
+        "INSERT INTO generation_nodes (id, parent_id, external_id) VALUES (1, 1, 1)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    db.execute_sql("INSERT INTO generation_notes VALUES (7, 1)", vec![])
+        .await
+        .unwrap();
+
+    MigrationOperation::AddIndex {
+        table: "generation_nodes".into(),
+        columns: vec!["parent_id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let followup = MigrationGraph::new(history.clone())
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "index")
+        .unwrap();
+    assert!(matches!(
+        followup[0].operations.as_slice(),
+        [MigrationOperation::AddIndex { .. }]
+    ));
+    history.extend(followup);
+    db.migrate(MigrationGraph::new(history.clone()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        db.query_sql("SELECT owner FROM generation_notes WHERE id = 7", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        1
+    );
+
+    // Both notes and nodes are now explicitly removed, including the self-FK.
+    let drops = MigrationGraph::new(history.clone())
+        .unwrap()
+        .generate_with_policy(
+            &ProjectState::default(),
+            MigrationLayout::PerApp,
+            "remove",
+            &che_orm::GenerationPolicy {
+                allow_drop: ["generation_nodes".into(), "generation_notes".into()].into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    history.extend(drops);
+    assert_eq!(
+        db.migrate(MigrationGraph::new(history).unwrap())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_sql("SELECT id FROM external_parents", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        1
+    );
+    if let Some((admin, schema)) = cleanup {
+        admin
+            .execute_sql(format!("DROP SCHEMA \"{schema}\" CASCADE"), vec![])
+            .await
+            .unwrap();
+    }
+}
+
+#[derive(Debug, Model)]
 #[orm(table = "portable_saved_notes")]
 struct SavedNote {
     #[orm(primary_key)]
@@ -1259,4 +1559,145 @@ async fn deferred_foreign_keys_follow_schema_operations() {
                 .unwrap();
         }
     }
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "requires TEST_POSTGRES_URL")]
+async fn renamed_models_columns_and_reused_index_names_preserve_rows() {
+    use che_orm::{GenerationPolicy, MigrationLayout};
+    #[derive(Debug, Model)]
+    #[orm(table = "issue", index("title"))]
+    struct Issue {
+        #[orm(primary_key)]
+        id: i64,
+        title: String,
+    }
+    #[derive(Debug, Model)]
+    #[orm(table = "archive", index("caption"))]
+    struct Ticket {
+        #[orm(primary_key)]
+        id: i64,
+        caption: String,
+    }
+    #[derive(Debug, Model)]
+    #[orm(table = "issue", index("value"))]
+    struct Replacement {
+        #[orm(primary_key)]
+        id: i64,
+        value: String,
+    }
+
+    let old = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Issue>());
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&old, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let graph = MigrationGraph::new(initial.clone()).unwrap();
+    let (db, cleanup) = fixture().await;
+    db.migrate(graph.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO issue(id,title) VALUES (1,'keep')", vec![])
+        .await
+        .unwrap();
+    let policy = GenerationPolicy {
+        rename_models: [(("app".into(), "Issue".into()), "Ticket".into())].into(),
+        rename_columns: [(("issue".into(), "title".into()), "caption".into())].into(),
+        ..Default::default()
+    };
+    let desired = ProjectState::from_app_schema(
+        "app",
+        &SchemaSet::new().model::<Ticket>().model::<Replacement>(),
+    );
+    let generated = graph
+        .generate_with_policy(&desired, MigrationLayout::PerApp, "archive", &policy)
+        .unwrap();
+    let id = generated[0].id.clone();
+    let graph = MigrationGraph::new(initial.into_iter().chain(generated).collect()).unwrap();
+    assert!(
+        graph
+            .migration_sql(&id)
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("RENAME COLUMN"))
+    );
+    assert_eq!(db.migrate_to(graph.clone(), Some(id)).await.unwrap(), 1);
+    assert_eq!(
+        db.query_sql("SELECT caption FROM archive WHERE id = 1", vec![])
+            .await
+            .unwrap()[0]
+            .get::<String>(0)
+            .unwrap(),
+        "keep"
+    );
+    assert_eq!(db.migrate(graph.clone()).await.unwrap(), 0);
+    assert!(
+        graph
+            .generate(&desired, MigrationLayout::PerApp, "again")
+            .unwrap()
+            .is_empty()
+    );
+    if let Some((admin, schema)) = cleanup {
+        admin
+            .execute_sql(format!("DROP SCHEMA \"{schema}\" CASCADE"), vec![])
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_rebuild_aborts_before_losing_untracked_columns() {
+    use che_orm::{MigrationLayout, MigrationOperation};
+    let (db, _) = fixture().await;
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<SavedKey>());
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let graph = MigrationGraph::new(initial.clone()).unwrap();
+    db.migrate(graph.clone()).await.unwrap();
+    db.execute_sql(
+        "ALTER TABLE portable_saved_keys ADD COLUMN legacy TEXT",
+        vec![],
+    )
+    .await
+    .unwrap();
+    db.execute_sql(
+        "INSERT INTO portable_saved_keys(id, legacy) VALUES (1, 'preserve')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    MigrationOperation::AddIndex {
+        table: "portable_saved_keys".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let next = graph
+        .generate(&state, MigrationLayout::PerApp, "index")
+        .unwrap();
+    let graph = MigrationGraph::new(initial.into_iter().chain(next).collect()).unwrap();
+    assert!(
+        db.migrate(graph.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("legacy")
+    );
+    assert_eq!(db.migration_history().await.unwrap().len(), 1);
+    assert_eq!(
+        db.query_sql(
+            "SELECT legacy FROM portable_saved_keys WHERE id = 1",
+            vec![]
+        )
+        .await
+        .unwrap()[0]
+            .get::<String>(0)
+            .unwrap(),
+        "preserve"
+    );
+    db.execute_sql("ALTER TABLE portable_saved_keys DROP COLUMN legacy", vec![])
+        .await
+        .unwrap();
+    assert_eq!(db.migrate(graph).await.unwrap(), 1);
 }

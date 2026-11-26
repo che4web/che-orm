@@ -12,7 +12,17 @@ keywords = ["orm", "sqlite", "postgres", "database"]
 categories = ["database"]
 
 [workspace]
-members = ["che-orm-macros", "che-orm-examples", "che-sync-protocol", "che-sync"]
+members = [
+    "che-orm-macros",
+    "che-sync-protocol",
+    "che-sync",
+    "example/orm-api",
+    "example/template-single",
+    "example/template-modular",
+]
+
+[workspace.dependencies]
+che-orm = { path = ".", version = "0.4.0", default-features = false }
 
 [features]
 default = ["sqlite"]

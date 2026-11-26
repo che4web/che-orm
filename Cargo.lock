@@ -1026,6 +1026,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "template-modular"
+version = "0.1.0"
+dependencies = [
+ "che-orm",
+ "template-modular-app-tasks",
+ "tokio",
+ "toml_edit",
+]
+
+[[package]]
+name = "template-modular-app-tasks"
+version = "0.1.0"
+dependencies = [
+ "che-orm",
+]
+
+[[package]]
+name = "template-single"
+version = "0.1.0"
+dependencies = [
+ "che-orm",
+ "tokio",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1200,6 +1225,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

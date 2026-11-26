@@ -1,0 +1,100 @@
+#[allow(unused_imports)]
+use che_orm::{
+    ColumnState, ColumnType, ForeignKeyState, Migration, MigrationId, MigrationOperation, ModelKey,
+    ModelState, SchemaObjectKind, SchemaObjectState, TableState,
+};
+
+pub fn migration() -> Migration {
+    Migration::new(
+        MigrationId {
+            app: "tasks".into(),
+            name: "0001_initial".into(),
+        },
+        vec![],
+        vec![MigrationOperation::CreateModel {
+            model: ModelState {
+                key: ModelKey {
+                    app: "tasks".into(),
+                    name: "Task".into(),
+                },
+                table: TableState {
+                    name: "tasks_task".into(),
+                    columns: vec![
+                        ColumnState {
+                            field_name: "id".into(),
+                            name: "id".into(),
+                            column_type: ColumnType::Integer,
+                            nullable: false,
+                            primary_key: true,
+                            unique: false,
+                            default: None,
+                            check: None,
+                            choices: None,
+                            references: None,
+                            auto_now_add: false,
+                            auto_now: false,
+                        },
+                        ColumnState {
+                            field_name: "title".into(),
+                            name: "title".into(),
+                            column_type: ColumnType::Text,
+                            nullable: false,
+                            primary_key: false,
+                            unique: false,
+                            default: None,
+                            check: Some("length(title) > 0".into()),
+                            choices: None,
+                            references: None,
+                            auto_now_add: false,
+                            auto_now: false,
+                        },
+                        ColumnState {
+                            field_name: "done".into(),
+                            name: "done".into(),
+                            column_type: ColumnType::Boolean,
+                            nullable: false,
+                            primary_key: false,
+                            unique: false,
+                            default: Some("false".into()),
+                            check: None,
+                            choices: None,
+                            references: None,
+                            auto_now_add: false,
+                            auto_now: false,
+                        },
+                        ColumnState {
+                            field_name: "created_at".into(),
+                            name: "created_at".into(),
+                            column_type: ColumnType::DateTime,
+                            nullable: false,
+                            primary_key: false,
+                            unique: false,
+                            default: None,
+                            check: None,
+                            choices: None,
+                            references: None,
+                            auto_now_add: true,
+                            auto_now: false,
+                        },
+                        ColumnState {
+                            field_name: "updated_at".into(),
+                            name: "updated_at".into(),
+                            column_type: ColumnType::DateTime,
+                            nullable: false,
+                            primary_key: false,
+                            unique: false,
+                            default: None,
+                            check: None,
+                            choices: None,
+                            references: None,
+                            auto_now_add: false,
+                            auto_now: true,
+                        },
+                    ],
+                    unique_constraints: vec![],
+                    indexes: vec![vec!["title".into()]],
+                },
+            },
+        }],
+    )
+}

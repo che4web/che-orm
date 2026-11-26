@@ -1,0 +1,13 @@
+[package]
+name = "{{project-name}}-app-tasks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[features]
+sqlite = ["che-orm/sqlite"]
+postgres = ["che-orm/postgres"]
+
+[dependencies]
+che-orm.workspace = true

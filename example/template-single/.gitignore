@@ -1,0 +1,8 @@
+/target/
+/app.db
+/app.db-shm
+/app.db-wal
+/my-app.db
+/my-app.db-shm
+/my-app.db-wal
+/template-single.db*

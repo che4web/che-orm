@@ -1,0 +1,5 @@
+/target/
+/app.db
+/app.db-shm
+/app.db-wal
+/template-modular.db*

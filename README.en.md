@@ -174,7 +174,11 @@ cargo run
 ```
 
 For PostgreSQL, create the database and set `CHE_ORM_DATABASE_URL` before migrating.
-Create an application module with `cargo run --bin manage -- createapp blog`.
+In `single`, migrations live in `src/migrations/`. In `modular`, each app is a
+separate Cargo crate: task migrations, for example, live in
+`apps/tasks/src/migrations/`. The root `manage migrate` applies the combined
+dependency graph. Run `cargo run --bin manage -- createapp blog` to create a
+Rust module in `single` or a separate crate in `modular`.
 See the [template guide](docs/en/template.md).
 
 ## Migrations
@@ -254,8 +258,14 @@ cargo run -p che-orm-examples --bin transactions
 cargo run -p che-orm-examples --bin serializers
 ```
 
-The example application has frozen migrations and does not support
-`makemigrations`. Use the template above for your own application.
+These commands run [`example/orm-api`](example/orm-api/) with one initial Rust
+migration for SQLite and PostgreSQL. If you applied the old SQL migration, point
+`CHE_ORM_DATABASE_URL` at a fresh database.
+
+The [`example/` directory](example/) also has two runnable template apps:
+[`template-single`](example/template-single/) and
+[`template-modular`](example/template-modular/). Each has its own default
+SQLite database and an initial migration to apply before running it.
 
 ```bash
 cargo fmt --check

@@ -91,7 +91,7 @@ PostgreSQL синхронизирует параллельные запуски 
 с соответствующими state operations. В SQL миграции запрещены команды управления
 транзакцией. Сохраняйте прежние identities и checksums.
 
-Пример приложения содержит отдельные frozen baselines SQLite и PostgreSQL.
+Пример приложения содержит общую Rust-миграцию для SQLite и PostgreSQL.
 Подключение задаётся через `CHE_ORM_DATABASE_URL`:
 
 ```bash

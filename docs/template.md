@@ -9,6 +9,11 @@ Rust 1.89 или новее. Приложение требует опублик�
 
 ## Создание проекта
 
+Обе структуры можно посмотреть и запустить без генерации проекта:
+[`template-single`](../example/template-single/) и
+[`template-modular`](../example/template-modular/). Они используют локальный
+`che-orm` и уже содержат начальную миграцию.
+
 ```bash
 cargo install cargo-generate --locked
 cargo generate --git https://github.com/che4web/che-orm templates/che-orm --name my-app
@@ -16,7 +21,7 @@ cargo generate --git https://github.com/che4web/che-orm templates/che-orm --name
 
 Генератор запросит имя проекта, backend (`sqlite` или `postgres`) и структуру:
 `single` (по умолчанию, модели в `src/models.rs`) или `modular` (стартовый модуль
-`src/apps/tasks`). Для генерации без вопросов укажите параметры явно:
+Cargo-крейт `apps/tasks`). Для генерации без вопросов укажите параметры явно:
 
 ```bash
 cargo generate --git https://github.com/che4web/che-orm templates/che-orm \
@@ -68,13 +73,14 @@ cargo run --no-default-features --features postgres --bin manage -- schema
 
 ## Содержимое
 
-- `src/models.rs` (`single`) или `src/apps/tasks/models.rs` (`modular`): модель
+- `src/models.rs` (`single`) или `apps/tasks/src/models.rs` (`modular`): модель
   `Task` с integer primary key и managed timestamps.
 - `src/apps/mod.rs`: реестр модулей приложения.
 - `src/lib.rs`: `AppConfig` и `AppRegistry`.
 - `src/settings.rs`: подключение к БД.
-- `src/migrations/`: пустой реестр compiled migrations. Первую миграцию
-  пользователь создаёт через `makemigrations --name initial`.
+- `src/migrations/` (`single`) или `apps/tasks/src/migrations/` (`modular`):
+  пустой реестр миграций. Первую миграцию создаёт `makemigrations --name initial`.
+  В `modular` корневой `src/migrations.rs` собирает общий граф из крейтов.
 - `src/bin/manage.rs`: `schema`, `makemigrations`, `migrate`, `migrate status`.
 - `src/bin/manage/makemigrations.rs`: генератор compiled migrations приложения.
 - `src/bin/manage/createapp.rs`: генератор новых модулей.
@@ -92,7 +98,7 @@ cargo run --bin manage -- migrate
 ```
 
 Команда сравнивает модели с результатом replay compiled-истории, создаёт следующий
-пронумерованный Rust-модуль и обновляет `src/migrations/mod.rs`. Она не подключается
+пронумерованный Rust-модуль и обновляет его реестр миграций. Она не подключается
 к БД. Для форматирования нужен `rustfmt`: `rustup component add rustfmt`.
 `--dry-run` печатает предложенный Rust-код без записи, а `--check` завершает команду
 с ошибкой, если модели требуют новой миграции. Если изменений нет, файлы не создаются.
@@ -117,28 +123,28 @@ cargo run --bin manage -- migrate
 cargo run --bin manage -- createapp blog
 ```
 
-Команда доступна для обеих структур. Она создаёт `src/apps/blog/mod.rs` с
-`APP_NAME`, `AppConfig`, `models.rs` с подсказкой по именованию и автоматически
-регистрирует модуль в `src/apps/mod.rs`. Имя должно быть snake_case, например
-`user_accounts`.
-Для `single` исходные модели остаются в корневом `src/models.rs`; для `modular`
-стартовый `Task` находится в `src/apps/tasks/models.rs`.
+В `single` команда создаёт модуль в `src/apps/blog/`, а в `modular` — отдельный
+Cargo-крейт в `apps/blog/` и добавляет зависимость в корневой `Cargo.toml`.
+В обоих случаях приложение регистрируется в `src/apps/mod.rs`. Имя должно быть
+snake_case, например `user_accounts`.
 
 Добавьте модели с `#[orm(app = super::APP_NAME)]` и зарегистрируйте их в
 `AppConfig::schema()` нового модуля, например
 `SchemaSet::new().model::<models::Post>()`. Затем выполните `makemigrations` и
-`migrate`. Все модули используют общий реестр миграций `src/migrations/`, при этом
-операции сохраняют владельца каждой модели. FK-родители должны регистрироваться
-раньше детей; новые модули добавляются в конец реестра. Сохраняйте комментарии
-`createapp` в `src/apps/mod.rs` для дальнейшего автоматического подключения.
+`migrate`. В `single` миграции общие (`src/migrations/`). В `modular` каждый
+крейт хранит и нумерует свои миграции: например, первая миграция `blog` попадёт
+в `apps/blog/src/migrations/m0001_add_blog.rs`. CLI применяет общий граф в порядке
+зависимостей. Для FK между крейтами добавьте зависимость на крейт целевой модели.
+Регистрируйте FK-родителей раньше детей. Сохраняйте комментарии `createapp`
+в `src/apps/mod.rs`.
 Команда требует `rustfmt`, не подключается к БД и не перезаписывает существующие
 модули. Запускайте её через `cargo run`, чтобы пересобрать изменённый реестр.
 
 `createapp blog` создаёт `pub const APP_NAME: &str = "blog"` в `mod.rs`
-приложения, а `AppConfig::name()` возвращает эту константу. Для `Post` с
+модуля или в `lib.rs` крейта, а `AppConfig::name()` возвращает эту константу. Для `Post` с
 `#[orm(app = super::APP_NAME)]` получится `blog_post` (см. [Модели](models.md#app)).
 Стартовый `Task` использует таблицу `tasks_task` в обеих структурах. Его константа
-находится в `src/lib.rs` для `single` и `src/apps/tasks/mod.rs` для `modular`.
+находится в `src/lib.rs` для `single` и `apps/tasks/src/lib.rs` для `modular`.
 Явный `#[orm(table = "existing_table")]` позволяет сохранить существующее имя.
 
 ## Проверка шаблона
@@ -170,4 +176,12 @@ python3 scripts/check-template.py
 Флаг `--backend sqlite` или `--backend postgres` ограничивает проверку одним вариантом.
 `--layout single` или `--layout modular` ограничивает проверку структуры. По
 умолчанию проверяются все четыре комбинации, включая `createapp`, подключение
-новой модели с FK и применение общей миграционной истории.
+новой модели с FK и применение общего графа миграций. Для `modular` скрипт также
+проверяет, что изменения в двух приложениях за один запуск дают файлы миграций
+в обоих крейтах.
+
+Чтобы проверить миграции с внешними ключами на PostgreSQL, задайте
+`TEMPLATE_TEST_POSTGRES_URL` с URL отдельной пустой тестовой базы и запустите
+скрипт с `--backend postgres --layout modular`. Он применит начальные миграции
+и последующее изменение: создание двух таблиц с взаимными ссылками в одном
+крейте и добавление и изменение внешнего ключа в другом.

@@ -172,6 +172,7 @@ fn apply_single_operation_migration(
             }
         }
     }
+    assert_foreign_keys_valid(connection)?;
     connection.execute(
         "INSERT INTO che_migration_history (app, name, checksum, applied_on) VALUES (?1, ?2, ?3, ?4)",
         crate::rusqlite::params![
@@ -181,7 +182,6 @@ fn apply_single_operation_migration(
             OffsetDateTime::now_utc().format(&Rfc3339)?,
         ],
     )?;
-    assert_foreign_keys_valid(connection)?;
     Ok(())
 }
 
@@ -314,6 +314,16 @@ fn assert_rebuild_objects_match_history(
         .iter()
         .find(|item| item.name == table)
         .ok_or_else(|| format!("missing historical table {table}"))?;
+    let actual_columns = connection
+        .prepare("SELECT name FROM pragma_table_xinfo(?1, 'main')")?
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let expected_columns: BTreeSet<_> = expected.columns.iter().map(|c| c.name.clone()).collect();
+    if actual_columns != expected_columns {
+        let extra: Vec<_> = actual_columns.difference(&expected_columns).collect();
+        let missing: Vec<_> = expected_columns.difference(&actual_columns).collect();
+        return Err(format!("cannot rebuild {table}: columns differ from history (extra {extra:?}, missing {missing:?}); supply an explicit migration").into());
+    }
     let expected_unique = expected
         .columns
         .iter()
@@ -486,8 +496,25 @@ pub fn applied_operation_migrations(
 fn assert_foreign_keys_valid(
     connection: &crate::rusqlite::Connection,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // foreign_key_check validates key definitions and row values, but SQLite
+    // skips a missing parent when the child has no referencing rows.
+    let missing: Option<(String, String)> = connection
+        .query_row(
+            "SELECT child.name, fk.\"table\" FROM main.sqlite_schema AS child
+         CROSS JOIN pragma_foreign_key_list(child.name, 'main') AS fk
+         WHERE child.type = 'table' AND NOT EXISTS (
+             SELECT 1 FROM main.sqlite_schema AS parent
+             WHERE parent.type = 'table' AND parent.name = fk.\"table\" COLLATE NOCASE
+         ) LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((child, parent)) = missing {
+        return Err(format!("foreign key on {child} references missing table {parent}").into());
+    }
     let mut statement = connection
-        .prepare("PRAGMA foreign_key_check;")
+        .prepare("PRAGMA main.foreign_key_check;")
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
     let mut rows = statement
         .query([])

@@ -9,6 +9,11 @@ dependencies.
 
 ## Generate a Project
 
+To try either layout without generating a project, run
+[`template-single`](../../example/template-single/) or
+[`template-modular`](../../example/template-modular/). They use the local
+`che-orm` and include the initial migration.
+
 ```bash
 cargo install cargo-generate --locked
 cargo generate --git https://github.com/che4web/che-orm templates/che-orm --name my-app
@@ -16,7 +21,7 @@ cargo generate --git https://github.com/che4web/che-orm templates/che-orm --name
 
 The prompts ask for the project name, backend (`sqlite` or `postgres`) and layout:
 `single` (default, models in `src/models.rs`) or `modular` (starter app in
-`src/apps/tasks`). To generate non-interactively:
+Cargo crate `apps/tasks`). To generate non-interactively:
 
 ```bash
 cargo generate --git https://github.com/che4web/che-orm templates/che-orm \
@@ -67,13 +72,15 @@ cargo run --no-default-features --features postgres --bin manage -- schema
 
 ## Contents
 
-- `src/models.rs` (`single`) or `src/apps/tasks/models.rs` (`modular`): `Task`
+- `src/models.rs` (`single`) or `apps/tasks/src/models.rs` (`modular`): `Task`
   with an integer primary key and managed timestamps.
 - `src/apps/mod.rs`: app module registration.
 - `src/lib.rs`: `AppConfig` and `AppRegistry`.
 - `src/settings.rs`: database settings.
-- `src/migrations/`: an empty compiled migration registry. Generate the first
-  migration yourself with `makemigrations --name initial`.
+- `src/migrations/` (`single`) or `apps/tasks/src/migrations/` (`modular`): the
+  initially empty migration registry. Generate the first migration with
+  `makemigrations --name initial`. In `modular`, root `src/migrations.rs`
+  builds a single graph from the registered crates.
 - `src/bin/manage.rs`: `schema`, `makemigrations`, `migrate`, `migrate status`.
 - `src/bin/manage/makemigrations.rs`: application-owned compiled migration generator.
 - `src/bin/manage/createapp.rs`: app module generator.
@@ -90,7 +97,7 @@ cargo run --bin manage -- migrate
 ```
 
 The command compares models with the replayed compiled history, writes the next
-numbered Rust module and updates `src/migrations/mod.rs` without connecting to the
+numbered Rust module and updates its migration registry without connecting to the
 database. Generation requires `rustfmt`: `rustup component add rustfmt`.
 `--dry-run` prints the proposed Rust source without writing it; `--check` exits
 with an error when model changes need a migration. No changes means no new files.
@@ -114,16 +121,19 @@ commit, rollback and saving a deleted row returning `None`.
 cargo run --bin manage -- createapp blog
 ```
 
-Available with either layout, this creates `src/apps/blog/mod.rs` with an
-`APP_NAME`, an `AppConfig`, a `models.rs` with naming guidance, and registers the
-app in `src/apps/mod.rs`.
-Use snake_case names such as `user_accounts`. With `single`, the starter models
-stay in `src/models.rs`; with `modular`, `Task` lives in `src/apps/tasks/models.rs`.
+With `single`, this creates a Rust module in `src/apps/blog/`. With `modular`,
+it creates a Cargo crate in `apps/blog/` and adds a path dependency in the root
+manifest. Both layouts register the app in `src/apps/mod.rs`. Use snake_case
+names such as `user_accounts`.
 
 Define models with `#[orm(app = super::APP_NAME)]` and register them in
 the new app's `AppConfig::schema()`, for example
 `SchemaSet::new().model::<models::Post>()`. Then run `makemigrations` and `migrate`.
-All apps share `src/migrations/`; operations preserve each model's app ownership.
+With `single`, all apps share `src/migrations/`. With `modular`, each crate
+has its own migration files and numbering: for example, the first `blog`
+migration is `apps/blog/src/migrations/m0001_add_blog.rs`. The CLI applies the
+combined graph in dependency order. For a cross-crate FK, add the referenced
+crate as a dependency of the referencing crate.
 Register FK parents before children: new apps are appended to the registry.
 Keep the `createapp` marker comments in `src/apps/mod.rs` for future automatic
 registration. Creation requires `rustfmt`, never connects to the database and
@@ -131,10 +141,10 @@ does not overwrite existing app directories. Use `cargo run` to rebuild registry
 changes before creating another app.
 
 `createapp blog` defines `pub const APP_NAME: &str = "blog"` in the app's
-`mod.rs`, and `AppConfig::name()` returns this constant. `Post` with
+`mod.rs` or crate `lib.rs`, and `AppConfig::name()` returns this constant. `Post` with
 `#[orm(app = super::APP_NAME)]` uses `blog_post` (see [Models](models.md#app)).
 The starter `Task` uses `tasks_task` in both layouts; its constant lives in
-`src/lib.rs` for `single` and `src/apps/tasks/mod.rs` for `modular`.
+`src/lib.rs` for `single` and `apps/tasks/src/lib.rs` for `modular`.
 Use an explicit `#[orm(table = "existing_table")]` to preserve an existing name.
 
 ## Verify the Template
@@ -166,4 +176,11 @@ After publishing, verify the crates.io dependency with
 Use `--backend sqlite` or `--backend postgres` to check one variant.
 Use `--layout single` or `--layout modular` to check one layout. By default all
 four combinations exercise `createapp`, new model registration with an FK and
-the shared compiled migration history.
+the combined migration graph. For `modular`, it also checks that changes to
+two apps in one run produce migrations in both owning crates.
+
+To exercise foreign-key migrations on a live PostgreSQL server, set
+`TEMPLATE_TEST_POSTGRES_URL` to a dedicated empty test database and run the
+script with `--backend postgres --layout modular`. It applies the initial
+migrations and a follow-up that creates two mutually referencing tables in one
+crate and adds and retargets foreign keys in another.

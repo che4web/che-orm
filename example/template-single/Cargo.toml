@@ -1,0 +1,20 @@
+[package]
+name = "template-single"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+default-run = "template-single"
+publish = false
+
+[[bin]]
+name = "template-single-manage"
+path = "src/bin/manage.rs"
+
+[features]
+default = ["sqlite"]
+sqlite = ["che-orm/sqlite"]
+postgres = ["che-orm/postgres"]
+
+[dependencies]
+che-orm = { path = "../..", version = "0.4.0", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -9,7 +9,8 @@ Workspace members:
 - `che-orm`: core ORM library, compile-time SQLite/PostgreSQL runtimes, SQL AST, and schema compiler.
 - `che-orm-macros`: procedural macros `#[derive(Model)]`, `#[derive(DbEnum)]`
   and `#[derive(ModelSerializer)]`.
-- `che-orm-examples`: downstream examples, sample application models, and the `manage` CLI.
+- `example/orm-api` (`che-orm-examples`): downstream ORM API examples and the `manage` CLI.
+- `example/template-single` and `example/template-modular`: runnable task apps showing the two template layouts.
 - `che-sync-protocol`: backend-independent synchronization messages and tagged values.
 - `che-sync`: native current/shadow synchronization engine, migrations, transport trait and offline example.
 
@@ -27,9 +28,9 @@ Workspace members:
 - `src/migration/postgres_schema.rs`: native PostgreSQL schema operations.
 - `src/migration/postgres_executor.rs`: PostgreSQL migration locking and execution.
 - `che-orm-macros/src/lib.rs`: `Model` derive implementation.
-- `che-orm-examples/src/lib.rs`: sample application models, registry, and database path.
-- `che-orm-examples/src/bin/manage.rs`: compiled-migration CLI for the sample application.
-- `che-orm-examples/migrations/`: the sample's frozen compiled baseline SQL.
+- `example/orm-api/src/lib.rs`: sample application models, registry, and database path.
+- `example/orm-api/src/bin/manage.rs`: compiled-migration CLI for the sample application.
+- `example/orm-api/src/migrations/`: the sample's compiled Rust baseline for both backends.
 - `che-sync/src/runtime.rs`: configured client ORM capture and role-aware read filters.
 - `che-sync/src/server.rs`: server capture, access policy, journal and operation receipts.
 - `che-sync/src/engine.rs`: independent pull/flush/full-load and compatibility sync cycle.
@@ -51,7 +52,7 @@ Workspace members:
 ## Application Modules
 
 Keep application models, registry, settings, binaries, and migrations outside
-the core crate. The sample application uses `che-orm-examples`.
+the core crate. See `example/README.md` for runnable examples.
 
 Each application should expose an `App` type implementing `AppConfig`:
 
@@ -138,7 +139,7 @@ Application-owned compiled migration operations are the source of persistent sch
 changes. Do not use `Database::create_table` for production deployment; it is
 intended for tests and local setup.
 
-The sample application configuration lives in `che-orm-examples/src/lib.rs`:
+The sample application configuration lives in `example/orm-api/src/lib.rs`:
 
 ```rust
 pub const DATABASE_PATH: &str = "app.db";
@@ -152,10 +153,11 @@ cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin manage -- migrate status
 ```
 
-The example rejects `makemigrations`: its `0001_initial` history is frozen.
+The example rejects `makemigrations`: its `examples:0001_initial_models` history is frozen.
 `migrate` and `migrate status` use its `database_url()` (`CHE_ORM_DATABASE_URL`,
-or the configured default). Each backend has its own frozen baseline. Update the application's
-compiled migration registry when adding a model. `che-rest` applications have
+or the configured default). Use fresh databases; both backends share the same
+Rust baseline. Update the application's compiled migration registry when
+adding a model. `che-rest` applications have
 their own compiled `makemigrations` flow. Review generated operations and
 backfill existing file keys separately if changing their storage format:
 `#[orm(db_column = "existing_name")]` keeps the SQL column name but does not
@@ -296,7 +298,7 @@ server; absence of the variable is an error. The sample PostgreSQL build uses
 `-p che-orm-examples --no-default-features --features postgres`.
 
 For release changes, follow `docs/releasing.md`: verify Rust 1.89, both backend
-builds and all four public package archives. `che-orm-examples` is not published;
+builds and all four public package archives. Crates under `example/` are not published;
 use explicit package selection rather than `cargo package --workspace`.
 
 When changing the sync/model/serializer contracts, also verify matching sibling

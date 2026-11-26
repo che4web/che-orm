@@ -7,6 +7,12 @@ default-run = "{{project-name}}"
 publish = false
 
 [workspace]
+{% if layout == "modular" -%}
+resolver = "3"
+
+[workspace.dependencies]
+che-orm = { version = "0.4.0", default-features = false }
+{% endif %}
 
 [features]
 default = ["{{backend}}"]
@@ -14,5 +20,11 @@ sqlite = ["che-orm/sqlite"]
 postgres = ["che-orm/postgres"]
 
 [dependencies]
+{% if layout == "modular" -%}
+che-orm.workspace = true
+app_tasks = { package = "{{project-name}}-app-tasks", path = "apps/tasks" }
+toml_edit = "0.25"
+{% else -%}
 che-orm = { version = "0.4.0", default-features = false }
+{% endif -%}
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

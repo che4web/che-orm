@@ -94,8 +94,8 @@ SQL. Type conversions that need `USING` or data remapping must use explicit
 application migration SQL with matching state operations. Migration SQL must
 not contain transaction-control commands. Keep previous identities/checksums.
 
-The sample keeps separate frozen SQLite and PostgreSQL baselines. Configure it
-with `CHE_ORM_DATABASE_URL`, then run:
+The sample uses the same Rust migration for SQLite and PostgreSQL. Set
+`CHE_ORM_DATABASE_URL` to a fresh database, then run:
 
 ```bash
 cargo run -p che-orm-examples --no-default-features --features postgres --bin manage -- migrate

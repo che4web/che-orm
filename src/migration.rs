@@ -3,6 +3,10 @@ use std::fmt;
 
 use crate::{ColumnSchema, ColumnType, ForeignKey, SchemaSet, TableSchema};
 
+mod catalog;
+mod generation;
+pub use catalog::{GenerationPolicy, SqlTableContract};
+pub use generation::MigrationLayout;
 mod postgres_schema;
 #[cfg(feature = "sqlite")]
 pub mod sqlite_executor;
@@ -516,6 +520,15 @@ impl ProjectState {
             .map(|object| ((object.kind, object.name.clone()), object))
             .collect();
         let changed_tables = changed_tables(&model_changes);
+        // A raw table definition is not a data conversion. Even callers of the
+        // low-level diff must never infer DROP+CREATE from an edited CREATE SQL.
+        for (key, old) in &current_objects {
+            if old.kind == SchemaObjectKind::Table
+                && wanted_objects.get(key).is_some_and(|new| *new != *old)
+            {
+                return Err(MigrationError::NeedsManualMigration { resource: old.name.clone(), reason: "SQL table definition or owner changed; provide a data-preserving migration and matching state operations".into() });
+            }
+        }
         let mut before = Vec::new();
         let mut after = Vec::new();
         for (key, object) in &current_objects {
@@ -605,12 +618,15 @@ fn validate_schema_object(object: &SchemaObjectState) -> Result<(), MigrationErr
 }
 
 fn schema_object_depends_on(object: &SchemaObjectState, tables: &BTreeSet<String>) -> bool {
-    tables.iter().any(|table| {
-        object
-            .sql
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .any(|identifier| identifier == table)
-    })
+    // Views and triggers can be reinstalled around a schema change. A table
+    // owns rows: mentioning a changed model in its SQL is not a migration of it.
+    object.kind != SchemaObjectKind::Table
+        && tables.iter().any(|table| {
+            object
+                .sql
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .any(|identifier| identifier == table)
+        })
 }
 
 fn parse_schema_object_header(sql: &str) -> Option<(SchemaObjectKind, String)> {
@@ -993,6 +1009,18 @@ fn render_schema_object(object: &SchemaObjectState) -> String {
 
 fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
     match operation {
+        MigrationOperation::RenameModel {
+            table,
+            app,
+            old_name,
+            new_name,
+        } => format!(
+            "MigrationOperation::RenameModel {{ table: {}, app: {}, old_name: {}, new_name: {} }}",
+            render_string(table),
+            render_string(app),
+            render_string(old_name),
+            render_string(new_name)
+        ),
         MigrationOperation::CreateModel { model } => format!(
             "MigrationOperation::CreateModel {{ model: {} }}",
             render_model(model)
@@ -1104,6 +1132,13 @@ fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
 /// A migration state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationOperation {
+    /// Changes the Rust model identity while retaining the physical table and all rows.
+    RenameModel {
+        table: String,
+        app: String,
+        old_name: String,
+        new_name: String,
+    },
     /// Rebuilds a SQLite table, normalizing the named DateTime columns to
     /// fixed-width UTC TEXT and refreshing managed timestamp defaults.
     /// Invalid values fail the migration atomically. PostgreSQL is unchanged.
@@ -1213,7 +1248,8 @@ fn operation_has_distinct_field_names(operation: &MigrationOperation) -> bool {
         | MigrationOperation::RemoveUniqueConstraint { .. }
         | MigrationOperation::BackfillColumn { .. }
         | MigrationOperation::CreateSchemaObject { .. }
-        | MigrationOperation::DropSchemaObject { .. } => false,
+        | MigrationOperation::DropSchemaObject { .. }
+        | MigrationOperation::RenameModel { .. } => false,
     }
 }
 
@@ -1309,6 +1345,17 @@ fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation, include
             bytes.push(16);
             encode_string(bytes, table);
             encode_string_list(bytes, columns);
+        }
+        MigrationOperation::RenameModel {
+            table,
+            app,
+            old_name,
+            new_name,
+        } => {
+            bytes.push(17);
+            for value in [table, app, old_name, new_name] {
+                encode_string(bytes, value);
+            }
         }
         MigrationOperation::CreateModel { model } => {
             bytes.push(12);
@@ -1442,9 +1489,83 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 impl MigrationOperation {
+    /// A one-line description for generation, merge diagnostics and deployment plans.
+    pub fn summary(&self) -> String {
+        use MigrationOperation::*;
+        match self {
+            CreateModel { model } => {
+                format!("Create model {} ({})", model.key.name, model.table.name)
+            }
+            CreateTable { table } => format!("Create table {}", table.name),
+            DropTable { name } => format!("Drop table {name}"),
+            RenameModel {
+                app,
+                old_name,
+                new_name,
+                table,
+            } => format!("Rename model {app}.{old_name} to {new_name} on {table}"),
+            RenameTable { old_name, new_name } => format!("Rename table {old_name} to {new_name}"),
+            RenameColumn {
+                table,
+                old_name,
+                new_name,
+            } => format!("Rename column {table}.{old_name} to {new_name}"),
+            AddColumn { table, column } => format!(
+                "Add {}column {table}.{}",
+                if column.nullable { "nullable " } else { "" },
+                column.name
+            ),
+            RemoveColumn { table, column } => format!("Remove column {table}.{column}"),
+            AlterColumn {
+                table, new_column, ..
+            } => format!("Alter column {table}.{}", new_column.name),
+            AddIndex { table, columns } => format!("Add index on {table} ({})", columns.join(", ")),
+            RemoveIndex { table, columns } => {
+                format!("Remove index on {table} ({})", columns.join(", "))
+            }
+            AddUniqueConstraint { table, columns } => {
+                format!("Add unique constraint on {table} ({})", columns.join(", "))
+            }
+            RemoveUniqueConstraint { table, columns } => format!(
+                "Remove unique constraint on {table} ({})",
+                columns.join(", ")
+            ),
+            BackfillColumn { table, column, .. } => format!("Backfill {table}.{column}"),
+            NormalizeSqliteDateTimes { table, columns } => {
+                format!("Normalize datetimes in {table} ({})", columns.join(", "))
+            }
+            CreateSchemaObject { object } => format!("Create {:?} {}", object.kind, object.name),
+            DropSchemaObject { kind, name } => format!("Drop {kind:?} {name}"),
+            RunSql { .. } => "Run custom SQL".into(),
+        }
+    }
+
     /// Applies this operation to the in-memory schema state.
     pub fn state_forwards(&self, state: &mut ProjectState) -> Result<(), MigrationError> {
         match self {
+            Self::RenameModel {
+                table,
+                app,
+                old_name,
+                new_name,
+            } => {
+                let old = ModelKey {
+                    app: app.clone(),
+                    name: old_name.clone(),
+                };
+                let new = ModelKey {
+                    app: app.clone(),
+                    name: new_name.clone(),
+                };
+                if state.model_keys.get(table) != Some(&old)
+                    || state.model_keys.values().any(|k| *k == new)
+                {
+                    return Err(MigrationError::InvalidState(format!(
+                        "cannot rename {app}.{old_name} to {new_name} on {table}"
+                    )));
+                }
+                state.model_keys.insert(table.clone(), new);
+            }
             Self::CreateModel { model } => {
                 if state.model_keys.values().any(|key| key == &model.key) {
                     return Err(MigrationError::InvalidState(format!(
@@ -1743,15 +1864,20 @@ fn inbound_reference(
     target_table: &str,
     target_column: Option<&str>,
 ) -> Option<(String, String)> {
-    state.tables.iter().find_map(|table| {
-        table.columns.iter().find_map(|column| {
-            let reference = column.references.as_ref()?;
-            let (table_name, column_name) = parse_reference(&reference.target)?;
-            (table_name == target_table
-                && target_column.is_none_or(|target_column| column_name == target_column))
-            .then(|| (table.name.clone(), column.name.clone()))
+    state
+        .tables
+        .iter()
+        .filter(|table| target_column.is_some() || table.name != target_table)
+        .find_map(|table| {
+            table.columns.iter().find_map(|column| {
+                let reference = column.references.as_ref()?;
+                let (table_name, column_name) = parse_reference(&reference.target)?;
+                (catalog::same_name(table_name, target_table)
+                    && target_column
+                        .is_none_or(|target_column| catalog::same_name(column_name, target_column)))
+                .then(|| (table.name.clone(), column.name.clone()))
+            })
         })
-    })
 }
 
 fn parse_reference(reference: &str) -> Option<(&str, &str)> {
@@ -1759,11 +1885,22 @@ fn parse_reference(reference: &str) -> Option<(&str, &str)> {
     column.strip_suffix(')').map(|column| (table, column))
 }
 
+fn reference_target_ready(table: &TableState, column: &str) -> bool {
+    table
+        .columns
+        .iter()
+        .any(|c| c.name == column && (c.primary_key || c.unique))
+        || table
+            .unique_constraints
+            .iter()
+            .any(|cols| cols.len() == 1 && cols[0] == column)
+}
+
 fn rename_reference_table(reference: &str, old_name: &str, new_name: &str) -> String {
     let Some((table, column)) = parse_reference(reference) else {
         return reference.into();
     };
-    if table == old_name {
+    if catalog::same_name(table, old_name) {
         format!("{new_name}({column})")
     } else {
         reference.into()
@@ -1779,7 +1916,7 @@ fn rename_reference_column(
     let Some((table, column)) = parse_reference(reference) else {
         return reference.into();
     };
-    if table == table_name && column == old_name {
+    if catalog::same_name(table, table_name) && catalog::same_name(column, old_name) {
         format!("{table_name}({new_name})")
     } else {
         reference.into()
@@ -1838,6 +1975,10 @@ fn remove_constraint(
 /// Errors while validating or replaying migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationError {
+    NeedsManualMigration {
+        resource: String,
+        reason: String,
+    },
     InvalidState(String),
     DuplicateMigration(MigrationId),
     InvalidChecksum(MigrationId),
@@ -1902,6 +2043,10 @@ pub enum MigrationError {
 impl fmt::Display for MigrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NeedsManualMigration { resource, reason } => write!(
+                formatter,
+                "manual migration required for {resource}: {reason}"
+            ),
             Self::InvalidState(message) => formatter.write_str(message),
             Self::DuplicateMigration(id) => {
                 write!(formatter, "duplicate migration {}:{}", id.app, id.name)
@@ -2097,6 +2242,27 @@ impl MigrationGraph {
             .collect()
     }
 
+    /// Checks recorded IDs, dependencies and checksums before reporting a deployment plan.
+    pub fn pending_to(
+        &self,
+        history: &std::collections::HashMap<(String, String), String>,
+        target: Option<&MigrationId>,
+    ) -> Result<Vec<&Migration>, Box<dyn std::error::Error + Send + Sync>> {
+        pending_operation_migrations(self, history)?;
+        let applied = history
+            .keys()
+            .map(|(app, name)| MigrationId {
+                app: app.clone(),
+                name: name.clone(),
+            })
+            .collect();
+        Ok(self
+            .plan_forward(&applied, target)?
+            .into_iter()
+            .map(|step| &self.migrations[&step.id])
+            .collect())
+    }
+
     /// Builds and validates a forward-only plan. Independent applied migrations
     /// are retained. A target already passed in its app is rejected.
     pub fn plan_to(
@@ -2268,6 +2434,7 @@ impl SqliteSchemaEditor {
         let mut resulting_state = before.clone();
         operation.state_forwards(&mut resulting_state)?;
         let statements = match operation {
+            MigrationOperation::RenameModel { .. } => vec![],
             MigrationOperation::CreateModel { model } => create_table_statements(&model.table),
             MigrationOperation::CreateTable { table } => create_table_statements(table),
             MigrationOperation::DropTable { name } => {

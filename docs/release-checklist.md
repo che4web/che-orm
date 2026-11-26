@@ -2,7 +2,7 @@
 
 Use this checklist for every release. [The release procedure](releasing.md)
 records the planned versions, full verification commands and publication order
-for all four public crates. `che-orm-examples` is not published.
+for all four public crates. Crates in `example/` are not published.
 
 The current preparation targets **che-orm 0.4.0**, **che-sync 0.2.0**, then
 downstream **che-rest 0.4.0**. Registry checked 2026-11-12: core **0.3.3**,
@@ -22,7 +22,7 @@ the patched SQLite dependency and Rust 1.89 requirement.
 - [ ] Update versions and internal dependency requirements in their manifests.
 - [ ] Update `CHANGELOG.md` with user-visible changes and migration notes.
 - [ ] Review `README.md`, `README.en.md`, and `docs/en/` for API accuracy.
-- [ ] Confirm example migration files in `che-orm-examples/migrations/` are intentional.
+- [ ] Confirm migration files in `example/orm-api/src/migrations/` and the two template examples are intentional.
 - [ ] Ensure the worktree contains no local database files or `target/` changes.
 - [ ] Review the sync history contract and rehearse application-owned upgrades
       when deploying to existing databases.

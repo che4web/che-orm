@@ -53,7 +53,8 @@ pub(crate) async fn apply(
                 .batch("SELECT pg_advisory_xact_lock(716286318705851)")
                 .await?;
             let applied = history(session).await?;
-            validate_history(&graph, &applied)?;
+            super::pending_operation_migrations(&graph, &applied)
+                .map_err(|e| OrmError::Migration(e.to_string()))?;
             let applied_ids = applied
                 .keys()
                 .map(|(app, name)| MigrationId {
@@ -153,38 +154,6 @@ async fn apply_deferred(
         }
     }
     *pending = waiting;
-    Ok(())
-}
-
-fn validate_history(
-    graph: &MigrationGraph,
-    applied: &HashMap<(String, String), String>,
-) -> Result<(), OrmError> {
-    let migrations = graph
-        .ordered()
-        .map(|migration| {
-            (
-                (migration.id.app.clone(), migration.id.name.clone()),
-                migration,
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    for (key, checksum) in applied {
-        let migration = migrations
-            .get(key)
-            .ok_or_else(|| OrmError::Migration(format!("missing migration {}:{}", key.0, key.1)))?;
-        if migration.checksum != *checksum {
-            return Err(OrmError::Migration(format!(
-                "divergent migration {}:{}",
-                key.0, key.1
-            )));
-        }
-        for dep in &migration.dependencies {
-            if !applied.contains_key(&(dep.app.clone(), dep.name.clone())) {
-                return Err(OrmError::Migration("inconsistent migration history".into()));
-            }
-        }
-    }
     Ok(())
 }
 

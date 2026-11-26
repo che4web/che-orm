@@ -2,6 +2,15 @@
 
 ## 0.4.0 (unreleased)
 
+- Classify migration resources by provider (ORM model, registered SQL table or
+  external key). Add `GenerationPolicy` and SQL table contracts. Generation now
+  requires explicit drop permissions and rejects implicit destructive table
+  replacements with `MigrationError::NeedsManualMigration`.
+
+- Add offline `MigrationGraph::generate` planning for single-registry and per-app
+  layouts. Both template CLIs use the core planner for FK-aware creates, renames
+  and removals, and validate new migration boundaries before writing files.
+
 - **Security / breaking:** require Rust 1.89 and rusqlite 0.41.1 with patched
   bundled SQLite (libsqlite3-sys >=0.39.0, RUSTSEC-2026-0459). Replace the
   version-coupled deadpool-sqlite adapter with an internal manager on deadpool

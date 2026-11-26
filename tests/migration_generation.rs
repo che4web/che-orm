@@ -1,0 +1,474 @@
+use che_orm::{MigrationGraph, MigrationLayout, Model, ProjectState, SchemaSet};
+
+#[derive(Debug, Model)]
+#[orm(table = "parents")]
+struct Parent {
+    #[orm(primary_key)]
+    id: i64,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "children")]
+struct Child {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = Parent)]
+    parent_id: Option<i64>,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "unrelated")]
+struct Unrelated {
+    #[orm(primary_key)]
+    id: i64,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "case_children")]
+struct CaseChild {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(references = "RAW_PARENT(ID)")]
+    parent_id: i64,
+}
+
+#[tokio::test]
+async fn fk_provider_lookup_uses_backend_identifier_rules() {
+    use che_orm::{GenerationPolicy, SchemaObjectKind, SchemaObjectState, SqlTableContract};
+    let mut desired = ProjectState::from_app_schema("a", &SchemaSet::new().model::<CaseChild>());
+    desired
+        .add_schema_object(SchemaObjectState {
+            app: "z".into(),
+            kind: SchemaObjectKind::Table,
+            name: "raw_parent".into(),
+            sql: "CREATE TABLE raw_parent (id INTEGER PRIMARY KEY)".into(),
+        })
+        .unwrap();
+    let g = MigrationGraph::new(vec![]).unwrap();
+    let policy = GenerationPolicy {
+        strict_external: true,
+        sql_tables: [(
+            "raw_parent".into(),
+            SqlTableContract {
+                keys: ["id".into()].into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let result = g.generate_with_policy(&desired, MigrationLayout::PerApp, "initial", &policy);
+    #[cfg(feature = "postgres")]
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("unknown FK target RAW_PARENT(ID)")
+    );
+    #[cfg(feature = "sqlite")]
+    {
+        let files = result.unwrap();
+        assert_eq!(files[0].id.app, "z");
+        assert_eq!(
+            files[1].dependencies.as_slice(),
+            std::slice::from_ref(&files[0].id)
+        );
+        let child = files[1].id.clone();
+        let db = che_orm::Database::connect_in_memory().await.unwrap();
+        let graph = MigrationGraph::new(files).unwrap();
+        assert_eq!(db.migrate_to(graph.clone(), Some(child)).await.unwrap(), 2);
+        assert_eq!(db.migrate(graph).await.unwrap(), 0);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_namespace_includes_generated_indexes() {
+    use che_orm::{MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    for (kind, sql) in [
+        (
+            SchemaObjectKind::Table,
+            "CREATE TABLE PARENTS_IDX_0 (id INTEGER PRIMARY KEY)",
+        ),
+        (
+            SchemaObjectKind::View,
+            "CREATE VIEW PARENTS_IDX_0 AS SELECT 1 AS id",
+        ),
+    ] {
+        let mut desired =
+            ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+        MigrationOperation::AddIndex {
+            table: "parents".into(),
+            columns: vec!["id".into()],
+        }
+        .state_forwards(&mut desired)
+        .unwrap();
+        desired
+            .add_schema_object(SchemaObjectState {
+                app: "raw".into(),
+                kind,
+                name: "PARENTS_IDX_0".into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+        let error = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate(&desired, MigrationLayout::PerApp, "initial")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("models:parents_idx_0") && error.contains("raw:PARENTS_IDX_0"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_reports_both_owners_of_case_colliding_relation_names() {
+    use che_orm::{SchemaObjectKind, SchemaObjectState};
+    for (kind, sql) in [
+        (
+            SchemaObjectKind::Table,
+            "CREATE TABLE PARENTS (id INTEGER PRIMARY KEY)",
+        ),
+        (
+            SchemaObjectKind::View,
+            "CREATE VIEW PARENTS AS SELECT 1 AS id",
+        ),
+    ] {
+        let mut desired =
+            ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+        desired
+            .add_schema_object(SchemaObjectState {
+                app: "raw".into(),
+                kind,
+                name: "PARENTS".into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+        let error = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate(&desired, MigrationLayout::PerApp, "initial")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("models:parents") && error.contains("raw:PARENTS"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn drop_dependent_before_parent_even_when_parent_sorts_first() {
+    let p = SchemaSet::new().model::<Parent>();
+    let c = SchemaSet::new().model::<Child>();
+    let u = SchemaSet::new().model::<Unrelated>();
+    let desired = ProjectState::from_app_schemas([("a", &p), ("b", &u), ("z", &c)]).unwrap();
+    let empty = MigrationGraph::new(vec![]).unwrap();
+    let initial = empty
+        .generate(&desired, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let unrelated = initial.iter().find(|m| m.id.app == "b").unwrap();
+    assert!(unrelated.dependencies.is_empty());
+    assert!(
+        initial
+            .iter()
+            .all(|m| !m.dependencies.contains(&unrelated.id))
+    );
+
+    let desired = ProjectState::from_app_schemas([("b", &u)]).unwrap();
+    let graph = MigrationGraph::new(initial.clone()).unwrap();
+    assert!(matches!(
+        graph.generate(&desired, MigrationLayout::PerApp, "drop_pair"),
+        Err(che_orm::MigrationError::NeedsManualMigration { .. })
+    ));
+    let drops = graph
+        .generate_with_policy(
+            &desired,
+            MigrationLayout::PerApp,
+            "drop_pair",
+            &che_orm::GenerationPolicy {
+                allow_drop: ["children".into(), "parents".into()].into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        drops.iter().map(|m| m.id.app.as_str()).collect::<Vec<_>>(),
+        ["z", "a"]
+    );
+    assert!(drops[1].dependencies.contains(&drops[0].id));
+    assert!(
+        drops
+            .iter()
+            .all(|m| !m.dependencies.contains(&unrelated.id))
+    );
+    let graph = MigrationGraph::new(initial.into_iter().chain(drops).collect()).unwrap();
+    assert!(
+        graph
+            .generate(&desired, MigrationLayout::PerApp, "again")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn sql_contracts_sort_providers_without_linking_independent_apps() {
+    use che_orm::{GenerationPolicy, SchemaObjectKind, SchemaObjectState, SqlTableContract};
+    let mut state =
+        ProjectState::from_app_schema("unrelated", &SchemaSet::new().model::<Unrelated>());
+    for (app, name, definition) in [
+        (
+            "aaa",
+            "child_raw",
+            "id BIGINT PRIMARY KEY, p BIGINT REFERENCES z_parent(id)",
+        ),
+        ("zzz", "z_parent", "id BIGINT PRIMARY KEY"),
+    ] {
+        state
+            .add_schema_object(SchemaObjectState {
+                app: app.into(),
+                kind: SchemaObjectKind::Table,
+                name: name.into(),
+                sql: format!("CREATE TABLE {name} ({definition})"),
+            })
+            .unwrap();
+    }
+    let mut policy = GenerationPolicy {
+        strict_external: true,
+        ..Default::default()
+    };
+    policy.sql_tables.insert(
+        "z_parent".into(),
+        SqlTableContract {
+            keys: ["id".into()].into(),
+            ..Default::default()
+        },
+    );
+    policy.sql_tables.insert(
+        "child_raw".into(),
+        SqlTableContract {
+            keys: ["id".into()].into(),
+            requires: [("z_parent".into(), "id".into())].into(),
+        },
+    );
+    let graph = MigrationGraph::new(vec![]).unwrap();
+    let files = graph
+        .generate_with_policy(&state, MigrationLayout::PerApp, "initial", &policy)
+        .unwrap();
+    let parent = files.iter().find(|m| m.id.app == "zzz").unwrap();
+    let child = files.iter().find(|m| m.id.app == "aaa").unwrap();
+    assert!(parent.dependencies.is_empty());
+    assert_eq!(
+        child.dependencies.as_slice(),
+        std::slice::from_ref(&parent.id)
+    );
+    policy
+        .external_keys
+        .insert(("z_parent".into(), "id".into()));
+    assert!(
+        graph
+            .generate_with_policy(&state, MigrationLayout::PerApp, "initial", &policy)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be external")
+    );
+    policy.external_keys.clear();
+    policy
+        .sql_tables
+        .get_mut("child_raw")
+        .unwrap()
+        .requires
+        .insert(("unknown".into(), "id".into()));
+    assert!(
+        graph
+            .generate_with_policy(&state, MigrationLayout::PerApp, "initial", &policy)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown FK target")
+    );
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "left_table")]
+struct Left {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = Right)]
+    right_id: Option<i64>,
+}
+
+#[derive(Debug, Model)]
+#[orm(table = "right_table")]
+struct Right {
+    #[orm(primary_key)]
+    id: i64,
+    #[orm(foreign_key = Left)]
+    left_id: Option<i64>,
+}
+
+#[test]
+fn cycle_diagnostic_names_both_targets_and_single_history_can_group_them() {
+    let l = SchemaSet::new().model::<Left>();
+    let r = SchemaSet::new().model::<Right>();
+    let desired = ProjectState::from_app_schemas([("a", &l), ("b", &r)]).unwrap();
+    let graph = MigrationGraph::new(vec![]).unwrap();
+    let error = graph
+        .generate(&desired, MigrationLayout::PerApp, "initial")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("a:left_table requires right_table(id)"),
+        "{error}"
+    );
+    assert!(
+        error.contains("b:right_table requires left_table(id)"),
+        "{error}"
+    );
+    let single = graph
+        .generate(&desired, MigrationLayout::Single("shared"), "initial")
+        .unwrap();
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].operations.len(), 2);
+}
+
+#[test]
+fn manual_merge_only_joins_compatible_branches() {
+    use che_orm::{Migration, MigrationId, MigrationOperation};
+    let state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap()
+        .remove(0);
+    let branch = |name: &str, field: &str| {
+        let mut column = state.tables()[0].columns[0].clone();
+        column.name = field.into();
+        column.field_name = field.into();
+        column.primary_key = false;
+        column.nullable = true;
+        Migration::new(
+            MigrationId {
+                app: "app".into(),
+                name: name.into(),
+            },
+            vec![initial.id.clone()],
+            vec![MigrationOperation::AddColumn {
+                table: "parents".into(),
+                column,
+            }],
+        )
+    };
+    let left = branch("0002_left", "a");
+    let right = branch("0002_right", "b");
+    let graph = MigrationGraph::new(vec![initial.clone(), left.clone(), right.clone()]).unwrap();
+    assert!(graph.manual_migration("app", "manual", false).is_err());
+    let merge = graph.manual_migration("app", "merge", true).unwrap();
+    assert_eq!(merge.dependencies, [left.id.clone(), right.id.clone()]);
+    let joined = MigrationGraph::new(vec![
+        initial.clone(),
+        left.clone(),
+        right.clone(),
+        merge.clone(),
+    ])
+    .unwrap();
+    for applied in [left.id.clone(), right.id.clone()] {
+        assert_eq!(
+            joined
+                .plan_forward(&[initial.id.clone(), applied].into(), Some(&merge.id))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    let clashing = branch("0002_right", "a");
+    assert!(
+        MigrationGraph::new(vec![initial.clone(), left.clone(), clashing])
+            .unwrap()
+            .manual_migration("app", "merge", true)
+            .is_err()
+    );
+    let sql = Migration::new(
+        right.id,
+        vec![initial.id.clone()],
+        vec![MigrationOperation::RunSql {
+            forward: "SELECT 1".into(),
+            reverse: None,
+            state_operations: vec![],
+        }],
+    );
+    assert!(
+        MigrationGraph::new(vec![initial, left, sql])
+            .unwrap()
+            .manual_migration("app", "merge", true)
+            .unwrap_err()
+            .to_string()
+            .contains("merge requires review")
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn reusing_index_names_after_an_already_applied_legacy_rename() {
+    use che_orm::{Database, Migration, MigrationId, MigrationOperation};
+    let mut old = ProjectState::from_app_schema("original", &SchemaSet::new().model::<Parent>());
+    MigrationOperation::AddIndex {
+        table: "parents".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut old)
+    .unwrap();
+    let empty = MigrationGraph::new(vec![]).unwrap();
+    let mut files = empty
+        .generate(&old, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let rename = MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "archive".into(),
+    };
+    files.push(Migration::new(
+        MigrationId {
+            app: "original".into(),
+            name: "0002_rename".into(),
+        },
+        vec![files[0].id.clone()],
+        vec![rename],
+    ));
+    let history = MigrationGraph::new(files.clone()).unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(history.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO archive(id) VALUES (17)", vec![])
+        .await
+        .unwrap();
+
+    let mut desired = history.replay(ProjectState::default()).unwrap();
+    let mut replacement = old.models().remove(0);
+    replacement.key.app = "new_app".into();
+    MigrationOperation::CreateModel { model: replacement }
+        .state_forwards(&mut desired)
+        .unwrap();
+    let changes = history
+        .generate(&desired, MigrationLayout::PerApp, "reuse")
+        .unwrap();
+    assert_eq!(changes.len(), 2);
+    assert!(changes[1].dependencies.contains(&changes[0].id));
+    let target = changes[1].id.clone();
+    files.extend(changes);
+    let graph = MigrationGraph::new(files).unwrap();
+    assert_eq!(db.migrate_to(graph.clone(), Some(target)).await.unwrap(), 2);
+    assert_eq!(
+        db.query_sql("SELECT id FROM archive", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        17
+    );
+    assert!(
+        graph
+            .generate(&desired, MigrationLayout::PerApp, "again")
+            .unwrap()
+            .is_empty()
+    );
+}

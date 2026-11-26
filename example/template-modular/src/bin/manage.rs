@@ -1,0 +1,111 @@
+use std::{env, process::ExitCode};
+
+use che_orm::{CurrentDialect, Database};
+
+use template_modular::{migrations, registry, settings::database_url};
+
+#[path = "manage/createapp.rs"]
+mod createapp;
+#[path = "manage/makemigrations.rs"]
+mod makemigrations;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run(env::args().skip(1).collect()).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("manage: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Vec<String>) -> Result<()> {
+    match args.as_slice() {
+        [] => help(),
+        [command] if command == "help" => help(),
+        [command] if command == "schema" => {
+            print!("{}", registry().to_sql::<CurrentDialect>());
+        }
+        [command, options @ ..] if command == "makemigrations" => {
+            makemigrations::run(options)?;
+        }
+        [command, name] if command == "createapp" => {
+            createapp::run(name)?;
+        }
+        [command, app, name] if command == "sqlmigrate" => {
+            let id = che_orm::MigrationId {
+                app: app.clone(),
+                name: name.clone(),
+            };
+            for sql in migrations::graph()?.migration_sql(&id)? {
+                println!("{};", sql.trim_end().trim_end_matches(';'));
+            }
+        }
+        [command, action] if command == "migrate" && action == "status" => {
+            let history = database().await?.migration_history().await?;
+            let graph = migrations::graph()?;
+            che_orm::pending_operation_migrations(&graph, &history).map_err(|e| e.to_string())?;
+            for migration in graph.ordered() {
+                let key = (migration.id.app.clone(), migration.id.name.clone());
+                let marker = if history.contains_key(&key) { "X" } else { " " };
+                println!("[{marker}] {}:{}", migration.id.app, migration.id.name);
+            }
+        }
+        [command, args @ ..] if command == "migrate" => {
+            let plan = args.iter().any(|arg| arg == "--plan");
+            let positional: Vec<_> = args.iter().filter(|arg| arg.as_str() != "--plan").collect();
+            let target = match positional.as_slice() {
+                [] => None,
+                [app, name] => Some(che_orm::MigrationId {
+                    app: app.to_string(),
+                    name: name.to_string(),
+                }),
+                _ => return Err("use migrate [APP NAME] [--plan]".into()),
+            };
+            let graph = migrations::graph()?;
+            let database = database().await?;
+            if plan {
+                let history = database.migration_history().await?;
+                let steps = graph
+                    .pending_to(&history, target.as_ref())
+                    .map_err(|e| e.to_string())?;
+                if steps.is_empty() {
+                    println!("No pending migrations.");
+                }
+                for step in steps {
+                    println!("{}:{}", step.id.app, step.id.name);
+                    for op in &step.operations {
+                        println!("  {}", op.summary());
+                    }
+                }
+            } else {
+                let count = database.migrate_to(graph, target).await?;
+                println!("Applied {count} migration(s).");
+            }
+        }
+        _ => return Err("unknown command; run manage help".into()),
+    }
+    Ok(())
+}
+
+async fn database() -> Result<Database> {
+    let url = database_url();
+    if url.trim().is_empty() {
+        return Err("CHE_ORM_DATABASE_URL must not be empty".into());
+    }
+    #[cfg(feature = "sqlite")]
+    if url == ":memory:" || url == "sqlite://:memory:" {
+        return Err("migration commands require a persistent SQLite file".into());
+    }
+    Ok(Database::connect(url).await?)
+}
+
+fn help() {
+    println!(
+        "Usage: cargo run -p template-modular --bin template-modular-manage -- COMMAND\n\
+         Commands:\n  schema\n  createapp NAME\n  makemigrations [--empty [APP] | --merge [APP]] [--name NAME] [--rename-model APP.Old New] [--rename-field TABLE.old new] [--drop TABLE[.COLUMN]]... [--check | --dry-run]\n  migrate [APP NAME] [--plan]\n  migrate status\n  sqlmigrate APP NAME"
+    );
+}

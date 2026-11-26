@@ -223,7 +223,7 @@ cargo run -p che-orm-examples --bin manage -- migrate
 cargo run -p che-orm-examples --bin manage -- migrate status
 ```
 
-The example ships a frozen `0001_initial` for each of SQLite and PostgreSQL.
+The example ships one Rust migration, `examples:0001_initial_models`, for SQLite and PostgreSQL.
 Its `manage` does not generate migrations. In your application, use
 `manage makemigrations` from the [template](template.md), or maintain your own
 operation registry and apply it through `Database::migrate`.

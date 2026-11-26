@@ -26,7 +26,7 @@ the same async high-level API.
 - [English README](../../README.en.md)
 - [Repository README in Russian](../../README.md)
 - [Russian documentation](../models.md)
-- [Runnable examples](../../che-orm-examples/)
+- [Runnable examples](../../example/)
 - [Contributing](../../CONTRIBUTING.md)
 - [Security policy](../../SECURITY.md)
 - [Release procedure](../releasing.md) and [release checklist](../release-checklist.md)

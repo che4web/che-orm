@@ -48,13 +48,15 @@ cargo run --no-default-features --features {% if backend == "sqlite" %}postgres{
 
 {% if layout == "single" -%}
 - `src/models.rs`: application models in one module.
+- `src/migrations/`: the project's initially empty compiled migration registry.
 {% else -%}
-- `src/apps/tasks/`: the starter app, with its own `AppConfig` and models.
+- `apps/tasks/`: the starter Cargo crate, with its own `AppConfig`, models and
+  initially empty migration registry in `apps/tasks/src/migrations/`.
+- `src/migrations.rs`: combines the registered crates' migrations into one graph.
 {% endif -%}
 - `src/apps/mod.rs`: app registration, extended by `manage createapp`.
 - `src/lib.rs`: `AppConfig` and application registry.
 - `src/settings.rs`: database connection settings.
-- `src/migrations/`: an empty compiled migration registry, ready for your migrations.
 - `src/bin/manage.rs`: schema, migration generation, application and status commands.
 - `src/bin/manage/makemigrations.rs`: application-owned migration generator.
 - `src/bin/manage/createapp.rs`: app module generator.
@@ -68,17 +70,23 @@ cargo run --no-default-features --features {% if backend == "sqlite" %}postgres{
 cargo run --bin manage -- createapp blog
 ```
 
-This creates `src/apps/blog/mod.rs` with `APP_NAME` and an `AppConfig`, a
-`src/apps/blog/models.rs` with naming guidance, and registers the app in
-`src/apps/mod.rs`.
+{% if layout == "single" -%}
+This creates `src/apps/blog/mod.rs` with `APP_NAME` and an `AppConfig`, and
+`src/apps/blog/models.rs` with naming guidance.
+{% else -%}
+This creates `apps/blog/` with its own `Cargo.toml`, `src/lib.rs` (`APP_NAME`
+and `AppConfig`), `src/models.rs` and `src/migrations/`. The command adds the
+new crate as a path dependency in `Cargo.toml`. For a foreign key to a model
+in another crate, add that crate as a dependency of the referencing crate.
+App crates have no default backend. To test the tasks crate on its own, run
+`cargo test -p {{project-name}}-app-tasks --features {{backend}}`.
+{% endif -%}
+The app is registered in `src/apps/mod.rs`.
 Names use snake_case, such as `blog` or `user_accounts`.
-The command works with either layout: `single` keeps the starter models in
-`src/models.rs`; `modular` puts them in `src/apps/tasks/models.rs`.
 
 The app's `APP_NAME` is shared by `AppConfig::name()` and model table names:
 
 ```rust
-// src/apps/blog/models.rs
 #[derive(Debug, che_orm::Model)]
 #[orm(app = super::APP_NAME)]
 pub struct Post {
@@ -98,14 +106,20 @@ cargo run --bin manage -- makemigrations --name add_blog
 cargo run --bin manage -- migrate
 ```
 
+{% if layout == "single" -%}
 All apps share the project's compiled migration registry in `src/migrations/`.
+{% else -%}
+Each crate owns its migration files and numbering. For example, the first blog
+migration goes to `apps/blog/src/migrations/m0001_add_blog.rs`. The root CLI applies
+the combined graph in dependency order, including dependencies between crates.
+{% endif -%}
 Migration operations preserve each model's app ownership. App creation requires
 `rustfmt` and does not connect to the database. Existing app directories are not
 overwritten. Run through `cargo run` so registry changes are compiled before
 creating the next app.
 
-The starter `Task` uses the same pattern and produces `tasks_task`. With `single`,
-its `APP_NAME` is in `src/lib.rs`; with `modular`, it is in `src/apps/tasks/mod.rs`.
+The starter `Task` uses the same pattern and produces `tasks_task`. Its
+`APP_NAME` is in `{% if layout == "single" %}src/lib.rs{% else %}apps/tasks/src/lib.rs{% endif %}`.
 An explicit `#[orm(table = "existing_table")]` preserves an existing table name.
 
 ## Change the schema
@@ -116,15 +130,23 @@ After changing `Task`, generate a follow-up migration:
 
 ```bash
 cargo run --bin manage -- makemigrations --name update_tasks
+cargo run --bin manage -- migrate --plan
+cargo run --bin manage -- sqlmigrate tasks 0002_update_tasks
 cargo run --bin manage -- migrate
 ```
 
 `makemigrations` compares registered models with the replayed compiled history,
-writes `src/migrations/m0002_update_tasks.rs` and updates `src/migrations/mod.rs`.
-It records a dependency on the previous migration without modifying its source.
+writes `m0002_update_tasks.rs`, and updates `mod.rs` in
+`{% if layout == "single" %}src/migrations/{% else %}apps/tasks/src/migrations/{% endif %}`.
+It records dependencies without modifying previously generated migrations.
 Review generated operations before applying them, especially removals and changes
 to existing non-null fields. Data backfills and explicit rename operations may
-need manual edits. Subsequent commands rebuild the management binary automatically.
+need manual edits. Use `--rename-model tasks.Task WorkItem` to confirm a model
+rename and `--rename-field tasks_task.notes description` to confirm a physical
+column rename. For a data migration, `makemigrations --empty tasks --name backfill`
+registers an editable Rust file. After importing two branches into the registry,
+`makemigrations --merge tasks` can join compatible heads. Subsequent commands
+rebuild the management binary automatically.
 
 ```bash
 cargo run --bin manage -- makemigrations --dry-run

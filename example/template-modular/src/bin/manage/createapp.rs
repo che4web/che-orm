@@ -1,0 +1,168 @@
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use template_modular::{apps, registry};
+
+use super::{Result, makemigrations::format_rust};
+
+pub fn run(name: &str) -> Result<()> {
+    let keywords = [
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+        "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match", "mod",
+        "move", "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait",
+        "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+        "register", "che_orm",
+    ];
+    if !name.bytes().next().is_some_and(|c| c.is_ascii_lowercase())
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        || keywords.contains(&name)
+    {
+        return Err("app name must be a non-keyword snake_case Rust identifier".into());
+    }
+    if name == "che_sync" {
+        return Err("che_sync owns infrastructure migrations".into());
+    }
+    if registry().apps().contains(&name) {
+        return Err(format!("app {name} is already registered").into());
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = root.join("src/apps");
+    let lock = dir.join(".createapp.lock");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)?;
+    let _lock = SourceLock(lock);
+    let registry_path = dir.join("mod.rs");
+    let source = fs::read_to_string(&registry_path)?;
+    if source != apps::REGISTRY_SOURCE {
+        return Err(
+            "app registry changed; rebuild manage with cargo run before creating another app"
+                .into(),
+        );
+    }
+    for marker in [
+        "// createapp:modules",
+        "// createapp:register",
+        "// createapp:migrations",
+    ] {
+        if source.matches(marker).count() != 1 {
+            return Err(format!("app registry must contain exactly one {marker} marker").into());
+        }
+    }
+    let source = source
+        .replace(
+            "// createapp:modules",
+            &format!("pub use ::app_{name} as {name};\n// createapp:modules"),
+        )
+        .replace(
+            "// createapp:register",
+            &format!(".register::<{name}::App>()\n// createapp:register"),
+        );
+
+    let source = source.replace(
+        "// createapp:migrations",
+        &format!("source!({name}),\n// createapp:migrations"),
+    );
+    let package = format!("{}-app-{name}", env!("CARGO_PKG_NAME"));
+    let manifest_path = root.join("Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path)?;
+    let mut document = manifest.parse::<toml_edit::DocumentMut>()?;
+    let dependencies = document
+        .get_mut("dependencies")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or("Cargo.toml must contain a dependencies table")?;
+    let alias = format!("app_{name}");
+    if dependencies
+        .iter()
+        .any(|(key, _)| key.replace('-', "_") == alias)
+    {
+        return Err(format!("dependency alias {alias} is already in use in Cargo.toml").into());
+    }
+    let mut dependency = toml_edit::InlineTable::new();
+    dependency.insert("package", package.as_str().into());
+    dependency.insert("path", format!("apps/{name}").into());
+    dependencies.insert(&alias, toml_edit::value(dependency));
+    let updated_manifest = document.to_string();
+
+    let source = format_rust(source)?;
+    let app_source = format_rust(String::from(
+        "pub mod migrations;\npub mod models;\n\nuse che_orm::{AppConfig, SchemaSet};\n\npub const APP_NAME: &str = \"__APP_NAME__\";\n\npub struct App;\n\nimpl AppConfig for App {\n    fn name() -> &'static str {\n        APP_NAME\n    }\n\n    fn schema() -> SchemaSet {\n        SchemaSet::new()\n    }\n}\n",
+    ).replace("__APP_NAME__", name))?;
+
+    let app_dir = root.join("apps").join(name);
+    let model_dir = app_dir.join("src");
+    let migrations = format_rust(super::makemigrations::render_registry([]))?;
+
+    fs::create_dir(&app_dir)?;
+    let result = (|| -> Result<()> {
+        fs::write(
+            app_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = {package:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.89\"\npublish = false\n\n[features]\nsqlite = [\"che-orm/sqlite\"]\npostgres = [\"che-orm/postgres\"]\n\n[dependencies]\nche-orm.workspace = true\n"
+            ),
+        )?;
+        let migration_dir = model_dir.join("migrations");
+        fs::create_dir_all(&migration_dir)?;
+        fs::write(migration_dir.join("mod.rs"), migrations)?;
+        fs::write(model_dir.join("lib.rs"), app_source)?;
+
+        fs::write(
+            model_dir.join("models.rs"),
+            "// Define models here with #[derive(Debug, che_orm::Model)] and\n\
+             // #[orm(app = super::APP_NAME)] for app-prefixed table names.\n\
+             // Register each model in this app's AppConfig::schema.\n",
+        )?;
+
+        replace_source(&manifest_path, &updated_manifest)?;
+        if let Err(error) = replace_source(&registry_path, &source) {
+            replace_source(&manifest_path, &manifest)?;
+            return Err(error);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        // Only this invocation's newly created directory can be removed here.
+        let _ = fs::remove_dir_all(&app_dir);
+    }
+    result?;
+    println!("Created app {name} at {}", app_dir.display());
+    println!(
+        "Add models to its schema, then run cargo run -p template-modular --bin template-modular-manage -- makemigrations."
+    );
+    Ok(())
+}
+
+pub(super) fn replace_source(path: &Path, source: &str) -> Result<()> {
+    let file_name = path.file_name().ok_or("missing source file name")?;
+    let temporary = path.with_file_name(format!(".{}.tmp", file_name.to_string_lossy()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let result = (|| -> Result<()> {
+        file.write_all(source.as_bytes())?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+struct SourceLock(PathBuf);
+
+impl Drop for SourceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
