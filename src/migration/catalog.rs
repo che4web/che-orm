@@ -1,7 +1,7 @@
 //! Generation metadata, deliberately separate from frozen migration operations.
 use super::*;
 
-// Internal identity only. DDL, migration IDs and checksums keep their original spelling.
+// Namespace keys for identifiers that can differ in case, such as columns and views.
 pub(super) fn physical_key(name: &str) -> String {
     #[cfg(feature = "sqlite")]
     {
@@ -22,14 +22,6 @@ pub(super) fn same_name(a: &str, b: &str) -> bool {
     {
         a == b
     }
-}
-
-pub(super) fn model_key<'s>(state: &'s ProjectState, table: &str) -> Option<&'s ModelKey> {
-    state
-        .model_keys
-        .iter()
-        .find(|(name, _)| same_name(name, table))
-        .map(|(_, key)| key)
 }
 
 pub(super) fn has_key(table: &TableState, column: &str) -> bool {
@@ -68,14 +60,13 @@ pub(super) struct Catalog<'a> {
     desired: &'a ProjectState,
     pub policy: &'a GenerationPolicy,
     external: BTreeSet<(String, String)>,
-    contracts: BTreeMap<String, &'a SqlTableContract>,
 }
 
 fn sql_table<'a>(state: &'a ProjectState, name: &str) -> Option<&'a SchemaObjectState> {
     state
         .objects()
         .iter()
-        .find(|o| o.kind == SchemaObjectKind::Table && same_name(&o.name, name))
+        .find(|o| o.kind == SchemaObjectKind::Table && o.name == name)
 }
 
 impl<'a> Catalog<'a> {
@@ -93,29 +84,34 @@ impl<'a> Catalog<'a> {
         let owned = |name: &str| {
             [old, desired]
                 .iter()
-                .any(|s| model_key(s, name).is_some() || sql_table(s, name).is_some())
+                .any(|s| s.model_keys.contains_key(name) || sql_table(s, name).is_some())
         };
-        let mut contracts = BTreeMap::new();
-        for (table, contract) in &policy.sql_tables {
+        for (table, _) in policy.rename_columns.keys() {
+            validate_migration_table_name(table)?;
+        }
+        for resource in &policy.allow_drop {
+            let table = resource
+                .split_once('.')
+                .map_or(resource.as_str(), |(table, _)| table);
+            validate_migration_table_name(table)?;
+        }
+        for table in policy.sql_tables.keys() {
+            validate_migration_table_name(table)?;
             if sql_table(old, table).is_none() && sql_table(desired, table).is_none() {
                 return Err(MigrationError::InvalidState(format!(
                     "SQL contract has no registered table: {table}"
                 )));
             }
-            if contracts.insert(physical_key(table), contract).is_some() {
-                return Err(MigrationError::InvalidState(format!(
-                    "duplicate SQL contract for {table}"
-                )));
-            }
         }
         let mut external = BTreeSet::new();
         for (table, key) in &policy.external_keys {
+            validate_migration_table_name(table)?;
             if owned(table) {
                 return Err(MigrationError::InvalidState(format!(
                     "{table} is registered and cannot be external"
                 )));
             }
-            external.insert((physical_key(table), physical_key(key)));
+            external.insert((table.clone(), physical_key(key)));
         }
         let references = [old, desired]
             .into_iter()
@@ -129,10 +125,11 @@ impl<'a> Catalog<'a> {
                     .flat_map(|c| c.requires.iter().map(|(t, k)| (t.as_str(), k.as_str()))),
             );
         for (table, key) in references {
+            validate_migration_table_name(table)?;
             if owned(table) {
                 continue;
             }
-            let target = (physical_key(table), physical_key(key));
+            let target = (table.to_owned(), physical_key(key));
             if policy.strict_external && !external.contains(&target) {
                 return Err(MigrationError::InvalidState(format!(
                     "unknown FK target {table}({key}); register its provider or declare an external key"
@@ -144,7 +141,6 @@ impl<'a> Catalog<'a> {
             desired,
             policy,
             external,
-            contracts,
         };
         catalog.validate_requirements(desired)?;
         Ok(catalog)
@@ -154,7 +150,7 @@ impl<'a> Catalog<'a> {
     /// tables without key metadata still have a known provider; the DB checks
     /// their key at execution, just as it does for external requirements.
     pub fn available(&self, state: &ProjectState, table: &str, key: &str) -> bool {
-        if let Some(t) = state.tables().iter().find(|t| same_name(&t.name, table)) {
+        if let Some(t) = state.tables().iter().find(|t| t.name == table) {
             return has_key(t, key);
         }
         if sql_table(state, table).is_some() {
@@ -163,15 +159,15 @@ impl<'a> Catalog<'a> {
                 .is_none_or(|c| c.keys.iter().any(|k| same_name(k, key)));
         }
         self.external
-            .contains(&(physical_key(table), physical_key(key)))
+            .contains(&(table.to_owned(), physical_key(key)))
     }
 
     pub fn contract(&self, table: &str) -> Option<&SqlTableContract> {
-        self.contracts.get(&physical_key(table)).copied()
+        self.policy.sql_tables.get(table)
     }
 
     pub fn desired_model(&self, table: &str) -> Option<&ModelKey> {
-        model_key(self.desired, table)
+        self.desired.model_keys.get(table)
     }
 
     /// Validate the complete desired catalog even when the schema diff is empty,

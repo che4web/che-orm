@@ -734,7 +734,7 @@ fn schema_validation_rejects_invalid_metadata() {
     };
     assert!(matches!(
         invalid_schema.validate(),
-        Err(crate::SchemaError::InvalidIdentifier(_))
+        Err(crate::SchemaError::InvalidTableName(_))
     ));
 }
 

@@ -4,6 +4,10 @@ Migrations belong to the application and compile with it. The ORM applies
 `MigrationOperation` values and records identities and checksums in database
 history. Changing a model alone does not update an existing schema.
 
+Physical table names must match `[a-z_][a-z0-9_]*`. The rule applies to
+models, registered SQL tables, foreign key targets in metadata, and rename
+operations. Write the unquoted name in metadata. SQL may quote that name.
+
 ## Generate Migrations in Your Application
 
 The easiest starting point is the [application template](template.md). It includes
@@ -22,6 +26,14 @@ The generator compares registered models with the state replayed from previous
 migrations, not with the live database. It writes a numbered Rust module and
 updates `mod.rs` in the corresponding migration directory.
 Generation needs no database connection, but requires `rustfmt`.
+
+Initial generation orders individual operations by their dependencies,
+including references to registered SQL tables and views. If new models in
+different apps form a cycle, the generator can add their foreign keys in a
+second phase after creating the tables. Views and triggers temporarily dropped
+for a table rebuild are restored in the same migration. Each registered SQL
+object uses one `CREATE` statement. A SQLite trigger body can contain several
+commands.
 
 | Template layout | Where migrations live | How they are applied |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 //! Offline planning for newly generated migrations. Historical operations and
 //! checksums are inputs, never regenerated from the current model definitions.
-use super::catalog::{Catalog, has_key, model_key, physical_key, same_name};
+use super::catalog::{Catalog, has_key, same_name};
 use super::*;
 
 /// File ownership for generated migrations. Model ownership is always retained.
@@ -162,6 +162,161 @@ impl MigrationGraph {
         }
     }
 
+    /// Plans initial files against existing history. For mutually dependent
+    /// new models, it can install tables before adding cross-app foreign keys.
+    pub fn generate_initial(
+        &self,
+        desired: &ProjectState,
+        label: &str,
+    ) -> Result<Vec<Migration>, MigrationError> {
+        let historical = self.replay(ProjectState::default())?;
+        let layout = MigrationLayout::PerApp;
+        let error = match self.generate(desired, layout, label) {
+            Ok(files) => return Ok(files),
+            Err(error) => error,
+        };
+
+        // A cycle between new models can be broken by installing those tables
+        // before their cross-app foreign keys. Both phases use the regular
+        // planner, including ordering and dependencies for SQL objects.
+        let mut staged = desired.clone();
+        let mut deferred = false;
+        for table in &mut staged.tables {
+            let Some(owner) = staged.model_keys.get(&table.name) else {
+                continue;
+            };
+            if historical.model_keys.contains_key(&table.name) {
+                continue;
+            }
+            for column in &mut table.columns {
+                if let Some((target, _)) = column
+                    .references
+                    .as_ref()
+                    .and_then(ForeignKeyState::target_parts)
+                    && staged
+                        .model_keys
+                        .get(target)
+                        .is_some_and(|provider| provider.app != owner.app)
+                    && !historical.model_keys.contains_key(target)
+                {
+                    column.references = None;
+                    deferred = true;
+                }
+            }
+        }
+        if !deferred {
+            return Err(error);
+        }
+        staged
+            .objects
+            .retain(|object| object.kind == SchemaObjectKind::Table);
+        staged.objects.extend(
+            historical
+                .objects
+                .iter()
+                .filter(|object| object.kind != SchemaObjectKind::Table)
+                .cloned(),
+        );
+        let Ok(mut files) = self.generate(&staged, layout, label) else {
+            return Err(error);
+        };
+        let base = MigrationGraph::new(
+            self.ordered()
+                .cloned()
+                .chain(files.iter().cloned())
+                .collect(),
+        )?;
+        files.extend(base.generate(desired, layout, "relationships")?);
+        Ok(files)
+    }
+
+    /// Plans a single application's changes against the compiled history of
+    /// other apps. Historical dependent objects can be temporarily removed
+    /// and restored in the same file when a table needs rebuilding.
+    pub fn generate_for_app(
+        &self,
+        desired: &ProjectState,
+        app: &str,
+        name: &str,
+        policy: &GenerationPolicy,
+    ) -> Result<Vec<Migration>, MigrationError> {
+        let mut selected = self.replay(ProjectState::default())?;
+        selected.tables.retain(|table| {
+            selected
+                .model_keys
+                .get(&table.name)
+                .is_none_or(|key| key.app != app)
+        });
+        selected.model_keys.retain(|_, key| key.app != app);
+        selected.objects.retain(|object| object.app != app);
+        for model in desired
+            .models()
+            .into_iter()
+            .filter(|model| model.key.app == app)
+        {
+            for (target, _) in targets(&model.table.columns) {
+                if let Some(owner) = table_owner(desired, target)
+                    && owner != app
+                    && table_owner(&selected, target) != Some(owner)
+                {
+                    return Err(invalid(format!(
+                        "foreign key on {} needs a migration for application {owner}; generate and register it first",
+                        model.table.name
+                    )));
+                }
+            }
+            MigrationOperation::CreateModel { model }.state_forwards(&mut selected)?;
+        }
+        for object in desired.objects().iter().filter(|object| object.app == app) {
+            for table in desired.tables().iter().map(|table| &table.name).chain(
+                desired
+                    .objects()
+                    .iter()
+                    .filter(|provider| provider.kind == SchemaObjectKind::Table)
+                    .map(|provider| &provider.name),
+            ) {
+                if sql_dependencies::references(object, table)
+                    && !selected
+                        .tables()
+                        .iter()
+                        .any(|candidate| candidate.name == *table)
+                    && !selected.objects().iter().any(|candidate| {
+                        candidate.kind == SchemaObjectKind::Table && candidate.name == *table
+                    })
+                    && !desired.objects().iter().any(|candidate| {
+                        candidate.app == app
+                            && candidate.kind == SchemaObjectKind::Table
+                            && candidate.name == *table
+                    })
+                {
+                    return Err(invalid(format!(
+                        "schema object {} requires table {table}; generate and register its migration first",
+                        object.name
+                    )));
+                }
+            }
+            for provider in desired
+                .objects()
+                .iter()
+                .filter(|provider| provider.kind == SchemaObjectKind::View && provider.app != app)
+            {
+                if references_view(object, provider)
+                    && !selected.objects().iter().any(|candidate| {
+                        candidate.kind == SchemaObjectKind::View
+                            && same_name(&candidate.name, &provider.name)
+                    })
+                {
+                    return Err(invalid(format!(
+                        "schema object {} requires view {}; generate and register its migration first",
+                        object.name, provider.name
+                    )));
+                }
+            }
+            selected.add_schema_object(object.clone())?;
+        }
+        self.generate_with_policy(&selected, MigrationLayout::Single(app), name, policy)
+    }
+
     /// Generate only new migrations, in application order, without I/O. Each
     /// file is checked with the selected backend's schema editor. This checks
     /// structural prerequisites, not constraints on existing row values.
@@ -298,8 +453,9 @@ impl MigrationGraph {
             accesses.push((m.id.clone(), access(&m.operations, &mut cursor, &catalog)?));
         }
         let mut generated = Vec::new();
+        let groups = atomic_schema_replacements(groups, &historical);
         let mut before = historical;
-        for (app, operations) in groups {
+        for (app, operations, aliases) in groups {
             let graph = MigrationGraph::new(history.clone())?;
             let touched = access(&operations, &mut cursor, &catalog)?;
             let mut dependencies: BTreeSet<_> = accesses
@@ -336,8 +492,35 @@ impl MigrationGraph {
             before = validate_file(&before, &migration.operations, &catalog)?;
             accesses.push((migration.id.clone(), touched));
             history.push(migration.clone());
+            let anchor = migration.id.clone();
             generated.push(migration);
+            for app in aliases {
+                let graph = MigrationGraph::new(history.clone())?;
+                let mut dependencies: BTreeSet<_> = graph
+                    .app_heads(&app)
+                    .iter()
+                    .map(|head| head.id.clone())
+                    .collect();
+                dependencies.insert(anchor.clone());
+                let alias = Migration::new(
+                    graph.next_id(&app, name)?,
+                    dependencies.into_iter().collect(),
+                    vec![],
+                );
+                history.push(alias.clone());
+                generated.push(alias);
+            }
         }
+        self.validate_generated_history(history, desired, &catalog)?;
+        Ok(generated)
+    }
+
+    fn validate_generated_history(
+        &self,
+        history: Vec<Migration>,
+        desired: &ProjectState,
+        catalog: &Catalog<'_>,
+    ) -> Result<(), MigrationError> {
         let graph = MigrationGraph::new(history)?;
         graph.validate_heads()?;
         // The graph may order independent files differently than the generator.
@@ -349,13 +532,13 @@ impl MigrationGraph {
                     op.state_forwards(&mut replayed)?;
                 }
             } else {
-                replayed = validate_file(&replayed, &file.operations, &catalog)?;
+                replayed = validate_file(&replayed, &file.operations, catalog)?;
             }
         }
         if !replayed.diff(desired)?.is_empty() {
             return Err(invalid("generated history differs from registered schema"));
         }
-        Ok(generated)
+        Ok(())
     }
 }
 
@@ -545,13 +728,13 @@ impl SqliteIndexOrigins {
             match op {
                 RenameTable { old_name, new_name } => {
                     let origin = self.0.remove(old_name).unwrap_or_else(|| old_name.clone());
-                    if !origin.eq_ignore_ascii_case(new_name) {
+                    if origin != *new_name {
                         self.0.insert(new_name.clone(), origin);
                     }
                 }
                 RenameSqliteIndexes {
                     table, to_table, ..
-                } if !table.eq_ignore_ascii_case(to_table) => {
+                } if table != to_table => {
                     self.0.insert(table.clone(), to_table.clone());
                 }
                 DropTable { name } | RenameSqliteIndexes { table: name, .. } => {
@@ -576,10 +759,8 @@ impl SqliteIndexOrigins {
         }
         let mut wanted = BTreeSet::new();
         for table in desired.tables() {
-            wanted.insert(table.name.to_ascii_lowercase());
-            wanted.extend(
-                (0..table.indexes.len()).map(|i| index_name(&table.name, i).to_ascii_lowercase()),
-            );
+            wanted.insert(table.name.clone());
+            wanted.extend((0..table.indexes.len()).map(|i| index_name(&table.name, i)));
         }
         wanted.extend(
             desired
@@ -594,9 +775,7 @@ impl SqliteIndexOrigins {
             let Some(from_table) = self.0.get(table) else {
                 continue;
             };
-            if (0..schema.indexes.len())
-                .any(|i| wanted.contains(&index_name(from_table, i).to_ascii_lowercase()))
-            {
+            if (0..schema.indexes.len()).any(|i| wanted.contains(&index_name(from_table, i))) {
                 let owner = history
                     .model_keys
                     .get(table)
@@ -632,6 +811,111 @@ fn append_group(
     } else {
         groups.push((owner.to_owned(), ops));
     }
+}
+
+// A target may stop at any migration file. Keep the full interval from
+// removing a schema object to installing its replacement in the same file.
+// If the interval includes work owned by several apps, give each affected app
+// a target that depends on the file where the operations actually run.
+type AtomicGroup = (String, Vec<MigrationOperation>, BTreeSet<String>);
+
+fn atomic_schema_replacements(
+    groups: Vec<(String, Vec<MigrationOperation>)>,
+    historical: &ProjectState,
+) -> Vec<AtomicGroup> {
+    let operations: Vec<_> = groups
+        .into_iter()
+        .flat_map(|(app, ops)| {
+            ops.into_iter()
+                .map(move |operation| (app.clone(), operation))
+        })
+        .collect();
+    let historical: BTreeMap<_, _> = historical
+        .objects()
+        .iter()
+        .map(|object| ((object.kind, object.name.as_str()), object))
+        .collect();
+    let mut removed = BTreeMap::new();
+    let mut intervals = BTreeMap::new();
+    let mut temporary = BTreeSet::new();
+    for (index, (_, operation)) in operations.iter().enumerate() {
+        match operation {
+            MigrationOperation::DropSchemaObject { kind, name }
+                if *kind != SchemaObjectKind::Table =>
+            {
+                removed.insert((*kind, name.as_str()), index);
+            }
+            MigrationOperation::CreateSchemaObject { object } => {
+                let key = (object.kind, object.name.as_str());
+                if let Some(start) = removed.remove(&key) {
+                    intervals.insert(start, index);
+                    // An unchanged object is borrowed for the model change.
+                    // The owning application needs no new target of its own.
+                    if historical.get(&key) == Some(&object) {
+                        temporary.insert(start);
+                        temporary.insert(index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut result: Vec<AtomicGroup> = Vec::new();
+    let mut start = 0;
+    while start < operations.len() {
+        if let Some(&end) = intervals.get(&start) {
+            let mut end = end;
+            let mut cursor = start + 1;
+            while cursor <= end {
+                if let Some(&overlap) = intervals.get(&cursor) {
+                    end = end.max(overlap);
+                }
+                cursor += 1;
+            }
+            let batch = &operations[start..=end];
+            let owner = batch
+                .iter()
+                .find(|(_, operation)| {
+                    !matches!(
+                        operation,
+                        MigrationOperation::DropSchemaObject { .. }
+                            | MigrationOperation::CreateSchemaObject { .. }
+                    )
+                })
+                .unwrap_or(&batch[0])
+                .0
+                .clone();
+            let aliases = batch
+                .iter()
+                .enumerate()
+                .filter(|(offset, (app, _))| {
+                    app != &owner && !temporary.contains(&(start + offset))
+                })
+                .map(|(_, (app, _))| app.clone())
+                .collect();
+            result.push((
+                owner,
+                batch
+                    .iter()
+                    .map(|(_, operation)| operation.clone())
+                    .collect(),
+                aliases,
+            ));
+            start = end + 1;
+        } else {
+            let (app, operation) = &operations[start];
+            if let Some((last_app, last_ops, aliases)) = result.last_mut()
+                && last_app == app
+                && aliases.is_empty()
+            {
+                last_ops.push(operation.clone());
+            } else {
+                result.push((app.clone(), vec![operation.clone()], BTreeSet::new()));
+            }
+            start += 1;
+        }
+    }
+    result
 }
 
 fn invalid(message: impl Into<String>) -> MigrationError {
@@ -696,13 +980,34 @@ fn missing_targets<'a>(
                 _ => false,
             });
             let available =
-                model_key(state, table) == Some(key) && catalog.available(state, table, col);
+                state.model_keys.get(table) == Some(key) && catalog.available(state, table, col);
             !(supplied || available)
         })
         .collect()
 }
 
 type Step = (String, Vec<MigrationOperation>, ProjectState);
+
+fn table_owner<'a>(state: &'a ProjectState, name: &str) -> Option<&'a str> {
+    state
+        .model_keys
+        .get(name)
+        .map(|key| key.app.as_str())
+        .or_else(|| {
+            state
+                .objects()
+                .iter()
+                .find(|object| object.kind == SchemaObjectKind::Table && object.name == name)
+                .map(|object| object.app.as_str())
+        })
+}
+
+fn requires_schema_object(object: &SchemaObjectState, provider: &SchemaObjectState) -> bool {
+    references_view(object, provider)
+        || (provider.kind == SchemaObjectKind::Table
+            && object != provider
+            && sql_dependencies::references(object, &provider.name))
+}
 
 fn next_step(
     state: &ProjectState,
@@ -732,10 +1037,13 @@ fn next_step(
         if let StateChange::CreateSchemaObject(object) = change
             && changes.iter().any(|other| {
                 matches!(other, StateChange::CreateSchemaObject(provider)
-                if references_view(object, provider))
+                if requires_schema_object(object, provider))
             })
         {
-            blocked.push(format!("{} needs another pending view", object.name));
+            blocked.push(format!(
+                "{} needs another pending schema object",
+                object.name
+            ));
             continue;
         }
         let owner = layout.file_owner(change.app());
@@ -747,7 +1055,7 @@ fn next_step(
             };
             // PostgreSQL can defer a target created in the same file. Follow
             // the closure, including reciprocal FKs, but never mix owners.
-            if let Some(target) = changes.iter().find(|c| matches!(c, StateChange::CreateModel(m) if same_name(&m.table.name, table) && layout.file_owner(c.app()) == owner))
+            if let Some(target) = changes.iter().find(|c| matches!(c, StateChange::CreateModel(m) if m.table.name == table && layout.file_owner(c.app()) == owner))
                 && !group.contains(&target) {
                 group.push(target);
             } else {
@@ -768,11 +1076,11 @@ fn next_step(
             {
                 let from = origins.0.get(old_name).unwrap_or(old_name);
                 let indexes = &state.tables[table_index(state, old_name)?].indexes;
-                if !indexes.is_empty() && !from.eq_ignore_ascii_case(new_name) {
+                if !indexes.is_empty() && from != new_name {
                     // A table and index cannot share a SQLite name, even briefly.
                     // Release the target *before* ALTER TABLE if an index owns it.
-                    let before_rename = (0..indexes.len())
-                        .any(|i| index_name(from, i).eq_ignore_ascii_case(new_name));
+                    let before_rename =
+                        (0..indexes.len()).any(|i| index_name(from, i) == *new_name);
                     let indexes = MigrationOperation::RenameSqliteIndexes {
                         table: if before_rename { old_name } else { new_name }.clone(),
                         from_table: from.clone(),
@@ -861,22 +1169,22 @@ fn access(
             }
             | CreateTable { table } => {
                 a.reads
-                    .extend(targets(&table.columns).map(|(t, _)| physical_key(t)));
+                    .extend(targets(&table.columns).map(|(t, _)| t.to_owned()));
                 &table.name
             }
             RenameTable { old_name, new_name } => {
-                a.writes.insert(physical_key(old_name));
+                a.writes.insert(old_name.clone());
                 // A table rename implicitly rewrites all existing inbound FKs.
                 for t in state.tables() {
-                    if targets(&t.columns).any(|(target, _)| same_name(target, old_name)) {
-                        a.writes.insert(physical_key(&t.name));
+                    if targets(&t.columns).any(|(target, _)| target == old_name) {
+                        a.writes.insert(t.name.clone());
                     }
                 }
                 new_name
             }
             AddColumn { table, column } => {
                 a.reads
-                    .extend(targets(std::slice::from_ref(column)).map(|(t, _)| physical_key(t)));
+                    .extend(targets(std::slice::from_ref(column)).map(|(t, _)| t.to_owned()));
                 table
             }
             AlterColumn {
@@ -886,14 +1194,14 @@ fn access(
             } => {
                 for c in [old_column, new_column] {
                     a.reads
-                        .extend(targets(std::slice::from_ref(c)).map(|(t, _)| physical_key(t)));
+                        .extend(targets(std::slice::from_ref(c)).map(|(t, _)| t.to_owned()));
                 }
                 table
             }
             DropTable { name } => {
                 let old = &state.tables[table_index(state, name)?];
                 a.reads
-                    .extend(targets(&old.columns).map(|(t, _)| physical_key(t)));
+                    .extend(targets(&old.columns).map(|(t, _)| t.to_owned()));
                 name
             }
             RemoveColumn { table, column } => {
@@ -902,7 +1210,7 @@ fn access(
                     targets(std::slice::from_ref(
                         &old.columns[column_index(old, column)?],
                     ))
-                    .map(|(t, _)| physical_key(t)),
+                    .map(|(t, _)| t.to_owned()),
                 );
                 table
             }
@@ -911,9 +1219,9 @@ fn access(
             } => {
                 for t in state.tables() {
                     if targets(&t.columns)
-                        .any(|(target, col)| same_name(target, table) && same_name(col, old_name))
+                        .any(|(target, col)| target == table && same_name(col, old_name))
                     {
-                        a.writes.insert(physical_key(&t.name));
+                        a.writes.insert(t.name.clone());
                     }
                 }
                 table
@@ -925,8 +1233,8 @@ fn access(
             } => {
                 let schema = &state.tables[table_index(state, table)?];
                 for i in 0..schema.indexes.len() {
-                    a.writes.insert(physical_key(&index_name(from_table, i)));
-                    a.writes.insert(physical_key(&index_name(to_table, i)));
+                    a.writes.insert(index_name(from_table, i));
+                    a.writes.insert(index_name(to_table, i));
                 }
                 table
             }
@@ -950,7 +1258,7 @@ fn access(
             } => {
                 if let Some(contract) = catalog.contract(name) {
                     a.reads
-                        .extend(contract.requires.iter().map(|(t, _)| physical_key(t)));
+                        .extend(contract.requires.iter().map(|(t, _)| t.clone()));
                 } else {
                     a.opaque = true;
                 }
@@ -970,13 +1278,13 @@ fn access(
         if let DropTable { name } | RemoveIndex { table: name, .. } = op {
             let before = &state.tables[table_index(state, name)?];
             a.writes
-                .extend((0..before.indexes.len()).map(|i| physical_key(&index_name(name, i))));
+                .extend((0..before.indexes.len()).map(|i| index_name(name, i)));
         }
-        a.writes.insert(physical_key(table));
+        a.writes.insert(table.clone());
         op.state_forwards(state)?;
         if let Some(schema) = state.tables().iter().find(|t| t.name == *table) {
             for i in 0..schema.indexes.len() {
-                a.writes.insert(physical_key(&index_name(table, i)));
+                a.writes.insert(index_name(table, i));
             }
         }
     }

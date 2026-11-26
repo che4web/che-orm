@@ -85,7 +85,16 @@ pub(crate) async fn apply(
                         .batch("SET LOCAL standard_conforming_strings = on")
                         .await?;
                     reject_transaction_control(sql)?;
-                    session.batch(sql).await?;
+                    if matches!(operation, MigrationOperation::CreateSchemaObject { .. }) {
+                        session
+                            .execute(CompiledQuery {
+                                sql: sql.clone(),
+                                params: vec![],
+                            })
+                            .await?;
+                    } else {
+                        session.batch(sql).await?;
+                    }
                 }
                 if let MigrationOperation::AlterColumn {
                     table, old_column, ..

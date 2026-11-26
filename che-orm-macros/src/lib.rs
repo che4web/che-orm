@@ -1351,14 +1351,21 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
     }
 
     let table = if let Some(table) = table {
-        validate_identifier(&table.value(), table.span(), "table")?;
+        validate_table_identifier(&table.value(), table.span(), "table")?;
         quote!(#table)
     } else if let Some(app) = app {
+        if let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) = &app
+        {
+            validate_table_identifier(&value.value(), value.span(), "app")?;
+        }
         let model_name = LitStr::new(
             &snake_case(&input.ident.unraw().to_string()),
             input.ident.span(),
         );
-        validate_identifier(&model_name.value(), model_name.span(), "model table suffix")?;
+        validate_table_identifier(&model_name.value(), model_name.span(), "model table suffix")?;
         // Each expression has its own scope, so generated names cannot collide with
         // application items. The compiler evaluates and validates constant paths.
         quote!({
@@ -1371,9 +1378,9 @@ fn parse_model_attributes(input: &DeriveInput) -> syn::Result<ModelAttributes> {
                 let mut i = 0;
                 while i < app.len() {
                     assert!(
-                        app[i] == b'_' || app[i].is_ascii_alphabetic()
+                        app[i] == b'_' || app[i].is_ascii_lowercase()
                             || (i > 0 && app[i].is_ascii_digit()),
-                        "invalid app identifier: expected ASCII letters, digits or underscores, starting with a letter or underscore",
+                        "invalid app identifier: expected lowercase ASCII letters, digits or underscores, starting with a lowercase letter or underscore",
                     );
                     bytes[i] = app[i];
                     i += 1;
@@ -1644,6 +1651,21 @@ fn validate_identifier(identifier: &str, span: proc_macro2::Span, kind: &str) ->
     }
 }
 
+fn validate_table_identifier(
+    identifier: &str,
+    span: proc_macro2::Span,
+    kind: &str,
+) -> syn::Result<()> {
+    validate_identifier(identifier, span, kind)?;
+    if identifier.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(Error::new(
+            span,
+            format!("invalid {kind} identifier: {identifier}; expected lowercase ASCII"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_reference(reference: &str, span: proc_macro2::Span) -> syn::Result<()> {
     let Some((table, column)) = reference.split_once('(') else {
         return Err(Error::new(
@@ -1657,7 +1679,7 @@ fn validate_reference(reference: &str, span: proc_macro2::Span) -> syn::Result<(
             "references must use `table(column)` format",
         ));
     };
-    validate_identifier(table, span, "referenced table")?;
+    validate_table_identifier(table, span, "referenced table")?;
     validate_identifier(column, span, "referenced column")
 }
 

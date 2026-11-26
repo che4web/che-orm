@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: invalid app identifier: expected ASCII letters, digits or underscores, starting with a letter or underscore
+error[E0080]: evaluation panicked: invalid app identifier: expected lowercase ASCII letters, digits or underscores, starting with a lowercase letter or underscore
  --> tests/ui/model_invalid_app_const.rs:5:17
   |
 5 | #[derive(Debug, Model)]

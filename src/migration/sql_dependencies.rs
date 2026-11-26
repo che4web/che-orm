@@ -46,6 +46,28 @@ impl Token<'_> {
     }
 }
 
+fn after_block_comment(mut sql: &str) -> &str {
+    let mut depth = 1;
+    while let Some(index) = sql.find(['/', '*']) {
+        sql = &sql[index..];
+        if let Some(tail) = sql.strip_prefix("*/") {
+            depth -= 1;
+            if depth == 0 {
+                return tail;
+            }
+            sql = tail;
+        } else if cfg!(feature = "postgres")
+            && let Some(tail) = sql.strip_prefix("/*")
+        {
+            depth += 1;
+            sql = tail;
+        } else {
+            sql = &sql[1..];
+        }
+    }
+    ""
+}
+
 fn tokens(mut sql: &str) -> Vec<Token<'_>> {
     let mut result = Vec::new();
     while !sql.is_empty() {
@@ -54,7 +76,7 @@ fn tokens(mut sql: &str) -> Vec<Token<'_>> {
             continue;
         }
         if let Some(comment) = sql.strip_prefix("/*") {
-            sql = comment.find("*/").map_or("", |n| &comment[n + 2..]);
+            sql = after_block_comment(comment);
             continue;
         }
         if cfg!(feature = "postgres")
@@ -76,7 +98,7 @@ fn tokens(mut sql: &str) -> Vec<Token<'_>> {
             sql = &sql[1..];
         }
         let c = sql.chars().next().unwrap();
-        if matches!(c, '\'' | '"' | '`' | '[') {
+        if matches!(c, '\'' | '"') || cfg!(feature = "sqlite") && matches!(c, '`' | '[') {
             let end = if c == '[' { ']' } else { c };
             let body = &sql[c.len_utf8()..];
             let mut rest = body;
@@ -124,6 +146,37 @@ fn tokens(mut sql: &str) -> Vec<Token<'_>> {
         }
     }
     result
+}
+
+// SQLite's own completeness scanner understands the semicolons inside
+// CREATE TRIGGER ... BEGIN ... END. The remaining tokens must be empty.
+#[cfg(feature = "sqlite")]
+pub(super) fn is_single_statement(sql: &str) -> bool {
+    if sql.contains('\0') {
+        return false;
+    }
+    for (end, _) in sql.match_indices(';') {
+        let Ok(prefix) = std::ffi::CString::new(&sql[..=end]) else {
+            return false;
+        };
+        // SAFETY: prefix is a valid, NUL-terminated string for this call.
+        if unsafe { crate::rusqlite::ffi::sqlite3_complete(prefix.as_ptr()) } != 0 {
+            return tokens(&sql[end + 1..])
+                .iter()
+                .all(|token| matches!(token, Token::Symbol(';')));
+        }
+    }
+    true
+}
+
+#[cfg(feature = "postgres")]
+pub(super) fn is_single_statement(sql: &str) -> bool {
+    let tokens = tokens(sql);
+    tokens
+        .iter()
+        .skip_while(|token| !matches!(token, Token::Symbol(';')))
+        .all(|token| matches!(token, Token::Symbol(';')))
+        && !sql.contains('\0')
 }
 
 pub(super) fn mentions_identifier(sql: &str, name: &str) -> bool {

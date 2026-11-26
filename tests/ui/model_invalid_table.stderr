@@ -1,0 +1,11 @@
+error: invalid table identifier: Tasks; expected lowercase ASCII
+ --> tests/ui/model_invalid_table.rs:4:15
+  |
+4 | #[orm(table = "Tasks")]
+  |               ^^^^^^^
+
+error: invalid table identifier: "tasks"
+  --> tests/ui/model_invalid_table.rs:11:15
+   |
+11 | #[orm(table = "\"tasks\"")]
+   |               ^^^^^^^^^^^

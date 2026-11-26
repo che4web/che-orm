@@ -76,6 +76,7 @@ pub use tokio_postgres;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod backend;
 mod datetime;
+mod generated_key;
 mod image;
 mod json;
 pub mod migration;
@@ -85,6 +86,7 @@ mod row;
 mod schema;
 mod sql;
 mod sync;
+mod trigger;
 mod types;
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -95,6 +97,7 @@ mod bound_query;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use bound_query::BoundQuery;
 
+pub use generated_key::{SqliteGeneratedKey, SqliteKeySequence};
 pub use image::ImageField;
 pub use migration::*;
 pub use query::*;
@@ -102,6 +105,7 @@ pub use row::*;
 pub use schema::*;
 pub use sql::*;
 pub use sync::*;
+pub use trigger::{SqliteGuard, TriggerCondition, TriggerField};
 pub use types::*;
 pub use uuid::Uuid;
 

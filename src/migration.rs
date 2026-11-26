@@ -288,7 +288,7 @@ pub struct ProjectState {
 }
 
 impl ProjectState {
-    /// Builds migration state from model-generated schema metadata.
+    /// Builds table-only migration state from model-generated metadata.
     pub fn from_schema(schema: &SchemaSet) -> Self {
         Self {
             tables: schema.tables().iter().map(TableState::from).collect(),
@@ -299,6 +299,7 @@ impl ProjectState {
 
     /// Builds a historical state for models owned by one application. Model
     /// identity remains stable when a subsequent migration renames its table.
+    /// Use [`Self::from_app_schemas`] to include registered SQLite definitions.
     pub fn from_app_schema(app: impl Into<String>, schema: &SchemaSet) -> Self {
         let app = app.into();
         let tables: Vec<_> = schema.tables().iter().map(TableState::from).collect();
@@ -328,8 +329,15 @@ impl ProjectState {
     ) -> Result<Self, MigrationError> {
         let mut state = Self::default();
         let mut sync_registrations = Vec::new();
+        let mut sqlite_definitions = Vec::new();
         for (app, schema) in schemas {
             sync_registrations.extend_from_slice(schema.sync_models());
+            sqlite_definitions.extend(
+                schema
+                    .sqlite_definitions
+                    .iter()
+                    .map(|definition| (app, definition)),
+            );
             let app_state = Self::from_app_schema(app, schema);
             let mut keys: BTreeSet<_> = state.model_keys.values().cloned().collect();
             for key in app_state.model_keys.values() {
@@ -340,6 +348,7 @@ impl ProjectState {
                 }
             }
             for table in app_state.tables {
+                validate_migration_table(&table)?;
                 if state
                     .tables
                     .iter()
@@ -354,7 +363,69 @@ impl ProjectState {
         for operation in crate::sync_migration_operations(&sync_registrations)? {
             operation.state_forwards(&mut state)?;
         }
+        if !sqlite_definitions.is_empty() && !cfg!(feature = "sqlite") {
+            return Err(MigrationError::InvalidState(
+                "SQLite definitions require the SQLite backend".into(),
+            ));
+        }
+        state.add_sqlite_definitions(sqlite_definitions, &sync_registrations, true)?;
         Ok(state)
+    }
+
+    pub(crate) fn add_sqlite_definitions<'a>(
+        &mut self,
+        definitions: impl IntoIterator<Item = (&'a str, &'a crate::schema::SqliteDefinition)>,
+        sync_registrations: &[crate::SyncRegistration],
+        check_ownership: bool,
+    ) -> Result<(), MigrationError> {
+        use crate::schema::SqliteDefinition;
+
+        let definitions: Vec<_> = definitions.into_iter().collect();
+        let check_owner = |state: &Self, app: &str, table: &str, model: &str| {
+            if check_ownership
+                && !state
+                    .model_keys
+                    .get(table)
+                    .is_some_and(|key| key.app == app && key.name == model)
+            {
+                return Err(MigrationError::InvalidState(format!(
+                    "SQLite definition target {table} must be a model owned by {app}"
+                )));
+            }
+            Ok(())
+        };
+        let mut sequences = BTreeMap::new();
+        for &(app, definition) in &definitions {
+            if let SqliteDefinition::Sequence(sequence) = definition {
+                check_owner(self, app, sequence.parent_id.table, sequence.parent_model)?;
+                self.add_schema_object(sequence.compile(app, self)?)?;
+                sequences.insert(&sequence.name, sequence);
+            }
+        }
+        for (app, definition) in definitions {
+            let objects = match definition {
+                SqliteDefinition::Sequence(_) => continue,
+                SqliteDefinition::Guard(guard) => {
+                    check_owner(self, app, guard.table, guard.model_name)?;
+                    guard.compile(app, self)?
+                }
+                SqliteDefinition::GeneratedKey(key) => {
+                    check_owner(self, app, key.key.table, key.model_name)?;
+                    if sequences.get(&key.sequence.name) != Some(&&key.sequence) {
+                        return Err(MigrationError::InvalidState(format!(
+                            "generated key on {} requires matching sequence registration {}",
+                            key.key.table, key.sequence.name
+                        )));
+                    }
+                    key.validate_sync_registration(sync_registrations)?;
+                    key.compile(app, self)?
+                }
+            };
+            for object in objects {
+                self.add_schema_object(object)?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns tables in their current schema order.
@@ -376,6 +447,7 @@ impl ProjectState {
     pub fn validate(&self) -> Result<(), MigrationError> {
         let mut names = BTreeSet::new();
         for table in &self.tables {
+            validate_migration_table(table)?;
             if !names.insert(&table.name) {
                 return Err(MigrationError::DuplicateTable(table.name.clone()));
             }
@@ -386,14 +458,6 @@ impl ProjectState {
                         table: table.name.clone(),
                         column: column.name.clone(),
                     });
-                }
-                if let Some(reference) = &column.references
-                    && parse_reference(&reference.target).is_none()
-                {
-                    return Err(MigrationError::InvalidState(format!(
-                        "invalid reference {}",
-                        reference.target
-                    )));
                 }
             }
             for constraint in table.indexes.iter().chain(&table.unique_constraints) {
@@ -599,19 +663,7 @@ impl ProjectState {
         old_name: &str,
         new_name: &str,
     ) -> Result<(), MigrationError> {
-        #[cfg(feature = "sqlite")]
-        if old_name.eq_ignore_ascii_case(new_name) {
-            return Err(MigrationError::NeedsManualMigration {
-                resource: old_name.into(),
-                reason: format!(
-                    "SQLite requires an intermediate table name for a case-only rename to {new_name}"
-                ),
-            });
-        }
-        let old_name_reused = desired
-            .tables()
-            .iter()
-            .any(|t| catalog::same_name(&t.name, old_name))
+        let old_name_reused = desired.tables().iter().any(|t| t.name == old_name)
             || desired.objects().iter().any(|o| {
                 o.kind != SchemaObjectKind::Trigger && catalog::same_name(&o.name, old_name)
             });
@@ -666,6 +718,32 @@ fn changed_tables(changes: &[StateChange]) -> BTreeSet<String> {
         .collect()
 }
 
+fn validate_migration_table_name(name: &str) -> Result<(), MigrationError> {
+    crate::schema::validate_table_name(name).map_err(|_| {
+        MigrationError::InvalidState(format!(
+            "invalid table name {name:?}; expected [a-z_][a-z0-9_]*"
+        ))
+    })
+}
+
+fn validate_migration_reference(column: &ColumnState) -> Result<(), MigrationError> {
+    if let Some(reference) = &column.references {
+        let (table, _) = parse_reference(&reference.target).ok_or_else(|| {
+            MigrationError::InvalidState(format!("invalid reference {}", reference.target))
+        })?;
+        validate_migration_table_name(table)?;
+    }
+    Ok(())
+}
+
+fn validate_migration_table(table: &TableState) -> Result<(), MigrationError> {
+    validate_migration_table_name(&table.name)?;
+    table
+        .columns
+        .iter()
+        .try_for_each(validate_migration_reference)
+}
+
 fn validate_schema_object(object: &SchemaObjectState) -> Result<(), MigrationError> {
     if object.app.trim().is_empty() || object.name.trim().is_empty() || object.sql.trim().is_empty()
     {
@@ -680,11 +758,24 @@ fn validate_schema_object(object: &SchemaObjectState) -> Result<(), MigrationErr
         ))
     })?;
     let kind = header.kind;
-    let name = header.name();
+    let name = if kind == SchemaObjectKind::Table {
+        validate_migration_table_name(&object.name)?;
+        let name = header.table_name();
+        validate_migration_table_name(name)?;
+        name
+    } else {
+        header.name()
+    };
     if kind != object.kind || name != object.name {
         return Err(MigrationError::InvalidState(format!(
             "schema object SQL creates {:?} {name}, expected {:?} {}",
             kind, object.kind, object.name
+        )));
+    }
+    if !sql_dependencies::is_single_statement(&object.sql) {
+        return Err(MigrationError::InvalidState(format!(
+            "schema object {} requires exactly one CREATE statement; put multiple statements in RunSql",
+            object.name
         )));
     }
     Ok(())
@@ -727,6 +818,23 @@ struct SchemaObjectHeader<'a> {
 }
 
 impl SchemaObjectHeader<'_> {
+    fn table_name(&self) -> &str {
+        let end = self
+            .declaration
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .unwrap_or(self.declaration.len());
+        let token = &self.declaration[..end];
+        for (open, close) in [('"', '"'), ('`', '`'), ('[', ']')] {
+            if let Some(name) = token
+                .strip_prefix(open)
+                .and_then(|name| name.strip_suffix(close))
+            {
+                return name;
+            }
+        }
+        token
+    }
+
     fn name(&self) -> &str {
         self.declaration
             .split_whitespace()
@@ -1698,10 +1806,9 @@ impl MigrationOperation {
                 to_table,
             } => {
                 table_index(state, table)?;
-                if to_table.eq_ignore_ascii_case(from_table)
-                    || from_table.is_empty()
-                    || to_table.is_empty()
-                {
+                validate_migration_table_name(from_table)?;
+                validate_migration_table_name(to_table)?;
+                if to_table == from_table {
                     return Err(MigrationError::InvalidState(format!(
                         "invalid index rename on {table} from {from_table} to {to_table}"
                     )));
@@ -1746,6 +1853,7 @@ impl MigrationOperation {
                     .insert(model.table.name.clone(), model.key.clone());
             }
             Self::CreateTable { table } => {
+                validate_migration_table(table)?;
                 if state
                     .tables
                     .iter()
@@ -1767,6 +1875,7 @@ impl MigrationOperation {
                 state.model_keys.remove(name);
             }
             Self::AddColumn { table, column } => {
+                validate_migration_reference(column)?;
                 let table = table_mut(state, table)?;
                 if table
                     .columns
@@ -1807,6 +1916,7 @@ impl MigrationOperation {
                 table.columns.remove(index);
             }
             Self::RenameTable { old_name, new_name } => {
+                validate_migration_table_name(new_name)?;
                 if state.tables.iter().any(|table| table.name == *new_name) {
                     return Err(MigrationError::DuplicateTable(new_name.clone()));
                 }
@@ -1866,6 +1976,7 @@ impl MigrationOperation {
                 old_column,
                 new_column,
             } => {
+                validate_migration_reference(new_column)?;
                 if old_column.name != new_column.name {
                     return Err(MigrationError::AlteredColumnRenamed {
                         table: table.clone(),
@@ -1997,6 +2108,7 @@ impl MigrationOperation {
 }
 
 fn table_index(state: &ProjectState, name: &str) -> Result<usize, MigrationError> {
+    validate_migration_table_name(name)?;
     state
         .tables
         .iter()
@@ -2036,7 +2148,7 @@ fn inbound_reference(
             table.columns.iter().find_map(|column| {
                 let reference = column.references.as_ref()?;
                 let (table_name, column_name) = parse_reference(&reference.target)?;
-                (catalog::same_name(table_name, target_table)
+                (table_name == target_table
                     && target_column
                         .is_none_or(|target_column| catalog::same_name(column_name, target_column)))
                 .then(|| (table.name.clone(), column.name.clone()))
@@ -2064,7 +2176,7 @@ fn rename_reference_table(reference: &str, old_name: &str, new_name: &str) -> St
     let Some((table, column)) = parse_reference(reference) else {
         return reference.into();
     };
-    if catalog::same_name(table, old_name) {
+    if table == old_name {
         format!("{new_name}({column})")
     } else {
         reference.into()
@@ -2080,7 +2192,7 @@ fn rename_reference_column(
     let Some((table, column)) = parse_reference(reference) else {
         return reference.into();
     };
-    if catalog::same_name(table, table_name) && catalog::same_name(column, old_name) {
+    if table == table_name && catalog::same_name(column, old_name) {
         format!("{table_name}({new_name})")
     } else {
         reference.into()
@@ -2719,10 +2831,8 @@ fn rebuild_table_statements(
     let new_table = &after.tables[table_index(after, table_name)?];
     let mut occupied = reserved.clone();
     for table in before.tables() {
-        occupied.insert(table.name.to_ascii_lowercase());
-        occupied.extend(
-            (0..table.indexes.len()).map(|i| index_name(&table.name, i).to_ascii_lowercase()),
-        );
+        occupied.insert(table.name.clone());
+        occupied.extend((0..table.indexes.len()).map(|i| index_name(&table.name, i)));
     }
     occupied.extend(
         before
@@ -2733,7 +2843,7 @@ fn rebuild_table_statements(
     let base = format!("__che_migration_new_{table_name}");
     let mut temporary_name = base.clone();
     let mut suffix = 0;
-    while occupied.contains(&temporary_name.to_ascii_lowercase()) {
+    while occupied.contains(&temporary_name) {
         suffix += 1;
         temporary_name = format!("{base}_{suffix}");
     }
@@ -2930,7 +3040,7 @@ fn sqlite_column_type(column_type: ColumnType) -> &'static str {
     }
 }
 
-fn quote_identifier(identifier: &str) -> String {
+pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
@@ -3006,7 +3116,12 @@ mod tests {
             app: "items".into(),
             kind: SchemaObjectKind::Trigger,
             name: "items_assign_key".into(),
-            sql: "CREATE TRIGGER items_assign_key AFTER INSERT ON items BEGIN SELECT 1; END".into(),
+            sql: if cfg!(feature = "sqlite") {
+                "CREATE TRIGGER items_assign_key AFTER INSERT ON items BEGIN SELECT 1; END"
+            } else {
+                "CREATE TRIGGER items_assign_key AFTER INSERT ON items EXECUTE FUNCTION assign_key()"
+            }
+            .into(),
         };
         let migration = Migration::new(
             MigrationId {
@@ -3038,14 +3153,18 @@ mod tests {
             app: "items".into(),
             kind: SchemaObjectKind::Trigger,
             name: "items_guard".into(),
-            sql: "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 1; END".into(),
+            sql: if cfg!(feature = "sqlite") {
+                "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 1; END"
+            } else {
+                "CREATE TRIGGER items_guard BEFORE INSERT ON items EXECUTE FUNCTION guard_1()"
+            }
+            .into(),
         };
         let mut current = ProjectState::default();
         current.add_schema_object(old.clone()).unwrap();
         let mut desired = ProjectState::default();
         let mut changed = old.clone();
-        changed.sql =
-            "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 2; END".into();
+        changed.sql = old.sql.replace('1', "2");
         desired.add_schema_object(changed.clone()).unwrap();
         assert_eq!(
             current.diff(&desired).unwrap(),
@@ -3072,7 +3191,12 @@ mod tests {
             app: "items".into(),
             kind: SchemaObjectKind::Trigger,
             name: "items_guard".into(),
-            sql: "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 1; END".into(),
+            sql: if cfg!(feature = "sqlite") {
+                "CREATE TRIGGER items_guard BEFORE INSERT ON items BEGIN SELECT 1; END"
+            } else {
+                "CREATE TRIGGER items_guard BEFORE INSERT ON items EXECUTE FUNCTION guard_1()"
+            }
+            .into(),
         };
         let before = ProjectState {
             tables: vec![table.clone()],

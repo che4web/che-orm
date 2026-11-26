@@ -175,10 +175,14 @@ fn apply_single_operation_migration(
                         },
                     )?;
                 }
-                let result = plan
-                    .statements
-                    .iter()
-                    .try_for_each(|statement| connection.execute_batch(statement));
+                let result = plan.statements.iter().try_for_each(|statement| {
+                    if matches!(operation, MigrationOperation::CreateSchemaObject { .. }) {
+                        connection.prepare(statement)?.execute([])?;
+                        Ok(())
+                    } else {
+                        connection.execute_batch(statement)
+                    }
+                });
                 if normalizing {
                     connection.remove_function("che_datetime_utc", 1)?;
                 }

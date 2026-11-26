@@ -6,6 +6,9 @@ use crate::{
 };
 
 pub trait SqlDialect {
+    /// Whether this dialect can render registered SQLite triggers.
+    const SUPPORTS_SQLITE_TRIGGERS: bool = false;
+
     fn identifier(identifier: &str, output: &mut String) {
         output.push_str(identifier);
     }
@@ -64,6 +67,8 @@ impl SqlDialect for PostgresDialect {
 
 pub struct SqliteDialect;
 impl SqlDialect for SqliteDialect {
+    const SUPPORTS_SQLITE_TRIGGERS: bool = true;
+
     fn offset_without_limit(output: &mut String) {
         output.push_str(" LIMIT -1");
     }

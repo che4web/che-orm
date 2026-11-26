@@ -28,7 +28,7 @@ struct Unrelated {
 struct CaseChild {
     #[orm(primary_key)]
     id: i64,
-    #[orm(references = "RAW_PARENT(ID)")]
+    #[orm(references = "raw_parent(ID)")]
     parent_id: i64,
 }
 
@@ -63,7 +63,7 @@ async fn fk_provider_lookup_uses_backend_identifier_rules() {
         result
             .unwrap_err()
             .to_string()
-            .contains("unknown FK target RAW_PARENT(ID)")
+            .contains("requires raw_parent(ID)")
     );
     #[cfg(feature = "sqlite")]
     {
@@ -85,13 +85,15 @@ async fn fk_provider_lookup_uses_backend_identifier_rules() {
 #[test]
 fn sqlite_namespace_includes_generated_indexes() {
     use che_orm::{MigrationOperation, SchemaObjectKind, SchemaObjectState};
-    for (kind, sql) in [
+    for (kind, name, sql) in [
         (
             SchemaObjectKind::Table,
-            "CREATE TABLE PARENTS_IDX_0 (id INTEGER PRIMARY KEY)",
+            "parents_idx_0",
+            "CREATE TABLE parents_idx_0 (id INTEGER PRIMARY KEY)",
         ),
         (
             SchemaObjectKind::View,
+            "PARENTS_IDX_0",
             "CREATE VIEW PARENTS_IDX_0 AS SELECT 1 AS id",
         ),
     ] {
@@ -107,7 +109,7 @@ fn sqlite_namespace_includes_generated_indexes() {
             .add_schema_object(SchemaObjectState {
                 app: "raw".into(),
                 kind,
-                name: "PARENTS_IDX_0".into(),
+                name: name.into(),
                 sql: sql.into(),
             })
             .unwrap();
@@ -117,7 +119,7 @@ fn sqlite_namespace_includes_generated_indexes() {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("models:parents_idx_0") && error.contains("raw:PARENTS_IDX_0"),
+            error.contains("models:parents_idx_0") && error.contains(&format!("raw:{name}")),
             "{error}"
         );
     }
@@ -127,36 +129,25 @@ fn sqlite_namespace_includes_generated_indexes() {
 #[test]
 fn sqlite_reports_both_owners_of_case_colliding_relation_names() {
     use che_orm::{SchemaObjectKind, SchemaObjectState};
-    for (kind, sql) in [
-        (
-            SchemaObjectKind::Table,
-            "CREATE TABLE PARENTS (id INTEGER PRIMARY KEY)",
-        ),
-        (
-            SchemaObjectKind::View,
-            "CREATE VIEW PARENTS AS SELECT 1 AS id",
-        ),
-    ] {
-        let mut desired =
-            ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
-        desired
-            .add_schema_object(SchemaObjectState {
-                app: "raw".into(),
-                kind,
-                name: "PARENTS".into(),
-                sql: sql.into(),
-            })
-            .unwrap();
-        let error = MigrationGraph::new(vec![])
-            .unwrap()
-            .generate(&desired, MigrationLayout::PerApp, "initial")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("models:parents") && error.contains("raw:PARENTS"),
-            "{error}"
-        );
-    }
+
+    let mut desired = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+    desired
+        .add_schema_object(SchemaObjectState {
+            app: "raw".into(),
+            kind: SchemaObjectKind::View,
+            name: "PARENTS".into(),
+            sql: "CREATE VIEW PARENTS AS SELECT 1 AS id".into(),
+        })
+        .unwrap();
+    let error = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&desired, MigrationLayout::PerApp, "initial")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("models:parents") && error.contains("raw:PARENTS"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -525,7 +516,7 @@ async fn reusing_index_names_after_an_already_applied_legacy_rename() {
                 let mut replacement = old.models().remove(0);
                 replacement.key.app = "new_app".into();
                 if claim == "model table" {
-                    replacement.table.name = "PARENTS_IDX_0".into();
+                    replacement.table.name = "parents_idx_0".into();
                     replacement.table.indexes.clear();
                 }
                 MigrationOperation::CreateModel { model: replacement }
@@ -663,18 +654,18 @@ fn table_rename_requires_review_for_surviving_raw_foreign_keys_and_stale_views()
         (
             SchemaObjectKind::Table,
             "raw_child",
-            "CREATE TABLE raw_child (parent_id INTEGER REFERENCES \"project-parents\"(id))",
+            "CREATE TABLE raw_child (parent_id INTEGER REFERENCES \"project_parents\"(id))",
         ),
         (
             SchemaObjectKind::View,
             "parent_ids",
-            "CREATE VIEW parent_ids AS SELECT id FROM \"project-parents\"",
+            "CREATE VIEW parent_ids AS SELECT id FROM \"project_parents\"",
         ),
     ] {
         let mut desired = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
         MigrationOperation::RenameTable {
             old_name: "parents".into(),
-            new_name: "project-parents".into(),
+            new_name: "project_parents".into(),
         }
         .state_forwards(&mut desired)
         .unwrap();
@@ -692,7 +683,7 @@ fn table_rename_requires_review_for_surviving_raw_foreign_keys_and_stale_views()
             .unwrap();
         let graph = MigrationGraph::new(files).unwrap();
         MigrationOperation::RenameTable {
-            old_name: "project-parents".into(),
+            old_name: "project_parents".into(),
             new_name: "archive".into(),
         }
         .state_forwards(&mut desired)
@@ -700,7 +691,7 @@ fn table_rename_requires_review_for_surviving_raw_foreign_keys_and_stale_views()
         if kind == SchemaObjectKind::Table {
             let mut replacement = desired.models().remove(0);
             replacement.key.name = "Replacement".into();
-            replacement.table.name = "project-parents".into();
+            replacement.table.name = "project_parents".into();
             MigrationOperation::CreateModel { model: replacement }
                 .state_forwards(&mut desired)
                 .unwrap();
@@ -714,25 +705,14 @@ fn table_rename_requires_review_for_surviving_raw_foreign_keys_and_stale_views()
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_rejects_case_only_table_renames_and_colliding_column_names() {
-    use che_orm::{MigrationError, MigrationOperation};
+fn sqlite_rejects_colliding_column_names() {
+    use che_orm::MigrationOperation;
     let original = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
     let files = MigrationGraph::new(vec![])
         .unwrap()
         .generate(&original, MigrationLayout::PerApp, "initial")
         .unwrap();
     let graph = MigrationGraph::new(files).unwrap();
-    let mut renamed = original.clone();
-    MigrationOperation::RenameTable {
-        old_name: "parents".into(),
-        new_name: "Parents".into(),
-    }
-    .state_forwards(&mut renamed)
-    .unwrap();
-    assert!(
-        matches!(graph.generate(&renamed, MigrationLayout::PerApp, "rename"),
-        Err(MigrationError::NeedsManualMigration { resource, .. }) if resource == "parents")
-    );
     let mut column = original.tables()[0].columns[0].clone();
     column.name = "ID".into();
     column.primary_key = false;
@@ -807,12 +787,12 @@ async fn rebuild_restores_transitive_views_before_they_are_queried() {
 }
 
 #[test]
-fn renamed_table_is_checked_against_final_view_sql_and_bare_unicode_fk() {
+fn renamed_table_is_checked_against_final_view_sql_and_bare_fk() {
     use che_orm::{MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState};
     let mut state = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
     MigrationOperation::RenameTable {
         old_name: "parents".into(),
-        new_name: "задачи".into(),
+        new_name: "work_items".into(),
     }
     .state_forwards(&mut state)
     .unwrap();
@@ -829,10 +809,10 @@ fn renamed_table_is_checked_against_final_view_sql_and_bare_unicode_fk() {
                 app: "models".into(),
                 name: "child".into(),
                 kind: SchemaObjectKind::Table,
-                sql: "CREATE TABLE child (pid INTEGER REFERENCES задачи(id))".into(),
+                sql: "CREATE TABLE child (pid INTEGER REFERENCES work_items(id))".into(),
             }
         } else {
-            view("CREATE VIEW report AS SELECT id FROM задачи")
+            view("CREATE VIEW report AS SELECT id FROM work_items")
         };
         desired.add_schema_object(object.clone()).unwrap();
         let history = MigrationGraph::new(
@@ -843,7 +823,7 @@ fn renamed_table_is_checked_against_final_view_sql_and_bare_unicode_fk() {
         )
         .unwrap();
         MigrationOperation::RenameTable {
-            old_name: "задачи".into(),
+            old_name: "work_items".into(),
             new_name: "tickets".into(),
         }
         .state_forwards(&mut desired)
@@ -863,7 +843,7 @@ fn renamed_table_is_checked_against_final_view_sql_and_bare_unicode_fk() {
             .unwrap();
             desired
                 .add_schema_object(view(
-                    "CREATE VIEW report AS SELECT id AS task_id FROM задачи",
+                    "CREATE VIEW report AS SELECT id AS task_id FROM work_items",
                 ))
                 .unwrap();
         }
@@ -1551,4 +1531,328 @@ fn sqlite_checks_dependent_views_before_removing_allowed_columns() {
     .state_forwards(&mut state)
     .unwrap();
     assert!(!generate(&state).unwrap().is_empty());
+}
+
+#[test]
+fn migrations_reject_invalid_table_names_before_changing_state() {
+    use che_orm::{MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let original = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    for name in [
+        "Parents",
+        "parent-items",
+        "\"parents\"",
+        "1parents",
+        "parent items",
+        "задачи",
+    ] {
+        let mut state = original.clone();
+        let mut model = state.models().remove(0);
+        model.key.name = "Another".into();
+        model.table.name = name.into();
+        let create = MigrationOperation::CreateModel { model };
+        let rename = MigrationOperation::RenameTable {
+            old_name: "parents".into(),
+            new_name: name.into(),
+        };
+        for operation in [create, rename] {
+            let error = operation
+                .state_forwards(&mut state)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("expected [a-z_][a-z0-9_]*"), "{error}");
+            assert_eq!(state, original);
+        }
+    }
+
+    let mut state = original.clone();
+    let object = |sql: &str| SchemaObjectState {
+        app: "app".into(),
+        kind: SchemaObjectKind::Table,
+        name: "audit_1".into(),
+        sql: sql.into(),
+    };
+    assert!(
+        state
+            .add_schema_object(object("CREATE TABLE \"\"\"audit_1\"\"\" (id INTEGER)"))
+            .is_err()
+    );
+    assert!(
+        state
+            .add_schema_object(object("CREATE TABLE Audit_1 (id INTEGER)"))
+            .is_err()
+    );
+    assert_eq!(state, original);
+    state
+        .add_schema_object(object("CREATE TABLE \"audit_1\"(id INTEGER)"))
+        .unwrap();
+}
+
+#[test]
+fn planner_requires_lowercase_table_names_in_options_and_contracts() {
+    use che_orm::{GenerationPolicy, SchemaObjectKind, SchemaObjectState, SqlTableContract};
+
+    let mut desired = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    desired
+        .add_schema_object(SchemaObjectState {
+            app: "app".into(),
+            kind: SchemaObjectKind::Table,
+            name: "audit".into(),
+            sql: "CREATE TABLE audit (id INTEGER PRIMARY KEY)".into(),
+        })
+        .unwrap();
+
+    let graph = MigrationGraph::new(vec![]).unwrap();
+    let invalid_policies = [
+        GenerationPolicy {
+            allow_drop: ["Parents.id".into()].into(),
+            ..Default::default()
+        },
+        GenerationPolicy {
+            rename_columns: [(("\"parents\"".into(), "id".into()), "pk".into())].into(),
+            ..Default::default()
+        },
+        GenerationPolicy {
+            external_keys: [("external-parent".into(), "id".into())].into(),
+            ..Default::default()
+        },
+        GenerationPolicy {
+            sql_tables: [("Audit".into(), SqlTableContract::default())].into(),
+            ..Default::default()
+        },
+        GenerationPolicy {
+            sql_tables: [(
+                "audit".into(),
+                SqlTableContract {
+                    requires: [("Parents".into(), "id".into())].into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        },
+    ];
+    for policy in invalid_policies {
+        let error = graph
+            .generate_with_policy(&desired, MigrationLayout::PerApp, "initial", &policy)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("expected [a-z_][a-z0-9_]*"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn registered_schema_objects_require_one_create_statement() {
+    use che_orm::{SchemaObjectKind, SchemaObjectState};
+    let mut state = ProjectState::default();
+    let table = |sql: &str| SchemaObjectState {
+        app: "app".into(),
+        kind: SchemaObjectKind::Table,
+        name: "safe_table".into(),
+        sql: sql.into(),
+    };
+    let error = state
+        .add_schema_object(table(
+            "CREATE TABLE safe_table (id INTEGER); CREATE TABLE \"Bad-Name\" (id INTEGER)",
+        ))
+        .unwrap_err();
+    assert!(error.to_string().contains("exactly one CREATE statement"));
+    assert!(state.objects().is_empty());
+    state
+        .add_schema_object(table(
+            "CREATE TABLE safe_table (label TEXT DEFAULT ';'); -- trailing comment",
+        ))
+        .unwrap();
+
+    #[cfg(feature = "sqlite")]
+    state
+        .add_schema_object(SchemaObjectState {
+            app: "app".into(),
+            kind: SchemaObjectKind::Trigger,
+            name: "safe_insert".into(),
+            sql: "CREATE TRIGGER safe_insert AFTER INSERT ON safe_table \
+                  BEGIN SELECT ';'; SELECT 1; END; -- trailing comment"
+                .into(),
+        })
+        .unwrap();
+
+    #[cfg(feature = "postgres")]
+    state
+        .add_schema_object(SchemaObjectState {
+            app: "app".into(),
+            kind: SchemaObjectKind::View,
+            name: "safe_report".into(),
+            sql: "CREATE VIEW safe_report AS SELECT ARRAY[1] AS ids; /* outer /* inner */ ; comment */"
+                .into(),
+        })
+        .unwrap();
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn target_rebuild_restores_unchanged_cross_app_view_in_the_same_migration() {
+    use che_orm::{Database, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let mut desired = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+    desired
+        .add_schema_object(SchemaObjectState {
+            app: "reports".into(),
+            kind: SchemaObjectKind::View,
+            name: "parent_report".into(),
+            sql: "CREATE VIEW parent_report AS SELECT id FROM parents".into(),
+        })
+        .unwrap();
+    let mut files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate_initial(&desired, "initial")
+        .unwrap();
+    let historical = MigrationGraph::new(files.clone()).unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(historical.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO parents VALUES (42)", vec![])
+        .await
+        .unwrap();
+    MigrationOperation::AddIndex {
+        table: "parents".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut desired)
+    .unwrap();
+
+    let changes = historical
+        .generate(&desired, MigrationLayout::PerApp, "index")
+        .unwrap();
+    let [change] = changes.as_slice() else {
+        panic!("expected one atomic migration")
+    };
+    assert_eq!(change.id.app, "models");
+    assert!(matches!(
+        change.operations.as_slice(),
+        [
+            MigrationOperation::DropSchemaObject { .. },
+            MigrationOperation::AddIndex { .. },
+            MigrationOperation::CreateSchemaObject { .. },
+        ]
+    ));
+    let mut changed_view = desired.clone();
+    let mut view = changed_view.objects()[0].clone();
+    MigrationOperation::DropSchemaObject {
+        kind: view.kind,
+        name: view.name.clone(),
+    }
+    .state_forwards(&mut changed_view)
+    .unwrap();
+    view.sql = "CREATE VIEW parent_report AS SELECT id + 1 AS id FROM parents".into();
+    changed_view.add_schema_object(view).unwrap();
+    let changes_with_view = historical
+        .generate(&changed_view, MigrationLayout::PerApp, "index")
+        .unwrap();
+    let [batch, reports_target] = changes_with_view.as_slice() else {
+        panic!("expected the atomic batch and a reports target")
+    };
+    assert_eq!(batch.id.app, "models");
+    assert_eq!(reports_target.id.app, "reports");
+    assert!(reports_target.operations.is_empty());
+    assert!(reports_target.dependencies.contains(&batch.id));
+
+    let target = change.id.clone();
+    files.extend(changes);
+    let graph = MigrationGraph::new(files).unwrap();
+    assert_eq!(db.migrate_to(graph.clone(), Some(target)).await.unwrap(), 1);
+    assert_eq!(
+        db.query_sql("SELECT id FROM parent_report", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        42
+    );
+    assert_eq!(db.migrate(graph).await.unwrap(), 0);
+}
+
+#[test]
+fn initial_and_scoped_generation_resolve_foreign_keys_to_registered_sql_tables() {
+    use che_orm::{GenerationPolicy, SchemaObjectKind, SchemaObjectState};
+    let mut desired =
+        ProjectState::from_app_schema("consumer", &SchemaSet::new().model::<CaseChild>());
+    desired
+        .add_schema_object(SchemaObjectState {
+            app: "provider".into(),
+            kind: SchemaObjectKind::Table,
+            name: "raw_parent".into(),
+            sql: "CREATE TABLE raw_parent (\"ID\" INTEGER PRIMARY KEY)".into(),
+        })
+        .unwrap();
+    let empty = MigrationGraph::new(vec![]).unwrap();
+    let files = empty.generate_initial(&desired, "initial").unwrap();
+    let [provider, consumer] = files.as_slice() else {
+        panic!("expected two migrations")
+    };
+    assert_eq!(provider.id.app, "provider");
+    assert_eq!(consumer.dependencies, vec![provider.id.clone()]);
+    let policy = GenerationPolicy::default();
+    let error = empty
+        .generate_for_app(&desired, "consumer", "initial", &policy)
+        .unwrap_err();
+    assert!(error.to_string().contains("generate and register it first"));
+    let scoped = MigrationGraph::new(vec![provider.clone()])
+        .unwrap()
+        .generate_for_app(&desired, "consumer", "initial", &policy)
+        .unwrap();
+    assert_eq!(scoped[0].dependencies, vec![provider.id.clone()]);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn initial_migrations_order_cross_app_objects_by_actual_dependencies() {
+    use che_orm::{Database, SchemaObjectKind, SchemaObjectState};
+    let mut state = ProjectState::default();
+    for (app, kind, name, sql) in [
+        (
+            "a",
+            SchemaObjectKind::Table,
+            "a_data",
+            "CREATE TABLE a_data (id INTEGER PRIMARY KEY)",
+        ),
+        (
+            "a",
+            SchemaObjectKind::View,
+            "a_report",
+            "CREATE VIEW a_report AS SELECT id FROM b_data",
+        ),
+        (
+            "b",
+            SchemaObjectKind::Table,
+            "b_data",
+            "CREATE TABLE b_data (id INTEGER PRIMARY KEY)",
+        ),
+        (
+            "b",
+            SchemaObjectKind::View,
+            "b_report",
+            "CREATE VIEW b_report AS SELECT id FROM a_data",
+        ),
+    ] {
+        state
+            .add_schema_object(SchemaObjectState {
+                app: app.into(),
+                kind,
+                name: name.into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+    }
+    let files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate_initial(&state, "initial")
+        .unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(MigrationGraph::new(files).unwrap())
+        .await
+        .unwrap();
+    for view in ["a_report", "b_report"] {
+        db.query_sql(format!("SELECT id FROM {view}"), vec![])
+            .await
+            .unwrap();
+    }
 }
