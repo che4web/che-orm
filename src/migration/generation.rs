@@ -162,54 +162,6 @@ impl MigrationGraph {
         }
     }
 
-    fn reused_index_names(
-        &self,
-        desired: &ProjectState,
-    ) -> Result<BTreeMap<String, BTreeSet<String>>, MigrationError> {
-        // Track only bare legacy renames. A rebuild or drop releases every alias.
-        let mut aliases: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut state = ProjectState::default();
-        for op in self.ordered().flat_map(|file| &file.operations) {
-            match op {
-                MigrationOperation::RenameTable { old_name, new_name } => {
-                    let mut names = aliases.remove(old_name).unwrap_or_default();
-                    if !state.tables[table_index(&state, old_name)?]
-                        .indexes
-                        .is_empty()
-                    {
-                        names.insert(old_name.clone());
-                        aliases.insert(new_name.clone(), names);
-                    }
-                }
-                MigrationOperation::DropTable { name } => {
-                    aliases.remove(name);
-                }
-                _ => {
-                    if let Some(table) = SqliteSchemaEditor::rebuild_table_name(op) {
-                        aliases.remove(table);
-                    }
-                }
-            }
-            op.state_forwards(&mut state)?;
-        }
-        aliases.retain(|owner, names| {
-            names.retain(|name| {
-                !same_name(owner, name)
-                    && desired
-                        .tables()
-                        .iter()
-                        .any(|table| same_name(&table.name, name) && !table.indexes.is_empty())
-            });
-            !names.is_empty()
-                && state.model_keys.contains_key(owner)
-                && state
-                    .tables()
-                    .iter()
-                    .any(|t| &t.name == owner && !t.indexes.is_empty())
-        });
-        Ok(aliases)
-    }
-
     /// Generate only new migrations, in application order, without I/O. Each
     /// file is checked with the selected backend's schema editor. This checks
     /// structural prerequisites, not constraints on existing row values.
@@ -242,37 +194,14 @@ impl MigrationGraph {
         // Frozen RenameTable files kept the old physical SQLite index names.
         // Reclaim those names before another model needs them. The same logical
         // operations are valid on PostgreSQL and preserve both histories.
-        let index_repairs = if historical.diff(desired)?.is_empty() {
-            BTreeMap::new()
-        } else {
-            self.reused_index_names(desired)?
-        };
-        for table in index_repairs.keys() {
-            let old = &historical.tables[table_index(&historical, table)?];
-            let columns = old
-                .indexes
-                .last()
-                .expect("repair requires a historical index");
-            // Removing and restoring the last index preserves ordinal names and
-            // lets the SQLite editor rebuild every historical index on the table.
-            let ops = vec![
-                MigrationOperation::RemoveIndex {
-                    table: table.clone(),
-                    columns: columns.clone(),
-                },
-                MigrationOperation::AddIndex {
-                    table: table.clone(),
-                    columns: columns.clone(),
-                },
-            ];
-            for op in &ops {
-                op.state_forwards(&mut state)?;
-            }
-            append_group(
-                &mut groups,
-                layout.file_owner(&historical.model_keys[table].app),
-                ops,
-            );
+        let mut origins = SqliteIndexOrigins::default();
+        for migration in self.ordered() {
+            origins.observe(&migration.operations);
+        }
+        for (owner, op) in origins.repairs(&historical, desired)? {
+            op.state_forwards(&mut state)?;
+            origins.observe(std::slice::from_ref(&op));
+            append_group(&mut groups, layout.file_owner(&owner), vec![op]);
         }
         for ((app, old_name), new_name) in &policy.rename_models {
             let old = ModelKey {
@@ -306,12 +235,12 @@ impl MigrationGraph {
             op.state_forwards(&mut state)?;
             append_group(&mut groups, layout.file_owner(app), vec![op]);
         }
+        let mut explicit_changes = rename_object_drops(&state, desired, policy)?;
         for ((table, old_name), new_name) in &policy.rename_columns {
             let key = state
                 .model_keys
                 .get(table)
                 .ok_or_else(|| invalid(format!("unknown historical table {table}")))?;
-            let owner = layout.file_owner(&key.app).to_owned();
             let model = desired
                 .models()
                 .into_iter()
@@ -324,13 +253,17 @@ impl MigrationGraph {
                     "expected {new_name} to replace {table}.{old_name} in desired schema"
                 )));
             }
-            let op = MigrationOperation::RenameColumn {
+            explicit_changes.push(StateChange::RenameColumn {
+                key: key.clone(),
                 table: table.clone(),
                 old_name: old_name.clone(),
                 new_name: new_name.clone(),
-            };
-            op.state_forwards(&mut state)?;
-            append_group(&mut groups, &owner, vec![op]);
+            });
+        }
+        for change in explicit_changes {
+            let (owner, ops, after) = next_step(&state, &[change], layout, &catalog, &origins)?;
+            append_group(&mut groups, &owner, ops);
+            state = after;
         }
         loop {
             // Re-diff after each transition: a rename updates inbound FKs in
@@ -340,7 +273,8 @@ impl MigrationGraph {
                 break;
             }
             catalog.check_intent(&changes)?;
-            let (owner, ops, after) = next_step(&state, &changes, layout, &catalog)?;
+            let (owner, ops, after) = next_step(&state, &changes, layout, &catalog, &origins)?;
+            origins.observe(&ops);
             append_group(&mut groups, &owner, ops);
             state = after;
         }
@@ -357,14 +291,7 @@ impl MigrationGraph {
         let mut before = historical;
         for (app, operations) in groups {
             let graph = MigrationGraph::new(history.clone())?;
-            let mut touched = access(&operations, &mut cursor, &catalog)?;
-            for (table, names) in &index_repairs {
-                if touched.writes.contains(&physical_key(table)) {
-                    touched
-                        .writes
-                        .extend(names.iter().map(|name| physical_key(name)));
-                }
-            }
+            let touched = access(&operations, &mut cursor, &catalog)?;
             let mut dependencies: BTreeSet<_> = accesses
                 .iter()
                 .filter(|(_, a)| touched.conflicts(a))
@@ -419,6 +346,163 @@ impl MigrationGraph {
             return Err(invalid("generated history differs from registered schema"));
         }
         Ok(generated)
+    }
+}
+
+// SQLite rewrites dependent SQL during ALTER TABLE. Drop registered views and
+// triggers first and let the ordinary diff reinstall their desired definitions.
+fn rename_object_drops(
+    state: &ProjectState,
+    desired: &ProjectState,
+    policy: &GenerationPolicy,
+) -> Result<Vec<StateChange>, MigrationError> {
+    let mut affected = BTreeMap::new();
+    for (table, column) in policy.rename_columns.keys() {
+        let mut relations = BTreeSet::from([table.clone()]);
+        loop {
+            let mut added = false;
+            for object in state.objects() {
+                if !relations.iter().any(|name| sql_mentions(&object.sql, name)) {
+                    continue;
+                }
+                if object.kind == SchemaObjectKind::Table {
+                    if sql_mentions(&object.sql, column) {
+                        return Err(MigrationError::NeedsManualMigration {
+                            resource: object.name.clone(),
+                            reason: format!(
+                                "review SQL table referencing {table}.{column} before renaming the column"
+                            ),
+                        });
+                    }
+                    continue;
+                }
+                if sql_mentions(&object.sql, column)
+                    && desired.objects().iter().any(|new| {
+                        new.kind == object.kind && new.name == object.name && new.sql == object.sql
+                    })
+                {
+                    return Err(MigrationError::NeedsManualMigration {
+                        resource: object.name.clone(),
+                        reason: format!(
+                            "review the registered SQL definition referencing {table}.{column} before renaming the column"
+                        ),
+                    });
+                }
+                affected.insert((object.kind, object.name.clone()), object);
+                if object.kind == SchemaObjectKind::View {
+                    added |= relations.insert(object.name.clone());
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+    let mut changes = Vec::new();
+    while !affected.is_empty() {
+        let removable = affected.values().find(|object| {
+            !affected
+                .values()
+                .any(|dependent| references_view(dependent, object))
+        });
+        let Some(&object) = removable else {
+            return Err(invalid(
+                "cyclic SQL view dependencies during column rename; supply an explicit migration",
+            ));
+        };
+        affected.remove(&(object.kind, object.name.clone()));
+        changes.push(StateChange::DeleteSchemaObject(object.clone()));
+    }
+    Ok(changes)
+}
+
+fn references_view(dependent: &SchemaObjectState, provider: &SchemaObjectState) -> bool {
+    dependent.kind != SchemaObjectKind::Table
+        && provider.kind == SchemaObjectKind::View
+        && dependent != provider
+        && sql_mentions(&dependent.sql, &provider.name)
+}
+
+/// Origin of the *actual* SQLite index names after bare historical renames.
+/// A second rename carries the original prefix; a table rebuild recreates the
+/// indexes with the current prefix. This metadata never enters a checksum.
+#[derive(Default)]
+struct SqliteIndexOrigins(BTreeMap<String, String>);
+
+impl SqliteIndexOrigins {
+    fn observe(&mut self, ops: &[MigrationOperation]) {
+        use MigrationOperation::*;
+        for op in ops {
+            match op {
+                RenameTable { old_name, new_name } => {
+                    let origin = self.0.remove(old_name).unwrap_or_else(|| old_name.clone());
+                    if !origin.eq_ignore_ascii_case(new_name) {
+                        self.0.insert(new_name.clone(), origin);
+                    }
+                }
+                RenameSqliteIndexes {
+                    table, to_table, ..
+                } if !table.eq_ignore_ascii_case(to_table) => {
+                    self.0.insert(table.clone(), to_table.clone());
+                }
+                DropTable { name } | RenameSqliteIndexes { table: name, .. } => {
+                    self.0.remove(name);
+                }
+                _ => {
+                    if let Some(table) = SqliteSchemaEditor::rebuild_table_name(op) {
+                        self.0.remove(table);
+                    }
+                }
+            }
+        }
+    }
+
+    fn repairs(
+        &self,
+        history: &ProjectState,
+        desired: &ProjectState,
+    ) -> Result<Vec<(String, MigrationOperation)>, MigrationError> {
+        if self.0.is_empty() || history.diff(desired)?.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut wanted = BTreeSet::new();
+        for table in desired.tables() {
+            wanted.insert(table.name.to_ascii_lowercase());
+            wanted.extend(
+                (0..table.indexes.len()).map(|i| index_name(&table.name, i).to_ascii_lowercase()),
+            );
+        }
+        wanted.extend(
+            desired
+                .objects()
+                .iter()
+                .filter(|o| o.kind != SchemaObjectKind::Trigger)
+                .map(|o| o.name.to_ascii_lowercase()),
+        );
+        let mut repairs = Vec::new();
+        for schema in history.tables() {
+            let table = &schema.name;
+            let Some(from_table) = self.0.get(table) else {
+                continue;
+            };
+            if (0..schema.indexes.len())
+                .any(|i| wanted.contains(&index_name(from_table, i).to_ascii_lowercase()))
+            {
+                let owner = history
+                    .model_keys
+                    .get(table)
+                    .ok_or_else(|| invalid(format!("missing migration owner for {table}")))?;
+                repairs.push((
+                    owner.app.clone(),
+                    MigrationOperation::RenameSqliteIndexes {
+                        table: table.clone(),
+                        from_table: from_table.clone(),
+                        to_table: table.clone(),
+                    },
+                ));
+            }
+        }
+        Ok(repairs)
     }
 }
 
@@ -514,6 +598,7 @@ fn next_step(
     changes: &[StateChange],
     layout: MigrationLayout<'_>,
     catalog: &Catalog<'_>,
+    origins: &SqliteIndexOrigins,
 ) -> Result<Step, MigrationError> {
     let mut blocked = Vec::new();
     for change in changes {
@@ -531,6 +616,15 @@ fn next_step(
                 .iter()
                 .any(|c| !matches!(c, StateChange::CreateSchemaObject(_)))
         {
+            continue;
+        }
+        if let StateChange::CreateSchemaObject(object) = change
+            && changes.iter().any(|other| {
+                matches!(other, StateChange::CreateSchemaObject(provider)
+                if references_view(object, provider))
+            })
+        {
+            blocked.push(format!("{} needs another pending view", object.name));
             continue;
         }
         let owner = layout.file_owner(change.app());
@@ -556,30 +650,32 @@ fn next_step(
         // Put providers first when possible, retaining a single file for a cycle.
         let mut ops = Vec::new();
         for change in group.into_iter().rev() {
-            // SQLite keeps index names across ALTER TABLE RENAME. Encode the
-            // transition in new files so existing migration history stays frozen.
+            let op = change.clone().into_operation();
             if let StateChange::RenameTable {
                 old_name, new_name, ..
             } = change
             {
+                let from = origins.0.get(old_name).unwrap_or(old_name);
                 let indexes = &state.tables[table_index(state, old_name)?].indexes;
-                ops.extend(
-                    indexes
-                        .iter()
-                        .rev()
-                        .map(|columns| MigrationOperation::RemoveIndex {
-                            table: old_name.clone(),
-                            columns: columns.clone(),
-                        }),
-                );
-                ops.push(change.clone().into_operation());
-                ops.extend(indexes.iter().map(|columns| MigrationOperation::AddIndex {
-                    table: new_name.clone(),
-                    columns: columns.clone(),
-                }));
-            } else {
-                ops.push(change.clone().into_operation());
+                if !indexes.is_empty() && !from.eq_ignore_ascii_case(new_name) {
+                    // A table and index cannot share a SQLite name, even briefly.
+                    // Release the target *before* ALTER TABLE if an index owns it.
+                    let before_rename = (0..indexes.len())
+                        .any(|i| index_name(from, i).eq_ignore_ascii_case(new_name));
+                    let indexes = MigrationOperation::RenameSqliteIndexes {
+                        table: if before_rename { old_name } else { new_name }.clone(),
+                        from_table: from.clone(),
+                        to_table: new_name.clone(),
+                    };
+                    if before_rename {
+                        ops.extend([indexes, op]);
+                    } else {
+                        ops.extend([op, indexes]);
+                    }
+                    continue;
+                }
             }
+            ops.push(op);
         }
         match validate_file(state, &ops, catalog) {
             Ok(after) => return Ok((owner.to_owned(), ops, after)),
@@ -594,7 +690,8 @@ fn next_step(
 
 fn model_table(change: &StateChange) -> Option<(&ModelKey, &str)> {
     match change {
-        StateChange::AddColumn { key, table, .. }
+        StateChange::RenameColumn { key, table, .. }
+        | StateChange::AddColumn { key, table, .. }
         | StateChange::AlterColumn { key, table, .. }
         | StateChange::RemoveColumn { key, table, .. }
         | StateChange::AddIndex { key, table, .. }
@@ -710,12 +807,23 @@ fn access(
                 }
                 table
             }
+            RenameSqliteIndexes {
+                table,
+                from_table,
+                to_table,
+            } => {
+                let schema = &state.tables[table_index(state, table)?];
+                for i in 0..schema.indexes.len() {
+                    a.writes.insert(physical_key(&index_name(from_table, i)));
+                    a.writes.insert(physical_key(&index_name(to_table, i)));
+                }
+                table
+            }
             RenameModel { table, .. }
             | AddIndex { table, .. }
             | RemoveIndex { table, .. }
             | AddUniqueConstraint { table, .. }
             | RemoveUniqueConstraint { table, .. }
-            | BackfillColumn { table, .. }
             | NormalizeSqliteDateTimes { table, .. } => table,
             CreateSchemaObject {
                 object:
@@ -737,7 +845,10 @@ fn access(
                 }
                 name
             }
-            RunSql { .. } | CreateSchemaObject { .. } | DropSchemaObject { .. } => {
+            BackfillColumn { .. }
+            | RunSql { .. }
+            | CreateSchemaObject { .. }
+            | DropSchemaObject { .. } => {
                 a.opaque = true;
                 op.state_forwards(state)?;
                 continue;
@@ -745,6 +856,11 @@ fn access(
         };
         a.writes.insert(physical_key(table));
         op.state_forwards(state)?;
+        if let Some(schema) = state.tables().iter().find(|t| t.name == *table) {
+            for i in 0..schema.indexes.len() {
+                a.writes.insert(physical_key(&index_name(table, i)));
+            }
+        }
     }
     Ok(a)
 }

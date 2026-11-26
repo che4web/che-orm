@@ -143,6 +143,12 @@ pub enum StateChange {
         old_name: String,
         new_name: String,
     },
+    RenameColumn {
+        key: ModelKey,
+        table: String,
+        old_name: String,
+        new_name: String,
+    },
     AddColumn {
         key: ModelKey,
         table: String,
@@ -189,6 +195,7 @@ impl StateChange {
         match self {
             Self::CreateModel(model) | Self::DeleteModel(model) => &model.key.app,
             Self::RenameTable { key, .. }
+            | Self::RenameColumn { key, .. }
             | Self::AddColumn { key, .. }
             | Self::RemoveColumn { key, .. }
             | Self::AlterColumn { key, .. }
@@ -208,6 +215,16 @@ impl StateChange {
             Self::CreateModel(model) => MigrationOperation::CreateModel { model },
             Self::DeleteModel(model) => MigrationOperation::DropTable {
                 name: model.table.name,
+            },
+            Self::RenameColumn {
+                table,
+                old_name,
+                new_name,
+                ..
+            } => MigrationOperation::RenameColumn {
+                table,
+                old_name,
+                new_name,
             },
             Self::RenameTable {
                 old_name, new_name, ..
@@ -583,7 +600,8 @@ fn changed_tables(changes: &[StateChange]) -> BTreeSet<String> {
             StateChange::RenameTable {
                 old_name, new_name, ..
             } => vec![old_name.clone(), new_name.clone()],
-            StateChange::AddColumn { table, .. }
+            StateChange::RenameColumn { table, .. }
+            | StateChange::AddColumn { table, .. }
             | StateChange::RemoveColumn { table, .. }
             | StateChange::AlterColumn { table, .. }
             | StateChange::AddIndex { table, .. }
@@ -621,12 +639,12 @@ fn schema_object_depends_on(object: &SchemaObjectState, tables: &BTreeSet<String
     // Views and triggers can be reinstalled around a schema change. A table
     // owns rows: mentioning a changed model in its SQL is not a migration of it.
     object.kind != SchemaObjectKind::Table
-        && tables.iter().any(|table| {
-            object
-                .sql
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .any(|identifier| identifier == table)
-        })
+        && tables.iter().any(|table| sql_mentions(&object.sql, table))
+}
+
+fn sql_mentions(sql: &str, name: &str) -> bool {
+    sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|token| token.eq_ignore_ascii_case(name))
 }
 
 fn parse_schema_object_header(sql: &str) -> Option<(SchemaObjectKind, String)> {
@@ -1009,6 +1027,16 @@ fn render_schema_object(object: &SchemaObjectState) -> String {
 
 fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
     match operation {
+        MigrationOperation::RenameSqliteIndexes {
+            table,
+            from_table,
+            to_table,
+        } => format!(
+            "MigrationOperation::RenameSqliteIndexes {{ table: {}, from_table: {}, to_table: {} }}",
+            render_string(table),
+            render_string(from_table),
+            render_string(to_table)
+        ),
         MigrationOperation::RenameModel {
             table,
             app,
@@ -1132,6 +1160,13 @@ fn render_operation(operation: &MigrationOperation, _indent: usize) -> String {
 /// A migration state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationOperation {
+    /// Recreate a table's managed SQLite indexes with a new table-name prefix.
+    /// PostgreSQL already renames its indexes with the table.
+    RenameSqliteIndexes {
+        table: String,
+        from_table: String,
+        to_table: String,
+    },
     /// Changes the Rust model identity while retaining the physical table and all rows.
     RenameModel {
         table: String,
@@ -1249,7 +1284,8 @@ fn operation_has_distinct_field_names(operation: &MigrationOperation) -> bool {
         | MigrationOperation::BackfillColumn { .. }
         | MigrationOperation::CreateSchemaObject { .. }
         | MigrationOperation::DropSchemaObject { .. }
-        | MigrationOperation::RenameModel { .. } => false,
+        | MigrationOperation::RenameModel { .. }
+        | MigrationOperation::RenameSqliteIndexes { .. } => false,
     }
 }
 
@@ -1345,6 +1381,16 @@ fn encode_operation(bytes: &mut Vec<u8>, operation: &MigrationOperation, include
             bytes.push(16);
             encode_string(bytes, table);
             encode_string_list(bytes, columns);
+        }
+        MigrationOperation::RenameSqliteIndexes {
+            table,
+            from_table,
+            to_table,
+        } => {
+            bytes.push(18);
+            encode_string(bytes, table);
+            encode_string(bytes, from_table);
+            encode_string(bytes, to_table);
         }
         MigrationOperation::RenameModel {
             table,
@@ -1504,6 +1550,13 @@ impl MigrationOperation {
                 new_name,
                 table,
             } => format!("Rename model {app}.{old_name} to {new_name} on {table}"),
+            RenameSqliteIndexes {
+                table,
+                from_table,
+                to_table,
+            } => {
+                format!("Rename SQLite indexes on {table} from {from_table} to {to_table}")
+            }
             RenameTable { old_name, new_name } => format!("Rename table {old_name} to {new_name}"),
             RenameColumn {
                 table,
@@ -1543,6 +1596,21 @@ impl MigrationOperation {
     /// Applies this operation to the in-memory schema state.
     pub fn state_forwards(&self, state: &mut ProjectState) -> Result<(), MigrationError> {
         match self {
+            Self::RenameSqliteIndexes {
+                table,
+                from_table,
+                to_table,
+            } => {
+                table_index(state, table)?;
+                if to_table.eq_ignore_ascii_case(from_table)
+                    || from_table.is_empty()
+                    || to_table.is_empty()
+                {
+                    return Err(MigrationError::InvalidState(format!(
+                        "invalid index rename on {table} from {from_table} to {to_table}"
+                    )));
+                }
+            }
             Self::RenameModel {
                 table,
                 app,
@@ -2434,6 +2502,26 @@ impl SqliteSchemaEditor {
         let mut resulting_state = before.clone();
         operation.state_forwards(&mut resulting_state)?;
         let statements = match operation {
+            MigrationOperation::RenameSqliteIndexes {
+                table,
+                from_table,
+                to_table,
+            } => {
+                let schema = &before.tables[table_index(before, table)?];
+                let mut sql: Vec<_> = (0..schema.indexes.len())
+                    .map(|i| {
+                        format!(
+                            "DROP INDEX main.{}",
+                            quote_identifier(&index_name(from_table, i))
+                        )
+                    })
+                    .collect();
+                sql.extend(schema.indexes.iter().enumerate().map(|(i, columns)| {
+                    let name = format!("main.{}", quote_identifier(&index_name(to_table, i)));
+                    create_index_statement(table, &name, columns)
+                }));
+                sql
+            }
             MigrationOperation::RenameModel { .. } => vec![],
             MigrationOperation::CreateModel { model } => create_table_statements(&model.table),
             MigrationOperation::CreateTable { table } => create_table_statements(table),
@@ -2600,20 +2688,27 @@ fn create_table_sql(table: &TableState) -> String {
 }
 
 fn index_statements(table: &TableState) -> Vec<String> {
-    let mut statements = Vec::new();
-    for (position, columns) in table.indexes.iter().enumerate() {
-        statements.push(format!(
-            "CREATE INDEX {} ON {} ({})",
-            quote_identifier(&index_name(&table.name, position)),
-            quote_identifier(&table.name),
-            columns
-                .iter()
-                .map(|column| quote_identifier(column))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    statements
+    table
+        .indexes
+        .iter()
+        .enumerate()
+        .map(|(i, columns)| {
+            let name = quote_identifier(&index_name(&table.name, i));
+            create_index_statement(&table.name, &name, columns)
+        })
+        .collect()
+}
+
+fn create_index_statement(table: &str, quoted_index: &str, columns: &[String]) -> String {
+    let columns = columns
+        .iter()
+        .map(|c| quote_identifier(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE INDEX {quoted_index} ON {} ({columns})",
+        quote_identifier(table)
+    )
 }
 
 fn index_name(table: &str, position: usize) -> String {

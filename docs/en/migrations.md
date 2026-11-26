@@ -156,7 +156,9 @@ cargo run --bin manage -- makemigrations --merge tasks
 ```
 
 A model rename updates the identity in migration history. A changed table name
-also generates a table rename. A column rename preserves its values. Opaque
+also generates a table rename. A column rename preserves its values. Update view and trigger definitions that
+reference the old column. The generator drops dependent objects before renaming
+the column and restores the registered definitions in dependency order. Opaque
 CHECK expressions may require a manual migration. Use `--drop` for intentional
 removal. An empty migration is registered with the current head as a dependency.
 Fill in its operations before deploying, e.g. add a nullable column, run
@@ -167,7 +169,8 @@ the `che_sync` infrastructure owner's files in `src/che_sync_migrations/`.
 After a Git merge, include both branches in the compiled registry before
 running `--merge`. It joins independent heads and can combine distinct simple
 nullable additions on the same table. Conflicting schema changes and opaque SQL
-that may affect the other branch require manual review.
+that may affect the other branch require manual review. This includes
+`BackfillColumn` expressions that can read data modified by the other branch.
 
 ## Inspecting a deployment
 
@@ -188,10 +191,10 @@ SQLite compares physical columns with history using `pragma_table_xinfo` before
 rebuilding a table. A mismatch aborts the migration. Preserve data and reconcile
 the schema with a reviewed operation before retrying.
 
-SQLite may retain old index names after a table rename in an older migration.
-When reusing that name for a new indexed model, the generator schedules index
-repair and its dependency. Preview the rebuild with `sqlmigrate` before applying
-it to a large table.
+SQLite may retain old index names after a historical table rename. When a table,
+view or index needs such a name, the generator schedules its release first. SQLite
+verifies the owner and definition of each index and recreates the index without
+copying table rows. PostgreSQL uses native index renames when renaming a table.
 
 Generated applications own their management CLI and registries. When updating
 an existing application, port the corresponding template changes to its CLI.

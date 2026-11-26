@@ -1612,12 +1612,16 @@ async fn renamed_models_columns_and_reused_index_names_preserve_rows() {
         .unwrap();
     let id = generated[0].id.clone();
     let graph = MigrationGraph::new(initial.into_iter().chain(generated).collect()).unwrap();
+    let sql = graph.migration_sql(&id).unwrap().join("\n");
+    assert!(sql.contains("RENAME COLUMN"));
     assert!(
-        graph
-            .migration_sql(&id)
-            .unwrap()
-            .iter()
-            .any(|s| s.contains("RENAME COLUMN"))
+        !sql.contains("INSERT INTO") && !sql.contains("DROP TABLE"),
+        "{sql}"
+    );
+    #[cfg(feature = "postgres")]
+    assert!(
+        sql.contains("ALTER INDEX") && !sql.contains("DROP INDEX"),
+        "{sql}"
     );
     assert_eq!(db.migrate_to(graph.clone(), Some(id)).await.unwrap(), 1);
     assert_eq!(
@@ -1700,4 +1704,106 @@ async fn sqlite_rebuild_aborts_before_losing_untracked_columns() {
         .await
         .unwrap();
     assert_eq!(db.migrate(graph).await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "requires TEST_POSTGRES_URL")]
+async fn column_rename_orders_dependent_views_and_rejects_stale_sql() {
+    use che_orm::{GenerationPolicy, MigrationLayout, SchemaObjectKind, SchemaObjectState};
+    #[derive(Debug, Model)]
+    #[orm(table = "alpha")]
+    struct Alpha {
+        #[orm(primary_key)]
+        id: i64,
+        val: i64,
+    }
+    #[derive(Debug, Model)]
+    #[orm(table = "beta")]
+    struct Beta {
+        #[orm(primary_key)]
+        id: i64,
+        caption: i64,
+    }
+    let mut state =
+        ProjectState::from_app_schema("app", &SchemaSet::new().model::<Alpha>().model::<Beta>());
+    let view = |name: &str, sql: &str| SchemaObjectState {
+        kind: SchemaObjectKind::View,
+        app: "views".into(),
+        name: name.into(),
+        sql: sql.into(),
+    };
+    let joined = view(
+        "joined",
+        "CREATE VIEW joined AS SELECT val FROM alpha CROSS JOIN beta",
+    );
+    let outer = view("a_public", "CREATE VIEW a_public AS SELECT * FROM joined");
+    state.add_schema_object(joined.clone()).unwrap();
+    state.add_schema_object(outer).unwrap();
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(initial.clone()).unwrap();
+    let (db, cleanup) = fixture().await;
+    db.migrate(history.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO alpha VALUES (1,42)", vec![])
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO beta VALUES (1,99)", vec![])
+        .await
+        .unwrap();
+    MigrationOperation::RenameColumn {
+        table: "alpha".into(),
+        old_name: "val".into(),
+        new_name: "caption".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let policy = GenerationPolicy {
+        rename_columns: [(("alpha".into(), "val".into()), "caption".into())].into(),
+        ..Default::default()
+    };
+    let generate = |s: &ProjectState| {
+        history.generate_with_policy(s, MigrationLayout::PerApp, "rename", &policy)
+    };
+    let error = generate(&state).unwrap_err().to_string();
+    assert!(
+        error.contains("joined") && error.contains("alpha.val"),
+        "{error}"
+    );
+    MigrationOperation::DropSchemaObject {
+        kind: joined.kind,
+        name: joined.name,
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    state
+        .add_schema_object(view(
+            "joined",
+            "CREATE VIEW joined AS SELECT alpha.caption AS val FROM alpha CROSS JOIN beta",
+        ))
+        .unwrap();
+    let next = generate(&state).unwrap();
+    let graph = MigrationGraph::new(initial.into_iter().chain(next).collect()).unwrap();
+    db.migrate(graph.clone()).await.unwrap();
+    assert_eq!(
+        db.query_sql("SELECT val FROM a_public", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        42
+    );
+    assert!(
+        graph
+            .generate(&state, MigrationLayout::PerApp, "again")
+            .unwrap()
+            .is_empty()
+    );
+    if let Some((admin, schema)) = cleanup {
+        admin
+            .execute_sql(format!("DROP SCHEMA \"{schema}\" CASCADE"), vec![])
+            .await
+            .unwrap();
+    }
 }

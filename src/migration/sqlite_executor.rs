@@ -129,6 +129,12 @@ fn apply_single_operation_migration(
                 operation.state_forwards(migration_state)?;
             }
             _ => {
+                if let MigrationOperation::RenameSqliteIndexes {
+                    table, from_table, ..
+                } = operation
+                {
+                    verify_renamed_indexes(connection, migration_state, table, from_table)?;
+                }
                 if let Some(table) = SqliteSchemaEditor::rebuild_table_name(operation) {
                     ensure_rebuild_can_preserve_rows(connection, operation)?;
                     assert_rebuild_objects_match_history(connection, table, migration_state)?;
@@ -422,12 +428,47 @@ fn assert_rebuild_objects_match_history(
     Ok(())
 }
 
+fn verify_renamed_indexes(
+    connection: &crate::rusqlite::Connection,
+    migration_state: &ProjectState,
+    table: &str,
+    from_table: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let schema = &migration_state.tables()[super::table_index(migration_state, table)?];
+    for (i, columns) in schema.indexes.iter().enumerate() {
+        let name = super::index_name(from_table, i);
+        // DROP INDEX is database-wide. Verify ownership and the full
+        // managed definition before dropping an index.
+        let managed: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_index_list(?1, 'main')
+                           WHERE name = ?2 COLLATE NOCASE AND origin = 'c' AND NOT partial AND NOT [unique])",
+            [table, name.as_str()],
+            |row| row.get(0),
+        )?;
+        if !managed {
+            return Err(format!(
+                "expected managed index {name} on {table}; review the physical index names"
+            )
+            .into());
+        }
+        let (details, actual) = sqlite_index_columns(connection, &name)?;
+        if &actual != columns
+            || details
+                .iter()
+                .any(|(_, desc, coll)| *desc || coll != "BINARY")
+        {
+            return Err(format!("divergent definition of managed index {name} on {table}").into());
+        }
+    }
+    Ok(())
+}
+
 fn sqlite_index_columns(
     connection: &crate::rusqlite::Connection,
     name: &str,
 ) -> Result<(Vec<(String, bool, String)>, Vec<String>), crate::rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT name, desc, coll FROM pragma_index_xinfo(?1) WHERE key = 1 ORDER BY seqno",
+        "SELECT name, desc, coll FROM pragma_index_xinfo(?1, 'main') WHERE key = 1 ORDER BY seqno",
     )?;
     let details = statement
         .query_map([name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?

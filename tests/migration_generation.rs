@@ -408,6 +408,69 @@ fn manual_merge_only_joins_compatible_branches() {
     );
 }
 
+#[test]
+fn concurrent_backfills_cannot_merge_even_when_their_targets_differ() {
+    use che_orm::{Migration, MigrationId, MigrationOperation};
+    let mut state = ProjectState::from_app_schema(
+        "app",
+        &SchemaSet::new().model::<Parent>().model::<Unrelated>(),
+    );
+    for table in ["parents", "unrelated"] {
+        let mut column = state.tables()[0].columns[0].clone();
+        column.name = "value".into();
+        column.field_name = "value".into();
+        column.primary_key = false;
+        column.nullable = true;
+        MigrationOperation::AddColumn {
+            table: table.into(),
+            column,
+        }
+        .state_forwards(&mut state)
+        .unwrap();
+    }
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap()
+        .remove(0);
+    for (first, second) in [("0002_a", "0002_b"), ("0002_b", "0002_a")] {
+        let branch = |name: &str, table: &str, value: &str| {
+            Migration::new(
+                MigrationId {
+                    app: "app".into(),
+                    name: name.into(),
+                },
+                vec![initial.id.clone()],
+                vec![MigrationOperation::BackfillColumn {
+                    table: table.into(),
+                    column: "value".into(),
+                    value: value.into(),
+                }],
+            )
+        };
+        let graph = MigrationGraph::new(vec![
+            initial.clone(),
+            branch(
+                first,
+                "parents",
+                "coalesce((SELECT value FROM unrelated WHERE id = 1), 0)",
+            ),
+            branch(second, "unrelated", "7"),
+        ])
+        .unwrap();
+        let error = graph
+            .manual_migration("app", "merge", true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("merge requires review")
+                && error.contains("Backfill parents.value")
+                && error.contains("Backfill unrelated.value"),
+            "{error}"
+        );
+    }
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn reusing_index_names_after_an_already_applied_legacy_rename() {
@@ -435,40 +498,160 @@ async fn reusing_index_names_after_an_already_applied_legacy_rename() {
         vec![files[0].id.clone()],
         vec![rename],
     ));
+    let recent = che_orm::SchemaObjectState {
+        kind: che_orm::SchemaObjectKind::View,
+        app: "original".into(),
+        name: "recent".into(),
+        sql: "CREATE VIEW recent AS SELECT id FROM archive".into(),
+    };
+    files.push(Migration::new(
+        MigrationId {
+            app: "original".into(),
+            name: "0003_view".into(),
+        },
+        vec![files[1].id.clone()],
+        vec![MigrationOperation::CreateSchemaObject { object: recent }],
+    ));
     let history = MigrationGraph::new(files.clone()).unwrap();
+    for claim in ["index", "model table", "SQL table", "view"] {
+        let db = Database::connect_in_memory().await.unwrap();
+        db.migrate(history.clone()).await.unwrap();
+        db.execute_sql("INSERT INTO archive(id) VALUES (17)", vec![])
+            .await
+            .unwrap();
+        let mut desired = history.replay(ProjectState::default()).unwrap();
+        match claim {
+            "index" | "model table" => {
+                let mut replacement = old.models().remove(0);
+                replacement.key.app = "new_app".into();
+                if claim == "model table" {
+                    replacement.table.name = "PARENTS_IDX_0".into();
+                    replacement.table.indexes.clear();
+                }
+                MigrationOperation::CreateModel { model: replacement }
+                    .state_forwards(&mut desired)
+                    .unwrap();
+            }
+            _ => {
+                let (kind, sql) = if claim == "SQL table" {
+                    (
+                        che_orm::SchemaObjectKind::Table,
+                        "CREATE TABLE parents_idx_0 (id INTEGER PRIMARY KEY)",
+                    )
+                } else {
+                    (
+                        che_orm::SchemaObjectKind::View,
+                        "CREATE VIEW parents_idx_0 AS SELECT 1 AS id",
+                    )
+                };
+                desired
+                    .add_schema_object(che_orm::SchemaObjectState {
+                        kind,
+                        app: "new_app".into(),
+                        name: "parents_idx_0".into(),
+                        sql: sql.into(),
+                    })
+                    .unwrap();
+            }
+        }
+        let changes = history
+            .generate(&desired, MigrationLayout::PerApp, "reuse")
+            .unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes[1].dependencies.contains(&changes[0].id));
+        let target = changes[1].id.clone();
+        let repair = changes[0].id.clone();
+        let graph = MigrationGraph::new(files.iter().cloned().chain(changes).collect()).unwrap();
+        let sql = graph.migration_sql(&repair).unwrap();
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].starts_with("DROP INDEX") && sql[1].starts_with("CREATE INDEX"));
+        assert_eq!(db.migrate_to(graph.clone(), Some(target)).await.unwrap(), 2);
+        assert_eq!(
+            db.query_sql("SELECT id FROM recent", vec![]).await.unwrap()[0]
+                .get::<i64>(0)
+                .unwrap(),
+            17
+        );
+        assert_eq!(db.migrate(graph.clone()).await.unwrap(), 0);
+        assert!(
+            graph
+                .generate(&desired, MigrationLayout::PerApp, "again")
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn renaming_table_to_its_own_old_index_name_checks_index_ownership() {
+    use che_orm::{Database, MigrationOperation};
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    MigrationOperation::AddIndex {
+        table: "parents".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(initial.clone()).unwrap();
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "parents_idx_0".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let files = history
+        .generate(&state, MigrationLayout::PerApp, "rename")
+        .unwrap();
+    let graph = MigrationGraph::new(initial.into_iter().chain(files).collect()).unwrap();
     let db = Database::connect_in_memory().await.unwrap();
-    db.migrate(history.clone()).await.unwrap();
-    db.execute_sql("INSERT INTO archive(id) VALUES (17)", vec![])
+    db.migrate(history).await.unwrap();
+    db.execute_sql("INSERT INTO parents(id) VALUES (13)", vec![])
         .await
         .unwrap();
-
-    let mut desired = history.replay(ProjectState::default()).unwrap();
-    let mut replacement = old.models().remove(0);
-    replacement.key.app = "new_app".into();
-    MigrationOperation::CreateModel { model: replacement }
-        .state_forwards(&mut desired)
-        .unwrap();
-    let changes = history
-        .generate(&desired, MigrationLayout::PerApp, "reuse")
-        .unwrap();
-    assert_eq!(changes.len(), 2);
-    assert!(changes[1].dependencies.contains(&changes[0].id));
-    let target = changes[1].id.clone();
-    files.extend(changes);
-    let graph = MigrationGraph::new(files).unwrap();
-    assert_eq!(db.migrate_to(graph.clone(), Some(target)).await.unwrap(), 2);
+    for sql in [
+        "DROP INDEX parents_idx_0",
+        "CREATE TABLE other(id INTEGER)",
+        "CREATE INDEX parents_idx_0 ON other(id)",
+    ] {
+        db.execute_sql(sql, vec![]).await.unwrap();
+    }
+    assert!(
+        db.migrate(graph.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("expected managed index")
+    );
     assert_eq!(
-        db.query_sql("SELECT id FROM archive", vec![])
+        db.query_sql(
+            "SELECT tbl_name FROM sqlite_master WHERE name='parents_idx_0'",
+            vec![]
+        )
+        .await
+        .unwrap()[0]
+            .get::<String>(0)
+            .unwrap(),
+        "other"
+    );
+    assert_eq!(db.migration_history().await.unwrap().len(), 1);
+    db.execute_sql("DROP INDEX parents_idx_0", vec![])
+        .await
+        .unwrap();
+    db.execute_sql("CREATE INDEX parents_idx_0 ON parents(id)", vec![])
+        .await
+        .unwrap();
+    assert_eq!(db.migrate(graph).await.unwrap(), 1);
+    assert_eq!(
+        db.query_sql("SELECT id FROM parents_idx_0", vec![])
             .await
             .unwrap()[0]
             .get::<i64>(0)
             .unwrap(),
-        17
-    );
-    assert!(
-        graph
-            .generate(&desired, MigrationLayout::PerApp, "again")
-            .unwrap()
-            .is_empty()
+        13
     );
 }

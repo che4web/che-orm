@@ -525,7 +525,8 @@ impl PostgresSchemaEditor {
                 }
                 statements.push(sql);
             }
-            MigrationOperation::NormalizeSqliteDateTimes { .. } => {}
+            MigrationOperation::NormalizeSqliteDateTimes { .. }
+            | MigrationOperation::RenameSqliteIndexes { .. } => {}
             MigrationOperation::RunSql { forward, .. } => statements.push(forward.clone()),
         }
         Ok(PostgresOperationPlan {
