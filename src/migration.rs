@@ -673,12 +673,14 @@ fn validate_schema_object(object: &SchemaObjectState) -> Result<(), MigrationErr
             "schema object app, name, and SQL must not be empty".into(),
         ));
     }
-    let (kind, name) = parse_schema_object_header(&object.sql).ok_or_else(|| {
+    let header = parse_schema_object_header(&object.sql).ok_or_else(|| {
         MigrationError::InvalidState(format!(
             "schema object {:?} {} SQL must begin with CREATE {:?} {}",
             object.kind, object.name, object.kind, object.name
         ))
     })?;
+    let kind = header.kind;
+    let name = header.name();
     if kind != object.kind || name != object.name {
         return Err(MigrationError::InvalidState(format!(
             "schema object SQL creates {:?} {name}, expected {:?} {}",
@@ -718,38 +720,61 @@ fn order_schema_objects(
     Ok(ordered)
 }
 
-fn parse_schema_object_header(sql: &str) -> Option<(SchemaObjectKind, String)> {
-    let mut words = sql.split_whitespace();
-    if !words.next()?.eq_ignore_ascii_case("CREATE") {
+struct SchemaObjectHeader<'a> {
+    kind: SchemaObjectKind,
+    temporary: bool,
+    declaration: &'a str,
+}
+
+impl SchemaObjectHeader<'_> {
+    fn name(&self) -> &str {
+        self.declaration
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
+    }
+}
+
+fn parse_schema_object_header(sql: &str) -> Option<SchemaObjectHeader<'_>> {
+    fn word<'a>(sql: &mut &'a str) -> &'a str {
+        let end = sql.find(char::is_whitespace).unwrap_or(sql.len());
+        let (token, rest) = sql.split_at(end);
+        *sql = rest.trim_start();
+        token
+    }
+    let mut rest = sql.trim_start();
+    if !word(&mut rest).eq_ignore_ascii_case("CREATE") {
         return None;
     }
-    let mut word = words.next()?;
-    if word.eq_ignore_ascii_case("TEMP") || word.eq_ignore_ascii_case("TEMPORARY") {
-        word = words.next()?;
+    let mut token = word(&mut rest);
+    let temporary = token.eq_ignore_ascii_case("TEMP") || token.eq_ignore_ascii_case("TEMPORARY");
+    if temporary {
+        token = word(&mut rest);
     }
-    let kind = if word.eq_ignore_ascii_case("TABLE") {
+    let kind = if token.eq_ignore_ascii_case("TABLE") {
         SchemaObjectKind::Table
-    } else if word.eq_ignore_ascii_case("TRIGGER") {
+    } else if token.eq_ignore_ascii_case("TRIGGER") {
         SchemaObjectKind::Trigger
-    } else if word.eq_ignore_ascii_case("VIEW") {
+    } else if token.eq_ignore_ascii_case("VIEW") {
         SchemaObjectKind::View
     } else {
         return None;
     };
-    let mut name = words.next()?;
-    if name.eq_ignore_ascii_case("IF") {
-        if !words.next()?.eq_ignore_ascii_case("NOT")
-            || !words.next()?.eq_ignore_ascii_case("EXISTS")
+    let mut probe = rest;
+    if word(&mut probe).eq_ignore_ascii_case("IF") {
+        if !word(&mut probe).eq_ignore_ascii_case("NOT")
+            || !word(&mut probe).eq_ignore_ascii_case("EXISTS")
         {
             return None;
         }
-        name = words.next()?;
+        rest = probe;
     }
-    Some((
+    (!rest.is_empty()).then_some(SchemaObjectHeader {
         kind,
-        name.trim_matches(|character| matches!(character, '"' | '`' | '[' | ']'))
-            .to_owned(),
-    ))
+        temporary,
+        declaration: rest,
+    })
 }
 
 fn diff_constraints(
@@ -2570,6 +2595,14 @@ impl SqliteSchemaEditor {
         operation: &MigrationOperation,
         before: &ProjectState,
     ) -> Result<SqliteOperationPlan, MigrationError> {
+        Self::plan_with_reserved_names(operation, before, &BTreeSet::new())
+    }
+
+    fn plan_with_reserved_names(
+        operation: &MigrationOperation,
+        before: &ProjectState,
+        reserved: &BTreeSet<String>,
+    ) -> Result<SqliteOperationPlan, MigrationError> {
         let mut resulting_state = before.clone();
         operation.state_forwards(&mut resulting_state)?;
         let statements = match operation {
@@ -2597,10 +2630,10 @@ impl SqliteSchemaEditor {
             MigrationOperation::CreateModel { model } => create_table_statements(&model.table),
             MigrationOperation::CreateTable { table } => create_table_statements(table),
             MigrationOperation::DropTable { name } => {
-                vec![format!("DROP TABLE {}", quote_identifier(name))]
+                vec![format!("DROP TABLE main.{}", quote_identifier(name))]
             }
             MigrationOperation::RenameTable { old_name, new_name } => vec![format!(
-                "ALTER TABLE {} RENAME TO {}",
+                "ALTER TABLE main.{} RENAME TO {}",
                 quote_identifier(old_name),
                 quote_identifier(new_name)
             )],
@@ -2609,7 +2642,7 @@ impl SqliteSchemaEditor {
                 old_name,
                 new_name,
             } => vec![format!(
-                "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                "ALTER TABLE main.{} RENAME COLUMN {} TO {}",
                 quote_identifier(table),
                 quote_identifier(old_name),
                 quote_identifier(new_name)
@@ -2619,27 +2652,51 @@ impl SqliteSchemaEditor {
                 column,
                 value,
             } => vec![format!(
-                "UPDATE {} SET {} = {} WHERE {} IS NULL",
+                "UPDATE main.{} SET {} = {} WHERE {} IS NULL",
                 quote_identifier(table),
                 quote_identifier(column),
                 value,
                 quote_identifier(column),
             )],
-            MigrationOperation::CreateSchemaObject { object } => vec![object.sql.clone()],
-            MigrationOperation::DropSchemaObject { kind, name } => vec![format!(
-                "DROP {} {}",
-                match kind {
+            MigrationOperation::CreateSchemaObject { object } => {
+                let header =
+                    parse_schema_object_header(&object.sql).expect("validated schema object");
+                let prefix = &object.sql[..object.sql.len() - header.declaration.len()];
+                // A non-TEMP trigger otherwise follows a shadowing TEMP target.
+                let sql = if header.temporary
+                    || header
+                        .declaration
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|n| n.starts_with("main.") || n.starts_with("temp."))
+                {
+                    object.sql.clone()
+                } else {
+                    format!("{prefix}main.{}", header.declaration)
+                };
+                vec![sql]
+            }
+            MigrationOperation::DropSchemaObject { kind, name } => {
+                let temporary = before
+                    .objects()
+                    .iter()
+                    .find(|o| o.kind == *kind && o.name == *name)
+                    .and_then(|o| parse_schema_object_header(&o.sql))
+                    .is_some_and(|h| h.temporary);
+                let schema = if temporary { "temp" } else { "main" };
+                let kind = match kind {
                     SchemaObjectKind::Table => "TABLE",
                     SchemaObjectKind::Trigger => "TRIGGER",
                     SchemaObjectKind::View => "VIEW",
-                },
-                quote_identifier(name)
-            )],
+                };
+                vec![format!("DROP {kind} {schema}.{}", quote_identifier(name))]
+            }
             _ if Self::rebuild_table_name(operation).is_some() => rebuild_table_statements(
                 Self::rebuild_table_name(operation).expect("operation requires a rebuild"),
                 before,
                 &resulting_state,
                 operation,
+                reserved,
             )?,
             MigrationOperation::RunSql { forward, .. } => vec![forward.clone()],
             _ => unreachable!("all non-rebuild migration operations are handled above"),
@@ -2656,10 +2713,30 @@ fn rebuild_table_statements(
     before: &ProjectState,
     after: &ProjectState,
     operation: &MigrationOperation,
+    reserved: &BTreeSet<String>,
 ) -> Result<Vec<String>, MigrationError> {
     let old_table = &before.tables[table_index(before, table_name)?];
     let new_table = &after.tables[table_index(after, table_name)?];
-    let temporary_name = format!("__che_migration_new_{table_name}");
+    let mut occupied = reserved.clone();
+    for table in before.tables() {
+        occupied.insert(table.name.to_ascii_lowercase());
+        occupied.extend(
+            (0..table.indexes.len()).map(|i| index_name(&table.name, i).to_ascii_lowercase()),
+        );
+    }
+    occupied.extend(
+        before
+            .objects()
+            .iter()
+            .map(|object| object.name.to_ascii_lowercase()),
+    );
+    let base = format!("__che_migration_new_{table_name}");
+    let mut temporary_name = base.clone();
+    let mut suffix = 0;
+    while occupied.contains(&temporary_name.to_ascii_lowercase()) {
+        suffix += 1;
+        temporary_name = format!("{base}_{suffix}");
+    }
     let mut temporary = new_table.clone();
     temporary.name = temporary_name.clone();
     let mut statements = vec![create_table_sql(&temporary)];
@@ -2699,14 +2776,14 @@ fn rebuild_table_statements(
             .collect::<Vec<_>>()
             .join(", ");
         statements.push(format!(
-            "INSERT INTO {} ({destinations}) SELECT {sources} FROM {}",
+            "INSERT INTO main.{} ({destinations}) SELECT {sources} FROM main.{}",
             quote_identifier(&temporary_name),
             quote_identifier(table_name)
         ));
     }
-    statements.push(format!("DROP TABLE {}", quote_identifier(table_name)));
+    statements.push(format!("DROP TABLE main.{}", quote_identifier(table_name)));
     statements.push(format!(
-        "ALTER TABLE {} RENAME TO {}",
+        "ALTER TABLE main.{} RENAME TO {}",
         quote_identifier(&temporary_name),
         quote_identifier(table_name)
     ));
@@ -2755,7 +2832,10 @@ fn create_table_sql(table: &TableState) -> String {
         }))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("CREATE TABLE {} ({columns})", quote_identifier(&table.name))
+    format!(
+        "CREATE TABLE main.{} ({columns})",
+        quote_identifier(&table.name)
+    )
 }
 
 fn index_statements(table: &TableState) -> Vec<String> {
@@ -2764,7 +2844,7 @@ fn index_statements(table: &TableState) -> Vec<String> {
         .iter()
         .enumerate()
         .map(|(i, columns)| {
-            let name = quote_identifier(&index_name(&table.name, i));
+            let name = format!("main.{}", quote_identifier(&index_name(&table.name, i)));
             create_index_statement(&table.name, &name, columns)
         })
         .collect()
@@ -3584,10 +3664,9 @@ mod tests {
             column: name,
         };
         let rebuild = SqliteSchemaEditor::plan(&add_column, &initial.resulting_state).unwrap();
-        assert!(rebuild
-            .statements
-            .iter()
-            .any(|statement| statement.starts_with("INSERT INTO \"__che_migration_new_items\"")));
+        assert!(rebuild.statements.iter().any(|statement| {
+            statement.starts_with("INSERT INTO main.\"__che_migration_new_items\"")
+        }));
         connection
             .execute_batch(&(rebuild.statements.join("; ") + ";"))
             .unwrap();

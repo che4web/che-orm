@@ -1777,6 +1777,16 @@ async fn column_rename_orders_dependent_views_and_rejects_stale_sql() {
     }
     .state_forwards(&mut state)
     .unwrap();
+    let mut stale_edit = state.clone();
+    stale_edit
+        .add_schema_object(view(
+            "joined",
+            "CREATE VIEW joined AS SELECT val AS result FROM alpha",
+        ))
+        .unwrap();
+    assert!(
+        matches!(generate(&stale_edit), Err(che_orm::MigrationError::NeedsManualMigration { resource, .. }) if resource == "joined")
+    );
     state
         .add_schema_object(view(
             "joined",

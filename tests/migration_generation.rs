@@ -926,6 +926,11 @@ async fn literals_and_unrelated_column_names_do_not_create_dependencies() {
     let mut state = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
     for (kind, name, sql) in [
         (
+            SchemaObjectKind::View,
+            "local_ids",
+            "CREATE VIEW local_ids AS WITH parents AS (SELECT 7 AS id) SELECT id FROM parents",
+        ),
+        (
             SchemaObjectKind::Table,
             "log",
             "CREATE TABLE log (parents INTEGER)",
@@ -938,7 +943,7 @@ async fn literals_and_unrelated_column_names_do_not_create_dependencies() {
         (
             SchemaObjectKind::View,
             "second_view",
-            "CREATE VIEW second_view AS SELECT 'JOIN first_view' AS label /* FROM first_view, archive */",
+            "CREATE VIEW IF NOT EXISTS second_view AS SELECT 'JOIN first_view' AS label /* FROM first_view, archive */",
         ),
     ] {
         state
@@ -982,6 +987,14 @@ async fn literals_and_unrelated_column_names_do_not_create_dependencies() {
     db.migrate(MigrationGraph::new(files).unwrap())
         .await
         .unwrap();
+    assert_eq!(
+        db.query_sql("SELECT id FROM local_ids", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        7
+    );
     db.execute_sql("INSERT INTO log(parents) VALUES (42)", vec![])
         .await
         .unwrap();
@@ -993,4 +1006,549 @@ async fn literals_and_unrelated_column_names_do_not_create_dependencies() {
             .unwrap(),
         "JOIN first_view"
     );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn grouped_from_reads_replacement_after_table_rename() {
+    use che_orm::{Database, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let mut state = ProjectState::from_app_schema(
+        "app",
+        &SchemaSet::new().model::<Parent>().model::<Unrelated>(),
+    );
+    state
+        .add_schema_object(SchemaObjectState {
+            app: "app".into(),
+            kind: SchemaObjectKind::View,
+            name: "report".into(),
+            sql: "CREATE VIEW report AS SELECT parents.id FROM (unrelated, parents)".into(),
+        })
+        .unwrap();
+    let mut files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(files.clone()).unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(history.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO unrelated VALUES (1)", vec![])
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO parents VALUES (10)", vec![])
+        .await
+        .unwrap();
+    let mut replacement = state
+        .models()
+        .into_iter()
+        .find(|m| m.table.name == "parents")
+        .unwrap();
+    replacement.key.name = "Replacement".into();
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "archive".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    MigrationOperation::CreateModel { model: replacement }
+        .state_forwards(&mut state)
+        .unwrap();
+    files.extend(
+        history
+            .generate(&state, MigrationLayout::PerApp, "rename")
+            .unwrap(),
+    );
+    db.migrate(MigrationGraph::new(files).unwrap())
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO parents VALUES (20)", vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        db.query_sql("SELECT id FROM report", vec![]).await.unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        20
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn lateral_is_a_sqlite_fk_target() {
+    use che_orm::{MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "lateral".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    state
+        .add_schema_object(SchemaObjectState {
+            app: "app".into(),
+            kind: SchemaObjectKind::Table,
+            name: "children".into(),
+            sql: "CREATE TABLE children (pid INTEGER REFERENCES lateral(id))".into(),
+        })
+        .unwrap();
+    let files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let mut replacement = state.models().remove(0);
+    replacement.key.name = "Replacement".into();
+    MigrationOperation::RenameTable {
+        old_name: "lateral".into(),
+        new_name: "archive".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    MigrationOperation::CreateModel { model: replacement }
+        .state_forwards(&mut state)
+        .unwrap();
+    assert!(
+        matches!(MigrationGraph::new(files).unwrap().generate(&state,MigrationLayout::PerApp,"rename"),
+        Err(MigrationError::NeedsManualMigration{resource,..}) if resource=="children")
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_rebuild_preserves_tables_using_scratch_names() {
+    use che_orm::{Database, MigrationOperation};
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    let mut reserved = state.models().remove(0);
+    reserved.key.name = "Reserved".into();
+    reserved.table.name = "__che_migration_new_parents".into();
+    MigrationOperation::CreateModel { model: reserved }
+        .state_forwards(&mut state)
+        .unwrap();
+    let mut files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(files.clone()).unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(history.clone()).await.unwrap();
+    db.execute_sql(
+        "CREATE TABLE __che_migration_new_parents_1 (id INTEGER)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    for table in [
+        "parents",
+        "__che_migration_new_parents",
+        "__che_migration_new_parents_1",
+    ] {
+        db.execute_sql(format!("INSERT INTO {table} VALUES (8)"), vec![])
+            .await
+            .unwrap();
+    }
+    MigrationOperation::AddIndex {
+        table: "parents".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let changes = history
+        .generate(&state, MigrationLayout::PerApp, "index")
+        .unwrap();
+    let id = changes[0].id.clone();
+    files.extend(changes);
+    let graph = MigrationGraph::new(files).unwrap();
+    assert!(graph.migration_sql(&id).unwrap()[0].contains("__che_migration_new_parents_1"));
+    db.migrate(graph.clone()).await.unwrap();
+    assert_eq!(db.migrate(graph).await.unwrap(), 0);
+    for table in [
+        "parents",
+        "__che_migration_new_parents",
+        "__che_migration_new_parents_1",
+    ] {
+        assert_eq!(
+            db.query_sql(format!("SELECT id FROM {table}"), vec![])
+                .await
+                .unwrap()[0]
+                .get::<i64>(0)
+                .unwrap(),
+            8
+        );
+    }
+}
+
+#[test]
+fn column_rename_checks_final_view_chain_and_keeps_other_qualified_columns() {
+    use che_orm::{
+        GenerationPolicy, MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState,
+    };
+    let mut state = ProjectState::from_app_schema(
+        "app",
+        &SchemaSet::new().model::<Parent>().model::<Unrelated>(),
+    );
+    let view = |name: &str, sql: &str| SchemaObjectState {
+        app: "app".into(),
+        kind: SchemaObjectKind::View,
+        name: name.into(),
+        sql: sql.into(),
+    };
+    for v in [
+        view("inner_v", "CREATE VIEW inner_v AS SELECT * FROM parents"),
+        view("outer_v", "CREATE VIEW outer_v AS SELECT id FROM inner_v"),
+        view(
+            "alias_report",
+            "CREATE VIEW alias_report AS SELECT u.id FROM unrelated AS u CROSS JOIN parents AS p",
+        ),
+        view(
+            "report",
+            "CREATE VIEW report AS SELECT unrelated.id FROM unrelated CROSS JOIN parents",
+        ),
+    ] {
+        state.add_schema_object(v).unwrap();
+    }
+    let files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let graph = MigrationGraph::new(files.clone()).unwrap();
+    MigrationOperation::RenameColumn {
+        table: "parents".into(),
+        old_name: "id".into(),
+        new_name: "pk".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let drop_outer = MigrationOperation::DropSchemaObject {
+        kind: SchemaObjectKind::View,
+        name: "outer_v".into(),
+    };
+    drop_outer.state_forwards(&mut state).unwrap();
+    state
+        .add_schema_object(view(
+            "outer_v",
+            "CREATE VIEW outer_v AS SELECT id AS item FROM inner_v",
+        ))
+        .unwrap();
+    let policy = GenerationPolicy {
+        rename_columns: [(("parents".into(), "id".into()), "pk".into())].into(),
+        ..Default::default()
+    };
+    let generate = |state: &ProjectState| {
+        graph.generate_with_policy(state, MigrationLayout::PerApp, "rename", &policy)
+    };
+    assert!(
+        matches!(generate(&state), Err(MigrationError::NeedsManualMigration{resource,..}) if resource=="outer_v")
+    );
+    drop_outer.state_forwards(&mut state).unwrap();
+    state
+        .add_schema_object(view(
+            "outer_v",
+            "CREATE VIEW outer_v AS SELECT pk AS item FROM inner_v",
+        ))
+        .unwrap();
+    // The outer view can also keep reading id if the inner view exports it.
+    let mut reexport = state.clone();
+    MigrationOperation::DropSchemaObject {
+        kind: SchemaObjectKind::View,
+        name: "inner_v".into(),
+    }
+    .state_forwards(&mut reexport)
+    .unwrap();
+    reexport
+        .add_schema_object(view(
+            "inner_v",
+            "CREATE VIEW inner_v AS SELECT pk AS id FROM parents",
+        ))
+        .unwrap();
+    drop_outer.state_forwards(&mut reexport).unwrap();
+    reexport
+        .add_schema_object(view(
+            "outer_v",
+            "CREATE VIEW outer_v AS SELECT id FROM inner_v",
+        ))
+        .unwrap();
+    generate(&reexport).unwrap();
+    let changes = generate(&state).unwrap();
+    assert!(!changes.is_empty());
+    #[cfg(feature = "sqlite")]
+    {
+        use che_orm::migration::sqlite_executor::apply_operation_migrations_on_connection as apply;
+        let mut db = che_orm::rusqlite::Connection::open_in_memory().unwrap();
+        apply(&mut db, graph).unwrap();
+        db.execute_batch("INSERT INTO parents VALUES (41); INSERT INTO unrelated VALUES (99)")
+            .unwrap();
+        let final_graph = MigrationGraph::new(files.into_iter().chain(changes).collect()).unwrap();
+        apply(&mut db, final_graph.clone()).unwrap();
+        assert_eq!(
+            db.query_row("SELECT item FROM outer_v", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            41
+        );
+        assert_eq!(
+            db.query_row("SELECT id FROM report", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            99
+        );
+        assert_eq!(apply(&mut db, final_graph).unwrap(), 0);
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn escaped_string_default_does_not_hide_postgres_fk() {
+    use che_orm::{MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    state.add_schema_object(SchemaObjectState{app:"app".into(),kind:SchemaObjectKind::Table,name:"child".into(),
+        sql:r"CREATE TABLE child (label text DEFAULT E'it\'s', pid bigint REFERENCES parents(id))".into()}).unwrap();
+    let files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let mut replacement = state.models().remove(0);
+    replacement.key.name = "Replacement".into();
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "archive".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    MigrationOperation::CreateModel { model: replacement }
+        .state_forwards(&mut state)
+        .unwrap();
+    assert!(
+        matches!(MigrationGraph::new(files).unwrap().generate(&state,MigrationLayout::PerApp,"rename"),
+        Err(MigrationError::NeedsManualMigration{resource,..}) if resource=="child")
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rename_and_rebuild_use_main_despite_temp_shadows() {
+    use che_orm::migration::sqlite_executor::apply_operation_migrations_on_connection as apply;
+    use che_orm::{MigrationOperation, rusqlite::Connection};
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    let mut files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let graph = MigrationGraph::new(files.clone()).unwrap();
+    let mut db = Connection::open_in_memory().unwrap();
+    apply(&mut db, graph.clone()).unwrap();
+    db.execute_batch(
+        "INSERT INTO parents VALUES (41);
+        CREATE TEMP TABLE parents(id INTEGER); INSERT INTO temp.parents VALUES (99);
+        CREATE TEMP TABLE archive(pk INTEGER); INSERT INTO temp.archive VALUES (77);
+        CREATE TEMP TABLE che_migration_history(dummy TEXT);",
+    )
+    .unwrap();
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "archive".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    MigrationOperation::AddIndex {
+        table: "archive".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    state
+        .add_schema_object(che_orm::SchemaObjectState {
+            app: "app".into(),
+            name: "track".into(),
+            kind: che_orm::SchemaObjectKind::Trigger,
+            sql: "CREATE TRIGGER track AFTER INSERT ON archive BEGIN SELECT 1; END".into(),
+        })
+        .unwrap();
+    files.extend(
+        graph
+            .generate(&state, MigrationLayout::PerApp, "rename")
+            .unwrap(),
+    );
+    let graph = MigrationGraph::new(files).unwrap();
+    assert_eq!(apply(&mut db, graph.clone()).unwrap(), 1);
+    assert_eq!(apply(&mut db, graph).unwrap(), 0);
+    assert_eq!(
+        db.query_row(
+            "SELECT tbl_name FROM main.sqlite_schema WHERE name='track'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "archive"
+    );
+    for (table, value) in [
+        ("main.archive", 41),
+        ("temp.parents", 99),
+        ("temp.archive", 77),
+    ] {
+        assert_eq!(
+            db.query_row(&format!("SELECT * FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            value
+        );
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_checks_final_view_exports_and_registered_sql_tables() {
+    use che_orm::migration::sqlite_executor::apply_operation_migrations_on_connection as apply;
+    use che_orm::{
+        GenerationPolicy, MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState,
+        rusqlite::Connection,
+    };
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    for (kind, name, sql) in [
+        (
+            SchemaObjectKind::Table,
+            "raw",
+            "CREATE TABLE raw (tag TEXT)",
+        ),
+        (
+            SchemaObjectKind::View,
+            "inner_v",
+            "CREATE VIEW inner_v AS SELECT id AS amount FROM parents CROSS JOIN raw",
+        ),
+        (
+            SchemaObjectKind::View,
+            "outer_v",
+            "CREATE VIEW outer_v AS SELECT amount FROM inner_v",
+        ),
+    ] {
+        state
+            .add_schema_object(SchemaObjectState {
+                app: "app".into(),
+                kind,
+                name: name.into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+    }
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(initial.clone()).unwrap();
+    MigrationOperation::RenameColumn {
+        table: "parents".into(),
+        old_name: "id".into(),
+        new_name: "pk".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let policy = GenerationPolicy {
+        rename_columns: [(("parents".into(), "id".into()), "pk".into())].into(),
+        ..Default::default()
+    };
+    let generate = |state: &ProjectState| {
+        history.generate_with_policy(state, MigrationLayout::PerApp, "rename", &policy)
+    };
+    let drop_inner = MigrationOperation::DropSchemaObject {
+        kind: SchemaObjectKind::View,
+        name: "inner_v".into(),
+    };
+    let drop_outer = MigrationOperation::DropSchemaObject {
+        kind: SchemaObjectKind::View,
+        name: "outer_v".into(),
+    };
+    drop_inner.state_forwards(&mut state).unwrap();
+    state
+        .add_schema_object(SchemaObjectState {
+            app: "app".into(),
+            kind: SchemaObjectKind::View,
+            name: "inner_v".into(),
+            sql: "CREATE VIEW inner_v AS SELECT pk AS total FROM parents CROSS JOIN raw".into(),
+        })
+        .unwrap();
+    assert!(
+        matches!(generate(&state), Err(MigrationError::NeedsManualMigration { resource, .. }) if resource == "outer_v")
+    );
+    drop_inner.state_forwards(&mut state).unwrap();
+    drop_outer.state_forwards(&mut state).unwrap();
+    for (name, sql) in [
+        (
+            "inner_v",
+            "CREATE VIEW inner_v AS SELECT pk AS id FROM parents CROSS JOIN raw",
+        ),
+        ("outer_v", "CREATE VIEW outer_v AS SELECT id FROM inner_v"),
+    ] {
+        state
+            .add_schema_object(SchemaObjectState {
+                app: "app".into(),
+                kind: SchemaObjectKind::View,
+                name: name.into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+    }
+    let changes = generate(&state).unwrap();
+    let mut db = Connection::open_in_memory().unwrap();
+    apply(&mut db, history).unwrap();
+    db.execute_batch("INSERT INTO parents VALUES (41); INSERT INTO raw VALUES ('fixture')")
+        .unwrap();
+    let graph = MigrationGraph::new(initial.into_iter().chain(changes).collect()).unwrap();
+    apply(&mut db, graph.clone()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT id FROM outer_v", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        41
+    );
+    assert_eq!(apply(&mut db, graph).unwrap(), 0);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_checks_dependent_views_before_removing_allowed_columns() {
+    use che_orm::{
+        GenerationPolicy, MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState,
+    };
+    let mut state = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    let mut column = state.tables()[0].columns[0].clone();
+    column.field_name = "label".into();
+    column.name = "label".into();
+    column.primary_key = false;
+    column.nullable = true;
+    MigrationOperation::AddColumn {
+        table: "parents".into(),
+        column,
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    state
+        .add_schema_object(SchemaObjectState {
+            app: "app".into(),
+            kind: SchemaObjectKind::View,
+            name: "report".into(),
+            sql: "CREATE VIEW report AS SELECT label FROM parents".into(),
+        })
+        .unwrap();
+    let initial = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(initial).unwrap();
+    MigrationOperation::RemoveColumn {
+        table: "parents".into(),
+        column: "label".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let policy = GenerationPolicy {
+        allow_drop: ["parents.label".into()].into(),
+        ..Default::default()
+    };
+    let generate = |state: &ProjectState| {
+        history.generate_with_policy(state, MigrationLayout::PerApp, "remove", &policy)
+    };
+    assert!(
+        matches!(generate(&state), Err(MigrationError::NeedsManualMigration { resource, .. }) if resource == "report")
+    );
+    MigrationOperation::DropSchemaObject {
+        kind: SchemaObjectKind::View,
+        name: "report".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    assert!(!generate(&state).unwrap().is_empty());
 }

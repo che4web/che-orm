@@ -265,6 +265,8 @@ impl MigrationGraph {
             append_group(&mut groups, &owner, ops);
             state = after;
         }
+        #[cfg(feature = "sqlite")]
+        let mut checked_removals = BTreeSet::new();
         loop {
             // Re-diff after each transition: a rename updates inbound FKs in
             // state_forwards, so old AlterColumn snapshots are no longer valid.
@@ -273,6 +275,14 @@ impl MigrationGraph {
                 break;
             }
             catalog.check_intent(&changes)?;
+            #[cfg(feature = "sqlite")]
+            for change in &changes {
+                if let StateChange::RemoveColumn { table, column, .. } = change
+                    && checked_removals.insert((table.clone(), column.name.clone()))
+                {
+                    validate_final_column_references(desired, table, &column.name)?;
+                }
+            }
             let (owner, ops, after) = next_step(&state, &changes, layout, &catalog, &origins)?;
             origins.observe(&ops);
             append_group(&mut groups, &owner, ops);
@@ -349,6 +359,116 @@ impl MigrationGraph {
     }
 }
 
+// Ask SQLite to resolve a view against the final model columns and registered
+// views. Preparing a SELECT resolves nested projections without reading rows.
+// External tables and application functions may only exist at deployment;
+// for those, retain the conservative offline dependency check.
+#[cfg(feature = "sqlite")]
+fn view_catalog(desired: &ProjectState) -> Result<crate::rusqlite::Connection, MigrationError> {
+    let open = || -> crate::rusqlite::Result<_> {
+        let db = crate::rusqlite::Connection::open_in_memory()?;
+        db.set_db_config(
+            crate::rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML,
+            false,
+        )?;
+        for table in desired.tables() {
+            let columns = table
+                .columns
+                .iter()
+                .map(|c| quote_identifier(&c.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            db.execute(
+                &format!("CREATE TABLE {} ({columns})", quote_identifier(&table.name)),
+                [],
+            )?;
+        }
+        // Registered SQL tables provide columns to views just like model tables.
+        for table in desired
+            .objects()
+            .iter()
+            .filter(|o| o.kind == SchemaObjectKind::Table)
+        {
+            db.execute(&table.sql, [])?;
+        }
+        for view in desired
+            .objects()
+            .iter()
+            .filter(|o| o.kind == SchemaObjectKind::View)
+        {
+            db.execute(&view.sql, [])?;
+        }
+        Ok(db)
+    };
+    open().map_err(|e| invalid(format!("cannot prepare final view catalog: {e}")))
+}
+
+fn validate_final_column_references(
+    desired: &ProjectState,
+    table: &str,
+    column: &str,
+) -> Result<(), MigrationError> {
+    let mut pending = vec![table];
+    let mut visited = BTreeSet::new();
+    #[cfg(feature = "sqlite")]
+    let mut catalog = None;
+    while let Some(source) = pending.pop() {
+        if !visited.insert(source) {
+            continue;
+        }
+        for object in desired
+            .objects()
+            .iter()
+            .filter(|o| sql_dependencies::references(o, source))
+        {
+            if object.kind == SchemaObjectKind::View {
+                #[cfg(feature = "postgres")]
+                let propagate = !sql_dependencies::exports_alias(&object.sql, column);
+                #[cfg(feature = "sqlite")]
+                let propagate = true;
+                if propagate {
+                    pending.push(&object.name);
+                }
+            }
+            // SQLite resolves each affected view even when it only uses the
+            // name of an output column from another view.
+            let needs_review = sql_dependencies::may_read_column(object, source, column, desired);
+            #[cfg(feature = "sqlite")]
+            let needs_review = if object.kind == SchemaObjectKind::View {
+                let db = match &catalog {
+                    Some(db) => db,
+                    None => catalog.insert(view_catalog(desired)?),
+                };
+                let select = format!("SELECT * FROM {} LIMIT 0", quote_identifier(&object.name));
+                match db.prepare(&select) {
+                    Ok(_) => continue,
+                    Err(
+                        crate::rusqlite::Error::SqliteFailure(_, Some(message))
+                        | crate::rusqlite::Error::SqlInputError { msg: message, .. },
+                    ) if message.starts_with("no such column:")
+                        || message.starts_with("ambiguous column name:") =>
+                    {
+                        true
+                    }
+                    Err(_) => needs_review,
+                }
+            } else {
+                needs_review
+            };
+            if !needs_review {
+                continue;
+            }
+            return Err(MigrationError::NeedsManualMigration {
+                resource: object.name.clone(),
+                reason: format!(
+                    "review the final SQL referencing {table}.{column} through {source} before changing the column"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 // Drop consumers before their providers. The ordinary diff reinstalls the
 // desired definitions once the model changes are complete.
 fn rename_object_drops(
@@ -358,6 +478,21 @@ fn rename_object_drops(
 ) -> Result<Vec<StateChange>, MigrationError> {
     let mut affected = BTreeMap::new();
     for (table, column) in policy.rename_columns.keys() {
+        // Validate the SQL that will actually be installed, including edited
+        // and newly registered definitions. AS old_name can preserve a view's
+        // public column name without reading the removed physical column.
+        let final_table = state
+            .model_keys
+            .get(table)
+            .and_then(|key| {
+                desired
+                    .model_keys
+                    .iter()
+                    .find(|(_, candidate)| *candidate == key)
+                    .map(|(name, _)| name)
+            })
+            .unwrap_or(table);
+        validate_final_column_references(desired, final_table, column)?;
         let mut relations = BTreeSet::from([table.clone()]);
         loop {
             let mut added = false;
@@ -378,18 +513,6 @@ fn rename_object_drops(
                         });
                     }
                     continue;
-                }
-                if sql_dependencies::mentions_identifier(&object.sql, column)
-                    && desired.objects().iter().any(|new| {
-                        new.kind == object.kind && new.name == object.name && new.sql == object.sql
-                    })
-                {
-                    return Err(MigrationError::NeedsManualMigration {
-                        resource: object.name.clone(),
-                        reason: format!(
-                            "review the registered SQL definition referencing {table}.{column} before renaming the column"
-                        ),
-                    });
                 }
                 affected.insert((object.kind, object.name.clone()), object.clone());
                 if object.kind == SchemaObjectKind::View {

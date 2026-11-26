@@ -135,11 +135,20 @@ fn apply_single_operation_migration(
                 {
                     verify_renamed_indexes(connection, migration_state, table, from_table)?;
                 }
-                if let Some(table) = SqliteSchemaEditor::rebuild_table_name(operation) {
+                let plan = if let Some(table) = SqliteSchemaEditor::rebuild_table_name(operation) {
                     ensure_rebuild_can_preserve_rows(connection, operation)?;
                     assert_rebuild_objects_match_history(connection, table, migration_state)?;
-                }
-                let plan = SqliteSchemaEditor::plan(operation, migration_state)?;
+                    let occupied = connection.prepare(
+                        "SELECT lower(name) FROM main.sqlite_schema UNION SELECT lower(name) FROM temp.sqlite_schema"
+                    )?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<_, _>>()?;
+                    SqliteSchemaEditor::plan_with_reserved_names(
+                        operation,
+                        migration_state,
+                        &occupied,
+                    )?
+                } else {
+                    SqliteSchemaEditor::plan(operation, migration_state)?
+                };
                 let normalizing = matches!(
                     operation,
                     MigrationOperation::NormalizeSqliteDateTimes { .. }
@@ -180,7 +189,7 @@ fn apply_single_operation_migration(
     }
     assert_foreign_keys_valid(connection)?;
     connection.execute(
-        "INSERT INTO che_migration_history (app, name, checksum, applied_on) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO main.che_migration_history (app, name, checksum, applied_on) VALUES (?1, ?2, ?3, ?4)",
         crate::rusqlite::params![
             migration.id.app,
             migration.id.name,
@@ -205,7 +214,7 @@ fn ensure_rebuild_can_preserve_rows(
         {
             let table = quote_identifier(table);
             let has_rows: bool = connection.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"),
+                &format!("SELECT EXISTS(SELECT 1 FROM main.{table} LIMIT 1)"),
                 [],
                 |row| row.get(0),
             )?;
@@ -224,7 +233,7 @@ fn ensure_rebuild_can_preserve_rows(
         } if old_column.nullable && !new_column.nullable => {
             let has_nulls: bool = connection.query_row(
                 &format!(
-                    "SELECT EXISTS(SELECT 1 FROM {} WHERE {} IS NULL LIMIT 1)",
+                    "SELECT EXISTS(SELECT 1 FROM main.{} WHERE {} IS NULL LIMIT 1)",
                     quote_identifier(table),
                     quote_identifier(&new_column.name)
                 ),
@@ -271,7 +280,7 @@ fn ensure_unique_values(
         .join(" AND ");
     let duplicates: bool = connection.query_row(
         &format!(
-            "SELECT EXISTS(SELECT 1 FROM {} WHERE {non_null} GROUP BY {columns_sql} HAVING count(*) > 1 LIMIT 1)",
+            "SELECT EXISTS(SELECT 1 FROM main.{} WHERE {non_null} GROUP BY {columns_sql} HAVING count(*) > 1 LIMIT 1)",
             quote_identifier(table)
         ),
         [],
@@ -299,7 +308,7 @@ fn assert_rebuild_objects_match_history(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let table_sql: Option<String> = connection
         .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            "SELECT sql FROM main.sqlite_master WHERE type = 'table' AND name = ?1",
             [table],
             |row| row.get(0),
         )
@@ -346,7 +355,7 @@ fn assert_rebuild_objects_match_history(
         .collect::<Vec<_>>();
     let mut unmatched_indexes = expected.indexes.clone();
     let mut indexes = connection
-        .prepare("SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1)")?;
+        .prepare("SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1, 'main')")?;
     let indexes = indexes
         .query_map([table], |row| {
             Ok((
@@ -477,6 +486,16 @@ fn sqlite_index_columns(
     Ok((details, columns))
 }
 
+// SQLite canonicalizes the CREATE header in sqlite_schema, including removing
+// IF NOT EXISTS. Compare the body verbatim so drifted definitions stay guarded.
+fn stored_definition(sql: &str) -> &str {
+    super::parse_schema_object_header(sql)
+        .map_or(sql, |h| h.declaration)
+        .trim_end()
+        .trim_end_matches(';')
+        .trim_end()
+}
+
 fn sqlite_opaque_dependents(
     connection: &crate::rusqlite::Connection,
     table: &str,
@@ -484,7 +503,7 @@ fn sqlite_opaque_dependents(
 ) -> Result<Vec<String>, crate::rusqlite::Error> {
     let table = table.to_ascii_lowercase();
     let mut statement = connection.prepare(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('trigger', 'view') AND sql IS NOT NULL ORDER BY type, name",
+        "SELECT type, name, tbl_name, sql FROM main.sqlite_master WHERE type IN ('trigger', 'view') AND sql IS NOT NULL ORDER BY type, name",
     )?;
     statement
         .query_map([], |row| {
@@ -504,7 +523,12 @@ fn sqlite_opaque_dependents(
                             .iter()
                             .find(|object| {
                                 object.name == name
-                                    && object.sql.trim().trim_end_matches(';') == sql
+                                    && matches!(
+                                        (kind.as_str(), object.kind),
+                                        ("trigger", super::SchemaObjectKind::Trigger)
+                                            | ("view", super::SchemaObjectKind::View)
+                                    )
+                                    && stored_definition(&object.sql) == stored_definition(&sql)
                             })
                             .is_none_or(|object| {
                                 super::sql_dependencies::references(object, &table)
@@ -518,14 +542,14 @@ fn sqlite_opaque_dependents(
         .collect()
 }
 
-const OPERATION_MIGRATION_HISTORY_SQL: &str = "CREATE TABLE IF NOT EXISTS che_migration_history (app TEXT NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_on TEXT NOT NULL, PRIMARY KEY (app, name));";
+const OPERATION_MIGRATION_HISTORY_SQL: &str = "CREATE TABLE IF NOT EXISTS main.che_migration_history (app TEXT NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_on TEXT NOT NULL, PRIMARY KEY (app, name));";
 
 pub fn applied_operation_migrations(
     connection: &crate::rusqlite::Connection,
 ) -> Result<HashMap<(String, String), String>, Box<dyn std::error::Error + Send + Sync>> {
     let has_history = connection
         .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'che_migration_history'",
+            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = 'che_migration_history'",
             [],
             |_| Ok(()),
         )
@@ -534,7 +558,7 @@ pub fn applied_operation_migrations(
         return Ok(HashMap::new());
     }
     let mut statement =
-        connection.prepare("SELECT app, name, checksum FROM che_migration_history")?;
+        connection.prepare("SELECT app, name, checksum FROM main.che_migration_history")?;
     let rows = statement.query_map([], |row| {
         Ok((
             (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
