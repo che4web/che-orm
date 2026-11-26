@@ -417,7 +417,7 @@ fn assert_rebuild_objects_match_history(
         )
         .into());
     }
-    let dependents = sqlite_opaque_dependents(connection, table)?;
+    let dependents = sqlite_opaque_dependents(connection, table, migration_state)?;
     if !dependents.is_empty() {
         return Err(format!(
             "cannot rebuild table {table}; SQLite object(s) {} may depend on it. Drop and recreate the matching declared schema objects around the table operation",
@@ -480,6 +480,7 @@ fn sqlite_index_columns(
 fn sqlite_opaque_dependents(
     connection: &crate::rusqlite::Connection,
     table: &str,
+    history: &ProjectState,
 ) -> Result<Vec<String>, crate::rusqlite::Error> {
     let table = table.to_ascii_lowercase();
     let mut statement = connection.prepare(
@@ -497,7 +498,17 @@ fn sqlite_opaque_dependents(
         .filter_map(|row| match row {
             Ok((kind, name, owner, sql))
                 if owner.eq_ignore_ascii_case(&table)
-                    || sql.to_ascii_lowercase().contains(&table) =>
+                    || sql.to_ascii_lowercase().contains(&table)
+                        && history
+                            .objects()
+                            .iter()
+                            .find(|object| {
+                                object.name == name
+                                    && object.sql.trim().trim_end_matches(';') == sql
+                            })
+                            .is_none_or(|object| {
+                                super::sql_dependencies::references(object, &table)
+                            }) =>
             {
                 Some(Ok(format!("{kind} {name}")))
             }

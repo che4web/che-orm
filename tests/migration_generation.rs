@@ -655,3 +655,342 @@ async fn renaming_table_to_its_own_old_index_name_checks_index_ownership() {
         13
     );
 }
+
+#[test]
+fn table_rename_requires_review_for_surviving_raw_foreign_keys_and_stale_views() {
+    use che_orm::{MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    for (kind, name, sql) in [
+        (
+            SchemaObjectKind::Table,
+            "raw_child",
+            "CREATE TABLE raw_child (parent_id INTEGER REFERENCES \"project-parents\"(id))",
+        ),
+        (
+            SchemaObjectKind::View,
+            "parent_ids",
+            "CREATE VIEW parent_ids AS SELECT id FROM \"project-parents\"",
+        ),
+    ] {
+        let mut desired = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+        MigrationOperation::RenameTable {
+            old_name: "parents".into(),
+            new_name: "project-parents".into(),
+        }
+        .state_forwards(&mut desired)
+        .unwrap();
+        desired
+            .add_schema_object(SchemaObjectState {
+                app: "app".into(),
+                kind,
+                name: name.into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+        let files = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate(&desired, MigrationLayout::PerApp, "initial")
+            .unwrap();
+        let graph = MigrationGraph::new(files).unwrap();
+        MigrationOperation::RenameTable {
+            old_name: "project-parents".into(),
+            new_name: "archive".into(),
+        }
+        .state_forwards(&mut desired)
+        .unwrap();
+        if kind == SchemaObjectKind::Table {
+            let mut replacement = desired.models().remove(0);
+            replacement.key.name = "Replacement".into();
+            replacement.table.name = "project-parents".into();
+            MigrationOperation::CreateModel { model: replacement }
+                .state_forwards(&mut desired)
+                .unwrap();
+        }
+        assert!(
+            matches!(graph.generate(&desired, MigrationLayout::PerApp, "rename"),
+            Err(MigrationError::NeedsManualMigration { resource, .. }) if resource == name)
+        );
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_rejects_case_only_table_renames_and_colliding_column_names() {
+    use che_orm::{MigrationError, MigrationOperation};
+    let original = ProjectState::from_app_schema("app", &SchemaSet::new().model::<Parent>());
+    let files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&original, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let graph = MigrationGraph::new(files).unwrap();
+    let mut renamed = original.clone();
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "Parents".into(),
+    }
+    .state_forwards(&mut renamed)
+    .unwrap();
+    assert!(
+        matches!(graph.generate(&renamed, MigrationLayout::PerApp, "rename"),
+        Err(MigrationError::NeedsManualMigration { resource, .. }) if resource == "parents")
+    );
+    let mut column = original.tables()[0].columns[0].clone();
+    column.name = "ID".into();
+    column.primary_key = false;
+    column.nullable = true;
+    let mut changed = original;
+    MigrationOperation::AddColumn {
+        table: "parents".into(),
+        column,
+    }
+    .state_forwards(&mut changed)
+    .unwrap();
+    let error = graph
+        .generate(&changed, MigrationLayout::PerApp, "duplicate")
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("SQLite column name collision on parents")
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn rebuild_restores_transitive_views_before_they_are_queried() {
+    use che_orm::{Database, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let mut desired = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+    for (name, sql) in [
+        ("base", "CREATE VIEW base AS SELECT id FROM parents"),
+        ("outer_view", "CREATE VIEW outer_view AS SELECT * FROM base"),
+    ] {
+        desired
+            .add_schema_object(SchemaObjectState {
+                app: "views".into(),
+                kind: SchemaObjectKind::View,
+                name: name.into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+    }
+    let mut files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&desired, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(files.clone()).unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(history.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO parents VALUES (42)", vec![])
+        .await
+        .unwrap();
+    MigrationOperation::AddIndex {
+        table: "parents".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut desired)
+    .unwrap();
+    files.extend(
+        history
+            .generate(&desired, MigrationLayout::PerApp, "index")
+            .unwrap(),
+    );
+    let graph = MigrationGraph::new(files).unwrap();
+    db.migrate(graph.clone()).await.unwrap();
+    assert_eq!(
+        db.query_sql("SELECT id FROM outer_view", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        42
+    );
+    assert_eq!(db.migrate(graph).await.unwrap(), 0);
+}
+
+#[test]
+fn renamed_table_is_checked_against_final_view_sql_and_bare_unicode_fk() {
+    use che_orm::{MigrationError, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let mut state = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "задачи".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let view = |sql: &str| SchemaObjectState {
+        app: "reports".into(),
+        name: "report".into(),
+        kind: SchemaObjectKind::View,
+        sql: sql.into(),
+    };
+    for foreign_key in [false, true] {
+        let mut desired = state.clone();
+        let object = if foreign_key {
+            SchemaObjectState {
+                app: "models".into(),
+                name: "child".into(),
+                kind: SchemaObjectKind::Table,
+                sql: "CREATE TABLE child (pid INTEGER REFERENCES задачи(id))".into(),
+            }
+        } else {
+            view("CREATE VIEW report AS SELECT id FROM задачи")
+        };
+        desired.add_schema_object(object.clone()).unwrap();
+        let history = MigrationGraph::new(
+            MigrationGraph::new(vec![])
+                .unwrap()
+                .generate(&desired, MigrationLayout::PerApp, "initial")
+                .unwrap(),
+        )
+        .unwrap();
+        MigrationOperation::RenameTable {
+            old_name: "задачи".into(),
+            new_name: "tickets".into(),
+        }
+        .state_forwards(&mut desired)
+        .unwrap();
+        if foreign_key {
+            let mut replacement = state.models().remove(0);
+            replacement.key.name = "Replacement".into();
+            MigrationOperation::CreateModel { model: replacement }
+                .state_forwards(&mut desired)
+                .unwrap();
+        } else {
+            MigrationOperation::DropSchemaObject {
+                kind: object.kind,
+                name: object.name.clone(),
+            }
+            .state_forwards(&mut desired)
+            .unwrap();
+            desired
+                .add_schema_object(view(
+                    "CREATE VIEW report AS SELECT id AS task_id FROM задачи",
+                ))
+                .unwrap();
+        }
+        assert!(
+            matches!(history.generate(&desired, MigrationLayout::PerApp,"rename"),
+            Err(MigrationError::NeedsManualMigration {resource,..}) if resource == object.name)
+        );
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn target_reusing_an_index_name_applies_its_release_first() {
+    use che_orm::{Database, MigrationOperation};
+    let mut state = ProjectState::from_app_schema("z_owner", &SchemaSet::new().model::<Parent>());
+    MigrationOperation::AddIndex {
+        table: "parents".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let mut files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(files.clone()).unwrap();
+    MigrationOperation::RemoveIndex {
+        table: "parents".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    let mut replacement = state.models().remove(0);
+    replacement.key.app = "a_consumer".into();
+    replacement.table.name = "parents_idx_0".into();
+    MigrationOperation::CreateModel { model: replacement }
+        .state_forwards(&mut state)
+        .unwrap();
+    let changes = history
+        .generate(&state, MigrationLayout::PerApp, "reuse")
+        .unwrap();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[1].id.app, "a_consumer");
+    assert!(changes[1].dependencies.contains(&changes[0].id));
+    let target = changes[1].id.clone();
+    files.extend(changes);
+    let graph = MigrationGraph::new(files).unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    assert_eq!(db.migrate_to(graph.clone(), Some(target)).await.unwrap(), 3);
+    db.execute_sql("INSERT INTO parents_idx_0 VALUES (1)", vec![])
+        .await
+        .unwrap();
+    assert_eq!(db.migrate(graph).await.unwrap(), 0);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn literals_and_unrelated_column_names_do_not_create_dependencies() {
+    use che_orm::{Database, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+    let mut state = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+    for (kind, name, sql) in [
+        (
+            SchemaObjectKind::Table,
+            "log",
+            "CREATE TABLE log (parents INTEGER)",
+        ),
+        (
+            SchemaObjectKind::View,
+            "first_view",
+            "CREATE VIEW first_view AS SELECT 'FROM second_view' AS label",
+        ),
+        (
+            SchemaObjectKind::View,
+            "second_view",
+            "CREATE VIEW second_view AS SELECT 'JOIN first_view' AS label /* FROM first_view, archive */",
+        ),
+    ] {
+        state
+            .add_schema_object(SchemaObjectState {
+                app: "reports".into(),
+                kind,
+                name: name.into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+    }
+    let mut files = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate(&state, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let history = MigrationGraph::new(files.clone()).unwrap();
+    MigrationOperation::RenameTable {
+        old_name: "parents".into(),
+        new_name: "archive".into(),
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    files.extend(
+        history
+            .generate(&state, MigrationLayout::PerApp, "rename")
+            .unwrap(),
+    );
+    let renamed = MigrationGraph::new(files.clone()).unwrap();
+    MigrationOperation::AddIndex {
+        table: "archive".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut state)
+    .unwrap();
+    files.extend(
+        renamed
+            .generate(&state, MigrationLayout::PerApp, "index")
+            .unwrap(),
+    );
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(MigrationGraph::new(files).unwrap())
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO log(parents) VALUES (42)", vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        db.query_sql("SELECT label FROM second_view", vec![])
+            .await
+            .unwrap()[0]
+            .get::<String>(0)
+            .unwrap(),
+        "JOIN first_view"
+    );
+}

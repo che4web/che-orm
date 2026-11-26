@@ -5,6 +5,7 @@ use crate::{ColumnSchema, ColumnType, ForeignKey, SchemaSet, TableSchema};
 
 mod catalog;
 mod generation;
+mod sql_dependencies;
 pub use catalog::{GenerationPolicy, SqlTableContract};
 pub use generation::MigrationLayout;
 mod postgres_schema;
@@ -466,6 +467,7 @@ impl ProjectState {
             let old_table = &old.table;
             let new_table = &model.table;
             if old_table.name != new_table.name {
+                self.validate_table_rename(desired, &old_table.name, &new_table.name)?;
                 model_changes.push(StateChange::RenameTable {
                     key: key.clone(),
                     old_name: old_table.name.clone(),
@@ -546,38 +548,89 @@ impl ProjectState {
                 return Err(MigrationError::NeedsManualMigration { resource: old.name.clone(), reason: "SQL table definition or owner changed; provide a data-preserving migration and matching state operations".into() });
             }
         }
-        let mut before = Vec::new();
-        let mut after = Vec::new();
-        for (key, object) in &current_objects {
-            let changed = schema_object_depends_on(object, &changed_tables);
-            match wanted_objects.get(key) {
-                None => before.push(StateChange::DeleteSchemaObject((*object).clone())),
-                Some(_) if changed => {
-                    before.push(StateChange::DeleteSchemaObject((*object).clone()))
-                }
-                Some(wanted) if *wanted != *object => {
-                    before.push(StateChange::DeleteSchemaObject((*object).clone()))
-                }
-                _ => {}
+        let mut dropping: BTreeMap<_, _> = current_objects
+            .iter()
+            .filter(|(key, object)| {
+                wanted_objects.get(*key) != Some(*object)
+                    || schema_object_depends_on(object, &changed_tables)
+            })
+            .map(|(key, object)| (key.clone(), (*object).clone()))
+            .collect();
+        // A dependent view can mention only another view, not the changing model.
+        loop {
+            let dependents: Vec<_> = current_objects
+                .iter()
+                .filter(|(key, object)| {
+                    !dropping.contains_key(*key)
+                        && dropping
+                            .values()
+                            .any(|provider| references_view(object, provider))
+                })
+                .map(|(key, object)| (key.clone(), (*object).clone()))
+                .collect();
+            if dependents.is_empty() {
+                break;
             }
+            dropping.extend(dependents);
         }
-        for (key, object) in &wanted_objects {
-            let changed = schema_object_depends_on(object, &changed_tables);
-            match current_objects.get(key) {
-                None => after.push(StateChange::CreateSchemaObject((*object).clone())),
-                Some(_) if changed => {
-                    after.push(StateChange::CreateSchemaObject((*object).clone()))
-                }
-                Some(current) if *current != *object => {
-                    after.push(StateChange::CreateSchemaObject((*object).clone()))
-                }
-                _ => {}
-            }
-        }
-        let mut changes = before;
+        let creating = wanted_objects
+            .iter()
+            .filter(|(key, object)| {
+                dropping.contains_key(*key) || current_objects.get(*key) != Some(*object)
+            })
+            .map(|(_, object)| (*object).clone())
+            .collect();
+        let mut changes: Vec<_> = order_schema_objects(dropping.into_values().collect(), true)?
+            .into_iter()
+            .map(StateChange::DeleteSchemaObject)
+            .collect();
         changes.extend(model_changes);
-        changes.extend(after);
+        changes.extend(
+            order_schema_objects(creating, false)?
+                .into_iter()
+                .map(StateChange::CreateSchemaObject),
+        );
         Ok(changes)
+    }
+
+    fn validate_table_rename(
+        &self,
+        desired: &Self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(), MigrationError> {
+        #[cfg(feature = "sqlite")]
+        if old_name.eq_ignore_ascii_case(new_name) {
+            return Err(MigrationError::NeedsManualMigration {
+                resource: old_name.into(),
+                reason: format!(
+                    "SQLite requires an intermediate table name for a case-only rename to {new_name}"
+                ),
+            });
+        }
+        let old_name_reused = desired
+            .tables()
+            .iter()
+            .any(|t| catalog::same_name(&t.name, old_name))
+            || desired.objects().iter().any(|o| {
+                o.kind != SchemaObjectKind::Trigger && catalog::same_name(&o.name, old_name)
+            });
+        for object in desired.objects() {
+            // SQLite retargets inbound FKs in place. Views and triggers
+            // are re-created from their desired SQL after the rename.
+            if (!old_name_reused
+                || (object.kind == SchemaObjectKind::Table && self.objects().contains(object)))
+                && sql_dependencies::references(object, old_name)
+            {
+                return Err(MigrationError::NeedsManualMigration {
+                    resource: object.name.clone(),
+                    reason: format!(
+                        "review SQL referencing {old_name} before renaming the table to {new_name}"
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn validate_model_coverage(&self) -> Result<(), MigrationError> {
@@ -639,12 +692,30 @@ fn schema_object_depends_on(object: &SchemaObjectState, tables: &BTreeSet<String
     // Views and triggers can be reinstalled around a schema change. A table
     // owns rows: mentioning a changed model in its SQL is not a migration of it.
     object.kind != SchemaObjectKind::Table
-        && tables.iter().any(|table| sql_mentions(&object.sql, table))
+        && tables
+            .iter()
+            .any(|table| sql_dependencies::references(object, table))
 }
 
-fn sql_mentions(sql: &str, name: &str) -> bool {
-    sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .any(|token| token.eq_ignore_ascii_case(name))
+fn references_view(dependent: &SchemaObjectState, provider: &SchemaObjectState) -> bool {
+    dependent.kind != SchemaObjectKind::Table
+        && provider.kind == SchemaObjectKind::View
+        && dependent != provider
+        && sql_dependencies::references(dependent, &provider.name)
+}
+
+fn order_schema_objects(
+    mut remaining: Vec<SchemaObjectState>,
+    dropping: bool,
+) -> Result<Vec<SchemaObjectState>, MigrationError> {
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let index = remaining.iter().position(|object| !remaining.iter().any(|other| {
+            if dropping { references_view(other, object) } else { references_view(object, other) }
+        })).ok_or_else(|| MigrationError::InvalidState("cyclic SQL view dependencies during schema change; supply an explicit migration".into()))?;
+        ordered.push(remaining.remove(index));
+    }
+    Ok(ordered)
 }
 
 fn parse_schema_object_header(sql: &str) -> Option<(SchemaObjectKind, String)> {

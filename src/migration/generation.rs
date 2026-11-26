@@ -349,8 +349,8 @@ impl MigrationGraph {
     }
 }
 
-// SQLite rewrites dependent SQL during ALTER TABLE. Drop registered views and
-// triggers first and let the ordinary diff reinstall their desired definitions.
+// Drop consumers before their providers. The ordinary diff reinstalls the
+// desired definitions once the model changes are complete.
 fn rename_object_drops(
     state: &ProjectState,
     desired: &ProjectState,
@@ -362,11 +362,14 @@ fn rename_object_drops(
         loop {
             let mut added = false;
             for object in state.objects() {
-                if !relations.iter().any(|name| sql_mentions(&object.sql, name)) {
+                if !relations
+                    .iter()
+                    .any(|name| sql_dependencies::references(object, name))
+                {
                     continue;
                 }
                 if object.kind == SchemaObjectKind::Table {
-                    if sql_mentions(&object.sql, column) {
+                    if sql_dependencies::mentions_identifier(&object.sql, column) {
                         return Err(MigrationError::NeedsManualMigration {
                             resource: object.name.clone(),
                             reason: format!(
@@ -376,7 +379,7 @@ fn rename_object_drops(
                     }
                     continue;
                 }
-                if sql_mentions(&object.sql, column)
+                if sql_dependencies::mentions_identifier(&object.sql, column)
                     && desired.objects().iter().any(|new| {
                         new.kind == object.kind && new.name == object.name && new.sql == object.sql
                     })
@@ -388,7 +391,7 @@ fn rename_object_drops(
                         ),
                     });
                 }
-                affected.insert((object.kind, object.name.clone()), object);
+                affected.insert((object.kind, object.name.clone()), object.clone());
                 if object.kind == SchemaObjectKind::View {
                     added |= relations.insert(object.name.clone());
                 }
@@ -398,29 +401,12 @@ fn rename_object_drops(
             }
         }
     }
-    let mut changes = Vec::new();
-    while !affected.is_empty() {
-        let removable = affected.values().find(|object| {
-            !affected
-                .values()
-                .any(|dependent| references_view(dependent, object))
-        });
-        let Some(&object) = removable else {
-            return Err(invalid(
-                "cyclic SQL view dependencies during column rename; supply an explicit migration",
-            ));
-        };
-        affected.remove(&(object.kind, object.name.clone()));
-        changes.push(StateChange::DeleteSchemaObject(object.clone()));
-    }
-    Ok(changes)
-}
-
-fn references_view(dependent: &SchemaObjectState, provider: &SchemaObjectState) -> bool {
-    dependent.kind != SchemaObjectKind::Table
-        && provider.kind == SchemaObjectKind::View
-        && dependent != provider
-        && sql_mentions(&dependent.sql, &provider.name)
+    Ok(
+        order_schema_objects(affected.into_values().collect(), true)?
+            .into_iter()
+            .map(StateChange::DeleteSchemaObject)
+            .collect(),
+    )
 }
 
 /// Origin of the *actual* SQLite index names after bare historical renames.
@@ -543,7 +529,9 @@ fn validate_file(
     .resulting_state;
     #[cfg(feature = "sqlite")]
     let state = ops.iter().try_fold(before.clone(), |s, op| {
-        SqliteSchemaEditor::plan(op, &s).map(|p| p.resulting_state)
+        let next = SqliteSchemaEditor::plan(op, &s)?.resulting_state;
+        catalog::validate_sqlite_namespace(&next)?;
+        Ok::<_, MigrationError>(next)
     })?;
     state.validate()?;
     catalog.validate_requirements(&state)?;
@@ -854,6 +842,13 @@ fn access(
                 continue;
             }
         };
+        // The operation that releases an index name must precede a file that
+        // reuses it, including when only that file's ancestors are deployed.
+        if let DropTable { name } | RemoveIndex { table: name, .. } = op {
+            let before = &state.tables[table_index(state, name)?];
+            a.writes
+                .extend((0..before.indexes.len()).map(|i| physical_key(&index_name(name, i))));
+        }
         a.writes.insert(physical_key(table));
         op.state_forwards(state)?;
         if let Some(schema) = state.tables().iter().find(|t| t.name == *table) {

@@ -342,7 +342,7 @@ fn removal_advice(change: &StateChange, changes: &[StateChange], resource: &str)
 }
 
 #[cfg(feature = "sqlite")]
-fn validate_sqlite_namespace(state: &ProjectState) -> Result<(), MigrationError> {
+pub(super) fn validate_sqlite_namespace(state: &ProjectState) -> Result<(), MigrationError> {
     // SQLite folds ASCII case (including quoted names); tables and views share
     // a namespace. Do not change the stored spelling or historical checksums.
     let mut owners = BTreeMap::new();
@@ -361,6 +361,15 @@ fn validate_sqlite_namespace(state: &ProjectState) -> Result<(), MigrationError>
             .get(&table.name)
             .map_or("<history>", |k| k.app.as_str());
         register(&table.name, owner)?;
+        let mut columns = BTreeMap::new();
+        for column in &table.columns {
+            if let Some(previous) = columns.insert(physical_key(&column.name), &column.name) {
+                return Err(MigrationError::InvalidState(format!(
+                    "SQLite column name collision on {}: {previous} and {}",
+                    table.name, column.name
+                )));
+            }
+        }
         for position in 0..table.indexes.len() {
             register(&index_name(&table.name, position), owner)?;
         }
