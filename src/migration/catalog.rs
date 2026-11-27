@@ -57,7 +57,7 @@ pub struct GenerationPolicy {
 }
 
 pub(super) struct Catalog<'a> {
-    desired: &'a ProjectState,
+    pub(super) desired: &'a ProjectState,
     pub policy: &'a GenerationPolicy,
     external: BTreeSet<(String, String)>,
 }
@@ -241,6 +241,21 @@ impl<'a> Catalog<'a> {
     pub fn check_intent(&self, changes: &[StateChange]) -> Result<(), MigrationError> {
         for change in changes {
             let resource = match change {
+                StateChange::AddColumn { table, column, .. }
+                    if !column.nullable
+                        && (column.default.is_some() || column.auto_now || column.auto_now_add)
+                        && self
+                            .desired
+                            .tables()
+                            .iter()
+                            .find(|candidate| candidate.name == *table)
+                            .is_some_and(|candidate| has_key(candidate, &column.name)) =>
+                {
+                    return Err(MigrationError::NeedsManualMigration {
+                        resource: format!("{table}.{}", column.name),
+                        reason: "adding a required unique column with a default needs a staged migration; add it nullable without a default, backfill distinct values, then enforce UNIQUE and NOT NULL".into(),
+                    });
+                }
                 StateChange::AddColumn { table, column, .. }
                     if !column.nullable
                         && column.default.is_none()

@@ -336,5 +336,5 @@ cargo run -p che-orm-examples --bin serializers
 
 ## Current publication candidate
 
-- Registry checked 2026-11-12: core 0.3.3, macros 0.3.2, protocol 0.1.0, sync 0.1.3 and REST 0.3.4 are published. Breaking bound-query/datetime candidates are core 0.4.0, sync 0.2.0 and REST 0.4.0. Macros/protocol are unchanged; do not republish them or reuse old versions/tags. che-tauri has no registry entry and retains its unused 0.1.1 candidate. See docs/registry-audit-2026-11-12.json.
+- Release candidates are che-orm-macros 0.4.0, che-orm 0.5.0, che-sync 0.3.0 and che-rest 0.5.0. Keep the published che-sync-protocol 0.1.0.
 - See `docs/release-checklist.md` for checks and publication order. Package preparation and `cargo publish --dry-run` do not authorize an actual publication.

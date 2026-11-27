@@ -6,32 +6,16 @@ Current workspace package versions:
 
 | Package | Version |
 | --- | --- |
-| che-orm-macros | 0.3.2 |
-| che-orm | 0.4.0 (unpublished candidate) |
-| che-sync-protocol | 0.1.0 |
-| che-sync | 0.2.0 (unpublished candidate) |
+| che-orm-macros | 0.4.0 |
+| che-orm | 0.5.0 |
+| che-sync-protocol | 0.1.0 (published) |
+| che-sync | 0.3.0 |
 
-Registry audit on 2026-11-12 confirms published core 0.3.3, macros 0.3.2,
-protocol 0.1.0, sync 0.1.3 and REST 0.3.4, all non-yanked; che-tauri has no
-registry entry. See [the registry audit](registry-audit-2026-11-12.json).
-Completed preparation checks and remaining gates are recorded in the
-[2026-11-14 verification report](release-verification-2026-11-14.md).
-The new candidates require Rust 1.89, including the patched bundled SQLite driver.
-The new candidates are core 0.4.0, sync 0.2.0 and REST 0.4.0. Bound queries and
-SQLite datetime storage are breaking changes; bump minor versions under 0.x.
-Macros/protocol source and original manifests match their published archives:
-keep their versions and do not republish them. che-tauri's unused 0.1.1 candidate
-can remain unchanged while its dependencies move to this new core/sync line.
-
-Core 0.3.3 adds capture of ordinary-parent referential actions for model journals
-and integer foreign-key support. Sync 0.1.2 also includes self-referencing UUID
-models, initial-pull/pending-entity inspection and a feature guard for its
-SQLite-only foreign-key test. Macros and protocol versions are unchanged.
-Registry check on 2026-11-06 confirmed core 0.3.3, macros 0.3.2, protocol
-0.1.0, sync 0.1.2 and REST 0.3.3 are already published and not yanked.
-Do not republish those versions or move their tags. The former sync 0.1.3 and
-REST 0.3.4 candidates have since been published; they cannot identify this source.
-The initial-publication notes below describe previous candidates.
+The published baseline is che-orm 0.4.0, che-orm-macros 0.3.2,
+che-sync-protocol 0.1.0, che-sync 0.2.0 and che-rest 0.4.0. The next core,
+sync and REST releases require Rust 1.89. The macro release enforces lowercase
+physical table names and app prefixes. The protocol crate version stays at
+0.1.0.
 
 The crates in `example/` are private (`publish = false`). Package the four public
 crates explicitly rather than using `cargo package --workspace`.
@@ -194,21 +178,15 @@ Fresh-database tests do not validate this application-specific upgrade.
 
 ## Publication
 
-Publish only after separate explicit authorization, dependency-order verification
-and review of application-owned SQLite upgrades. Current order is **che-orm
-0.4.0**, **che-sync 0.2.0**, then downstream **che-rest 0.4.0**. Already published
-versions/tags remain untouched. Review and commit the verified release first:
+Review and commit the verified release. Publish in dependency order and wait
+for each version to be indexed before checking the next candidate.
 
-```bash
-cargo publish --dry-run -p che-orm --locked
-# Publish core only with separate approval; wait for indexing before sync dry run.
-cargo publish --dry-run -p che-sync --locked
-```
+1. `che-orm-macros 0.4.0`
+2. `che-orm 0.5.0`
+3. `che-sync 0.3.0`
+4. `che-rest 0.5.0` from its repository
 
-After core 0.4.0 and sync 0.2.0 are published and indexed, REST 0.4.0 can pass
-its ordinary registry dry run. Verify registry/docs.rs before creating any new
-tags. Keep `v0.3.3`, `che-sync-v0.1.3` and REST `v0.3.4` intact. che-tauri's
-initial publication is a separate decision; Tacit 0.1.14 remains an application.
-
-Packaging and dry runs are verification only, not authorization to publish.
-See the [release checklist](release-checklist.md) for the publication gates.
+Run `cargo publish --dry-run --locked` for each package before publication.
+Actual publication requires separate explicit authorization. Verify crates.io
+and docs.rs before creating the matching Git tags. See the
+[release checklist](release-checklist.md) for the remaining gates.

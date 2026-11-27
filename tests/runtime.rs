@@ -6,6 +6,9 @@ use che_orm::{
 };
 use time::OffsetDateTime;
 
+#[path = "runtime/target_closures.rs"]
+mod target_closures;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, DbEnum)]
 enum Status {
     Draft,
@@ -474,6 +477,92 @@ struct SavedNote {
 struct SavedKey {
     #[orm(primary_key)]
     id: i64,
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires TEST_POSTGRES_URL"]
+async fn reports_target_preserves_archive_until_full_migration() {
+    use che_orm::{GenerationPolicy, MigrationLayout, SchemaObjectKind, SchemaObjectState};
+
+    let (db, cleanup) = fixture().await;
+    let mut desired = ProjectState::from_app_schema("stock", &SchemaSet::new().model::<SavedKey>());
+    let mut old = desired.clone();
+    old.add_schema_object(SchemaObjectState {
+        app: "stock".into(),
+        kind: SchemaObjectKind::Table,
+        name: "archive".into(),
+        sql: "CREATE TABLE archive(id BIGINT PRIMARY KEY)".into(),
+    })
+    .unwrap();
+    let baseline = MigrationGraph::new(vec![])
+        .unwrap()
+        .generate_initial(&old, "initial")
+        .unwrap();
+    let previous = MigrationGraph::new(baseline.clone()).unwrap();
+    db.migrate(previous.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO archive VALUES (42)", vec![])
+        .await
+        .unwrap();
+    db.execute_sql("INSERT INTO portable_saved_keys VALUES (7)", vec![])
+        .await
+        .unwrap();
+    MigrationOperation::AddIndex {
+        table: "portable_saved_keys".into(),
+        columns: vec!["id".into()],
+    }
+    .state_forwards(&mut desired)
+    .unwrap();
+    desired
+        .add_schema_object(SchemaObjectState {
+            app: "reports".into(),
+            kind: SchemaObjectKind::View,
+            name: "report".into(),
+            sql: "CREATE VIEW report AS SELECT id FROM portable_saved_keys".into(),
+        })
+        .unwrap();
+    let policy = GenerationPolicy {
+        allow_drop: ["archive".into()].into(),
+        ..Default::default()
+    };
+    let files = previous
+        .generate_with_policy(&desired, MigrationLayout::PerApp, "update", &policy)
+        .unwrap();
+    let graph = MigrationGraph::new(baseline.into_iter().chain(files).collect()).unwrap();
+    let target = graph.app_heads("reports")[0].id.clone();
+    assert_eq!(db.migrate_to(graph.clone(), Some(target)).await.unwrap(), 1);
+    assert_eq!(
+        db.query_sql("SELECT id FROM archive", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        42
+    );
+    assert_eq!(
+        db.query_sql("SELECT id FROM report", vec![]).await.unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        7
+    );
+    assert_eq!(db.migrate(graph).await.unwrap(), 1);
+    assert!(
+        db.query_sql("SELECT id FROM archive", vec![])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        db.query_sql("SELECT id FROM report", vec![]).await.unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        7
+    );
+    if let Some((admin, schema)) = cleanup {
+        admin
+            .execute_sql(format!("DROP SCHEMA \"{schema}\" CASCADE"), vec![])
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]

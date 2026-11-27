@@ -304,8 +304,8 @@ impl SchemaSet {
     pub fn try_to_sql<D: crate::SqlDialect>(&self) -> Result<String, SchemaError> {
         self.validate()?;
         let mut sql = self.to_sql_unchecked::<D>();
-        if !self.sqlite_definitions.is_empty() {
-            if !D::SUPPORTS_SQLITE_TRIGGERS {
+        if !self.sqlite_definitions.is_empty() || !self.declared_objects.is_empty() {
+            if !self.sqlite_definitions.is_empty() && !D::SUPPORTS_SQLITE_TRIGGERS {
                 return Err(SchemaError::InvalidTrigger(
                     "SQLite definitions require the SQLite dialect".into(),
                 ));
@@ -320,7 +320,18 @@ impl SchemaSet {
                     false,
                 )
                 .map_err(|error| SchemaError::InvalidTrigger(error.to_string()))?;
-            for object in state.objects() {
+            for (definition, inputs) in &self.declared_objects {
+                state
+                    .add_declared_object(definition.clone(), inputs.iter().cloned())
+                    .map_err(|e| SchemaError::InvalidTrigger(e.to_string()))?;
+            }
+            state
+                .validate()
+                .map_err(|e| SchemaError::InvalidTrigger(e.to_string()))?;
+            for object in state
+                .ordered_schema_objects()
+                .map_err(|e| SchemaError::InvalidTrigger(e.to_string()))?
+            {
                 sql.push_str(&object.sql);
                 sql.push_str(";\n");
             }
@@ -379,6 +390,7 @@ pub struct SchemaSet {
     model_names: Vec<&'static str>,
     sync_models: Vec<crate::SyncRegistration>,
     pub(crate) sqlite_definitions: Vec<SqliteDefinition>,
+    pub(crate) declared_objects: Vec<crate::migration::DeclaredObject>,
 }
 
 impl SchemaSet {
@@ -410,6 +422,18 @@ impl SchemaSet {
     pub fn sqlite_guard<M: crate::Model>(mut self, guard: crate::SqliteGuard<M>) -> Self {
         self.sqlite_definitions
             .push(SqliteDefinition::Guard(guard.into_definition()));
+        self
+    }
+
+    /// Registers reviewed SQL and the schema inputs needed by this definition.
+    /// The registering application owns the object in compiled migrations.
+    pub fn declared_object(
+        mut self,
+        object: crate::SchemaObjectState,
+        inputs: impl IntoIterator<Item = crate::SchemaRequirement>,
+    ) -> Self {
+        self.declared_objects
+            .push((object, inputs.into_iter().collect()));
         self
     }
 
@@ -461,6 +485,7 @@ impl SchemaSet {
         self.model_names.extend(other.model_names);
         self.sync_models.extend(other.sync_models);
         self.sqlite_definitions.extend(other.sqlite_definitions);
+        self.declared_objects.extend(other.declared_objects);
         self
     }
 

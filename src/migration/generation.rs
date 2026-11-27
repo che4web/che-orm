@@ -1,7 +1,10 @@
 //! Offline planning for newly generated migrations. Historical operations and
 //! checksums are inputs, never regenerated from the current model definitions.
-use super::catalog::{Catalog, has_key, same_name};
+use super::catalog::{Catalog, has_key, physical_key, same_name};
 use super::*;
+
+mod operation_plan;
+use operation_plan::{OperationPlan, access};
 
 /// File ownership for generated migrations. Model ownership is always retained.
 #[derive(Clone, Copy, Debug)]
@@ -135,7 +138,8 @@ impl MigrationGraph {
         {
             let mut state = before;
             let mut sql = Vec::new();
-            for op in operations {
+            let mut physical = PhysicalOperations::new(operations);
+            while let Some(op) = physical.next(&state) {
                 let plan = SqliteSchemaEditor::plan(op, &state)?;
                 state = plan.resulting_state;
                 sql.extend(plan.statements);
@@ -162,6 +166,17 @@ impl MigrationGraph {
         }
     }
 
+    /// Renders a script suitable for executing as one batch. A delimiter on
+    /// its own line also terminates SQL ending in a line comment.
+    pub fn migration_sql_script(&self, target: &MigrationId) -> Result<String, MigrationError> {
+        let mut script = String::new();
+        for statement in self.migration_sql(target)? {
+            script.push_str(&statement);
+            script.push_str("\n;\n");
+        }
+        Ok(script)
+    }
+
     /// Plans initial files against existing history. For mutually dependent
     /// new models, it can install tables before adding cross-app foreign keys.
     pub fn generate_initial(
@@ -179,47 +194,16 @@ impl MigrationGraph {
         // A cycle between new models can be broken by installing those tables
         // before their cross-app foreign keys. Both phases use the regular
         // planner, including ordering and dependencies for SQL objects.
-        let mut staged = desired.clone();
-        let mut deferred = false;
-        for table in &mut staged.tables {
-            let Some(owner) = staged.model_keys.get(&table.name) else {
-                continue;
-            };
-            if historical.model_keys.contains_key(&table.name) {
-                continue;
-            }
-            for column in &mut table.columns {
-                if let Some((target, _)) = column
-                    .references
-                    .as_ref()
-                    .and_then(ForeignKeyState::target_parts)
-                    && staged
-                        .model_keys
-                        .get(target)
-                        .is_some_and(|provider| provider.app != owner.app)
-                    && !historical.model_keys.contains_key(target)
-                {
-                    column.references = None;
-                    deferred = true;
-                }
-            }
-        }
-        if !deferred {
-            return Err(error);
-        }
-        staged
-            .objects
-            .retain(|object| object.kind == SchemaObjectKind::Table);
-        staged.objects.extend(
-            historical
-                .objects
-                .iter()
-                .filter(|object| object.kind != SchemaObjectKind::Table)
-                .cloned(),
-        );
-        let Ok(mut files) = self.generate(&staged, layout, label) else {
+        let Some(staged) = defer_new_foreign_keys(&historical, desired) else {
             return Err(error);
         };
+        let mut files = self.generate_plan(
+            &staged,
+            layout,
+            label,
+            &GenerationPolicy::default(),
+            Some(desired),
+        )?;
         let base = MigrationGraph::new(
             self.ordered()
                 .cloned()
@@ -230,9 +214,9 @@ impl MigrationGraph {
         Ok(files)
     }
 
-    /// Plans a single application's changes against the compiled history of
-    /// other apps. Historical dependent objects can be temporarily removed
-    /// and restored in the same file when a table needs rebuilding.
+    /// Plans one application's changes against the compiled history of other
+    /// apps. Pending consumers in the registry determine the file boundaries,
+    /// so generating a provider first can produce several migrations.
     pub fn generate_for_app(
         &self,
         desired: &ProjectState,
@@ -240,7 +224,8 @@ impl MigrationGraph {
         name: &str,
         policy: &GenerationPolicy,
     ) -> Result<Vec<Migration>, MigrationError> {
-        let mut selected = self.replay(ProjectState::default())?;
+        let historical = self.replay(ProjectState::default())?;
+        let mut selected = historical.clone();
         selected.tables.retain(|table| {
             selected
                 .model_keys
@@ -249,6 +234,12 @@ impl MigrationGraph {
         });
         selected.model_keys.retain(|_, key| key.app != app);
         selected.objects.retain(|object| object.app != app);
+        selected.requirements.retain(|(kind, name), _| {
+            selected
+                .objects
+                .iter()
+                .any(|o| o.kind == *kind && o.name == *name)
+        });
         for model in desired
             .models()
             .into_iter()
@@ -268,6 +259,17 @@ impl MigrationGraph {
             MigrationOperation::CreateModel { model }.state_forwards(&mut selected)?;
         }
         for object in desired.objects().iter().filter(|object| object.app == app) {
+            if let Some(requires) = desired.object_requirements(object) {
+                selected.add_declared_object(object.clone(), requires.iter().cloned())?;
+            } else {
+                selected.add_schema_object(object.clone())?;
+            }
+            if historical.objects().contains(object)
+                && historical.object_requirements(object) == desired.object_requirements(object)
+            {
+                continue;
+            }
+            let reads = sql_dependencies::SqlReads::new(object);
             for table in desired.tables().iter().map(|table| &table.name).chain(
                 desired
                     .objects()
@@ -275,7 +277,7 @@ impl MigrationGraph {
                     .filter(|provider| provider.kind == SchemaObjectKind::Table)
                     .map(|provider| &provider.name),
             ) {
-                if sql_dependencies::references(object, table)
+                if reads.references(table)
                     && !selected
                         .tables()
                         .iter()
@@ -295,16 +297,25 @@ impl MigrationGraph {
                     )));
                 }
             }
+            operation_plan::Access::check_scoped_object(object, &selected, desired, policy)?;
             for provider in desired
                 .objects()
                 .iter()
                 .filter(|provider| provider.kind == SchemaObjectKind::View && provider.app != app)
             {
-                if references_view(object, provider)
-                    && !selected.objects().iter().any(|candidate| {
-                        candidate.kind == SchemaObjectKind::View
-                            && same_name(&candidate.name, &provider.name)
-                    })
+                if !desired.requires_object(object, provider, false) {
+                    continue;
+                }
+                let registered = selected.objects().iter().find(|candidate| {
+                    candidate.kind == SchemaObjectKind::View
+                        && same_name(&candidate.name, &provider.name)
+                });
+                // SQLite can resolve a consumer view against the registered
+                // definition below, even if its provider has pending edits.
+                if registered.is_none()
+                    || (registered != Some(provider)
+                        && !historical.objects().contains(object)
+                        && !(cfg!(feature = "sqlite") && object.kind == SchemaObjectKind::View))
                 {
                     return Err(invalid(format!(
                         "schema object {} requires view {}; generate and register its migration first",
@@ -312,9 +323,16 @@ impl MigrationGraph {
                     )));
                 }
             }
-            selected.add_schema_object(object.clone())?;
         }
-        self.generate_with_policy(&selected, MigrationLayout::Single(app), name, policy)
+        #[cfg(feature = "sqlite")]
+        validate_scoped_view_columns(&selected, desired, app)?;
+        self.generate_plan(
+            &selected,
+            MigrationLayout::Single(app),
+            name,
+            policy,
+            Some(desired),
+        )
     }
 
     /// Generate only new migrations, in application order, without I/O. Each
@@ -338,190 +356,121 @@ impl MigrationGraph {
         name: &str,
         policy: &GenerationPolicy,
     ) -> Result<Vec<Migration>, MigrationError> {
+        self.generate_plan(desired, layout, name, policy, None)
+    }
+
+    fn generate_plan(
+        &self,
+        desired: &ProjectState,
+        layout: MigrationLayout<'_>,
+        name: &str,
+        policy: &GenerationPolicy,
+        registered: Option<&ProjectState>,
+    ) -> Result<Vec<Migration>, MigrationError> {
         self.validate_heads()?;
         if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
             return Err(invalid("invalid generated migration name"));
         }
         let historical = self.replay(ProjectState::default())?;
-        let catalog = Catalog::new(&historical, desired, policy)?;
-        let mut state = historical.clone();
-        let mut groups: Vec<(String, Vec<MigrationOperation>)> = Vec::new();
-        // Frozen RenameTable files kept the old physical SQLite index names.
-        // Reclaim those names before another model needs them. The same logical
-        // operations are valid on PostgreSQL and preserve both histories.
         let mut origins = SqliteIndexOrigins::default();
-        for migration in self.ordered() {
-            origins.observe(&migration.operations);
+        for file in self.ordered() {
+            origins.observe(&file.operations);
         }
-        for (owner, op) in origins.repairs(&historical, desired)? {
-            op.state_forwards(&mut state)?;
-            origins.observe(std::slice::from_ref(&op));
-            append_group(&mut groups, layout.file_owner(&owner), vec![op]);
-        }
-        for ((app, old_name), new_name) in &policy.rename_models {
-            let old = ModelKey {
-                app: app.clone(),
-                name: old_name.clone(),
-            };
-            let new = ModelKey {
-                app: app.clone(),
-                name: new_name.clone(),
-            };
-            let table = state
-                .model_keys
-                .iter()
-                .find(|(_, key)| **key == old)
-                .ok_or_else(|| invalid(format!("unknown historical model {app}.{old_name}")))?
-                .0
-                .clone();
-            if !desired.model_keys.values().any(|key| *key == new)
-                || desired.model_keys.values().any(|key| *key == old)
-            {
-                return Err(invalid(format!(
-                    "expected {app}.{new_name} to replace {app}.{old_name} in the model registry"
-                )));
-            }
-            let op = MigrationOperation::RenameModel {
-                table,
-                app: app.clone(),
-                old_name: old_name.clone(),
-                new_name: new_name.clone(),
-            };
-            op.state_forwards(&mut state)?;
-            append_group(&mut groups, layout.file_owner(app), vec![op]);
-        }
-        let mut explicit_changes = rename_object_drops(&state, desired, policy)?;
-        for ((table, old_name), new_name) in &policy.rename_columns {
-            let key = state
-                .model_keys
-                .get(table)
-                .ok_or_else(|| invalid(format!("unknown historical table {table}")))?;
-            let model = desired
-                .models()
-                .into_iter()
-                .find(|m| m.key == *key)
-                .ok_or_else(|| invalid(format!("missing desired model for {table}")))?;
-            if !model.table.columns.iter().any(|c| c.name == *new_name)
-                || model.table.columns.iter().any(|c| c.name == *old_name)
-            {
-                return Err(invalid(format!(
-                    "expected {new_name} to replace {table}.{old_name} in desired schema"
-                )));
-            }
-            explicit_changes.push(StateChange::RenameColumn {
-                key: key.clone(),
-                table: table.clone(),
-                old_name: old_name.clone(),
-                new_name: new_name.clone(),
+        let mut operations = Vec::new();
+        let mut selected_policy = policy.clone();
+        if let (Some(_), MigrationLayout::Single(app)) = (registered, layout) {
+            selected_policy
+                .rename_models
+                .retain(|(owner, _), _| owner == app);
+            selected_policy.rename_columns.retain(|(table, _), _| {
+                table_owner(&historical, table).is_none_or(|owner| owner == app)
+            });
+            selected_policy.sql_tables.retain(|table, _| {
+                [desired, &historical].iter().any(|s| {
+                    s.objects()
+                        .iter()
+                        .any(|o| o.kind == SchemaObjectKind::Table && o.name == *table)
+                })
             });
         }
-        for change in explicit_changes {
-            let (owner, ops, after) = next_step(&state, &[change], layout, &catalog, &origins)?;
-            append_group(&mut groups, &owner, ops);
-            state = after;
+        let catalog = Catalog::new(&historical, desired, &selected_policy)?;
+        collect_operations(
+            &historical,
+            layout,
+            &catalog,
+            &mut origins,
+            &mut operations,
+            true,
+        )?;
+        let emitted = operations.len();
+        if emitted == 0 {
+            return Ok(vec![]);
         }
-        #[cfg(feature = "sqlite")]
-        let mut checked_removals = BTreeSet::new();
-        loop {
-            // Re-diff after each transition: a rename updates inbound FKs in
-            // state_forwards, so old AlterColumn snapshots are no longer valid.
-            let changes = state.diff(desired)?;
-            if changes.is_empty() {
-                break;
-            }
-            catalog.check_intent(&changes)?;
-            #[cfg(feature = "sqlite")]
-            for change in &changes {
-                if let StateChange::RemoveColumn { table, column, .. } = change
-                    && checked_removals.insert((table.clone(), column.name.clone()))
+        let Some(registry) = registered else {
+            return OperationPlan::new(self, operations, &catalog, emitted)?
+                .migrations(self, historical, name, &catalog);
+        };
+        // Include the rest of the project's transitions so indirect consumers
+        // also determine the file boundaries of the emitted provider operations.
+        let mut remaining_policy = policy.clone();
+        remaining_policy
+            .rename_models
+            .retain(|k, _| !selected_policy.rename_models.contains_key(k));
+        remaining_policy
+            .rename_columns
+            .retain(|k, _| !selected_policy.rename_columns.contains_key(k));
+        // A changed opaque table needs a hand-written conversion. Its compiled
+        // definition remains the provider for independent scoped generation.
+        let mut registry = std::borrow::Cow::Borrowed(registry);
+        let unresolved: Vec<_> = desired
+            .objects()
+            .iter()
+            .filter(|old| old.kind == SchemaObjectKind::Table)
+            .filter_map(|old| {
+                registry
+                    .objects()
+                    .iter()
+                    .position(|o| o.kind == old.kind && o.name == old.name && o != old)
+                    .map(|i| (i, old))
+            })
+            .collect();
+        if !unresolved.is_empty() {
+            let mut cursor = historical.clone();
+            for (_, op) in &operations {
+                let resources = access(std::slice::from_ref(op), &mut cursor, &catalog)?;
+                if let Some((_, old)) = unresolved
+                    .iter()
+                    .find(|(_, old)| resources.requires_table(&old.name))
                 {
-                    validate_final_column_references(desired, table, &column.name)?;
+                    return Err(MigrationError::NeedsManualMigration {
+                        resource: old.name.clone(),
+                        reason: "register the required SQL table conversion before generating its consumer".into(),
+                    });
                 }
             }
-            let (owner, ops, after) = next_step(&state, &changes, layout, &catalog, &origins)?;
-            origins.observe(&ops);
-            append_group(&mut groups, &owner, ops);
-            state = after;
-        }
-        if groups.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut history: Vec<_> = self.ordered().cloned().collect();
-        let mut cursor = ProjectState::default();
-        let mut accesses = Vec::new();
-        for m in &history {
-            accesses.push((m.id.clone(), access(&m.operations, &mut cursor, &catalog)?));
-        }
-        let mut generated = Vec::new();
-        let groups = atomic_schema_replacements(groups, &historical);
-        let mut before = historical;
-        for (app, operations, aliases) in groups {
-            let graph = MigrationGraph::new(history.clone())?;
-            let touched = access(&operations, &mut cursor, &catalog)?;
-            let mut dependencies: BTreeSet<_> = accesses
-                .iter()
-                .filter(|(_, a)| touched.conflicts(a))
-                .map(|(id, _)| id.clone())
-                .collect();
-            // Drop ancestors already implied by a later dependency.
-            let mut implied = BTreeSet::new();
-            for id in &dependencies {
-                let mut closure = graph.target_closure(id)?;
-                closure.remove(id);
-                implied.extend(closure);
-            }
-            dependencies.retain(|id| !implied.contains(id));
-            // app_heads follows direct same-app edges, even if a cross-app
-            // dependency transitively includes the previous head.
-            dependencies.extend(graph.app_heads(&app).iter().map(|m| m.id.clone()));
-            let migration = Migration::new(
-                graph.next_id(&app, name)?,
-                dependencies.into_iter().collect(),
-                operations,
-            );
-            // Also check a targeted deployment with only this file's ancestors.
-            let mut ancestors = BTreeSet::new();
-            for id in &migration.dependencies {
-                ancestors.extend(graph.target_closure(id)?);
-            }
-            validate_file(
-                &graph.replay_selected(ProjectState::default(), &ancestors)?,
-                &migration.operations,
-                &catalog,
-            )?;
-            before = validate_file(&before, &migration.operations, &catalog)?;
-            accesses.push((migration.id.clone(), touched));
-            history.push(migration.clone());
-            let anchor = migration.id.clone();
-            generated.push(migration);
-            for app in aliases {
-                let graph = MigrationGraph::new(history.clone())?;
-                let mut dependencies: BTreeSet<_> = graph
-                    .app_heads(&app)
-                    .iter()
-                    .map(|head| head.id.clone())
-                    .collect();
-                dependencies.insert(anchor.clone());
-                let alias = Migration::new(
-                    graph.next_id(&app, name)?,
-                    dependencies.into_iter().collect(),
-                    vec![],
-                );
-                history.push(alias.clone());
-                generated.push(alias);
+            for (i, old) in unresolved {
+                registry.to_mut().objects[i] = old.clone();
             }
         }
-        self.validate_generated_history(history, desired, &catalog)?;
-        Ok(generated)
+        let full_catalog = Catalog::new(&historical, &registry, &remaining_policy)?;
+        collect_operations(
+            desired,
+            MigrationLayout::PerApp,
+            &full_catalog,
+            &mut origins,
+            &mut operations,
+            false,
+        )?;
+        OperationPlan::new(self, operations, &full_catalog, emitted)?
+            .migrations(self, historical, name, &catalog)
     }
 
     fn validate_generated_history(
         &self,
-        history: Vec<Migration>,
+        graph: &MigrationGraph,
         desired: &ProjectState,
         catalog: &Catalog<'_>,
     ) -> Result<(), MigrationError> {
-        let graph = MigrationGraph::new(history)?;
         graph.validate_heads()?;
         // The graph may order independent files differently than the generator.
         // Verify that exact execution order as well; do not reinterpret old SQL.
@@ -542,12 +491,90 @@ impl MigrationGraph {
     }
 }
 
-// Ask SQLite to resolve a view against the final model columns and registered
-// views. Preparing a SELECT resolves nested projections without reading rows.
-// External tables and application functions may only exist at deployment;
-// for those, retain the conservative offline dependency check.
 #[cfg(feature = "sqlite")]
-fn view_catalog(desired: &ProjectState) -> Result<crate::rusqlite::Connection, MigrationError> {
+fn validate_scoped_view_columns(
+    state: &ProjectState,
+    desired: &ProjectState,
+    app: &str,
+) -> Result<(), MigrationError> {
+    if !state
+        .objects()
+        .iter()
+        .any(|o| o.kind == SchemaObjectKind::View && o.app != app)
+    {
+        return Ok(());
+    }
+    for view in state
+        .objects()
+        .iter()
+        .filter(|o| o.kind == SchemaObjectKind::View && o.app == app)
+    {
+        let sources = view_sources(state, [view]);
+        let mut providers = sources
+            .iter()
+            .filter(|o| o.kind == SchemaObjectKind::View && o.app != app)
+            .peekable();
+        if providers.peek().is_none() {
+            continue;
+        }
+        let pending_provider = providers.any(|registered| {
+            desired.objects().iter().any(|o| {
+                o.kind == registered.kind && same_name(&o.name, &registered.name) && o != registered
+            })
+        });
+        let db = view_catalog(state, sources)?;
+        if let Err(error) = prepare_view(&db, view) {
+            // Offline generation can encounter application-defined SQL functions
+            // and external tables. If a provider is changing, its registered
+            // exports must be usable before creating this consumer on its own.
+            let external = matches!(&error,
+                crate::rusqlite::Error::SqliteFailure(_, Some(message))
+                | crate::rusqlite::Error::SqlInputError { msg: message, .. }
+                if ["no such table:", "no such function:", "no such collation sequence:", "no such module:"]
+                    .iter().any(|prefix| message.starts_with(prefix))
+            );
+            if !external || pending_provider {
+                return Err(invalid(format!(
+                    "view {} cannot use the registered schema: {error}; generate and register its provider migration first",
+                    view.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn view_sources<'a>(
+    state: &'a ProjectState,
+    views: impl IntoIterator<Item = &'a SchemaObjectState>,
+) -> Vec<SchemaObjectState> {
+    let mut pending: Vec<_> = views.into_iter().collect();
+    let mut required = BTreeMap::new();
+    while let Some(object) = pending.pop() {
+        if required
+            .insert((object.kind, &object.name), object)
+            .is_none()
+        {
+            pending.extend(
+                state
+                    .objects()
+                    .iter()
+                    .filter(|source| state.requires_object(object, source, false)),
+            );
+        }
+    }
+    required.into_values().cloned().collect()
+}
+
+// Preparing a SELECT on an in-memory schema resolves SQLite's view exports
+// and nested projections without querying the application's database.
+#[cfg(feature = "sqlite")]
+fn view_catalog(
+    desired: &ProjectState,
+    sources: Vec<SchemaObjectState>,
+) -> Result<crate::rusqlite::Connection, MigrationError> {
+    let objects = order_schema_objects(sources, false, desired)?;
     let open = || -> crate::rusqlite::Result<_> {
         let db = crate::rusqlite::Connection::open_in_memory()?;
         db.set_db_config(
@@ -566,24 +593,33 @@ fn view_catalog(desired: &ProjectState) -> Result<crate::rusqlite::Connection, M
                 [],
             )?;
         }
-        // Registered SQL tables provide columns to views just like model tables.
-        for table in desired
-            .objects()
-            .iter()
-            .filter(|o| o.kind == SchemaObjectKind::Table)
-        {
-            db.execute(&table.sql, [])?;
-        }
-        for view in desired
-            .objects()
-            .iter()
-            .filter(|o| o.kind == SchemaObjectKind::View)
-        {
-            db.execute(&view.sql, [])?;
+        for object in objects {
+            db.execute(&object.sql, [])?;
         }
         Ok(db)
     };
     open().map_err(|e| invalid(format!("cannot prepare final view catalog: {e}")))
+}
+
+#[cfg(feature = "sqlite")]
+fn prepare_view(
+    db: &crate::rusqlite::Connection,
+    view: &SchemaObjectState,
+) -> crate::rusqlite::Result<()> {
+    db.prepare(&format!(
+        "SELECT * FROM {} LIMIT 0",
+        quote_identifier(&view.name)
+    ))
+    .map(|_| ())
+}
+
+#[cfg(feature = "sqlite")]
+fn unresolved_column(error: &crate::rusqlite::Error) -> bool {
+    matches!(error,
+        crate::rusqlite::Error::SqliteFailure(_, Some(message))
+        | crate::rusqlite::Error::SqlInputError { msg: message, .. }
+        if message.starts_with("no such column:") || message.starts_with("ambiguous column name:")
+    )
 }
 
 fn validate_final_column_references(
@@ -620,19 +656,20 @@ fn validate_final_column_references(
             let needs_review = if object.kind == SchemaObjectKind::View {
                 let db = match &catalog {
                     Some(db) => db,
-                    None => catalog.insert(view_catalog(desired)?),
+                    None => catalog.insert(view_catalog(
+                        desired,
+                        view_sources(
+                            desired,
+                            desired
+                                .objects()
+                                .iter()
+                                .filter(|o| o.kind == SchemaObjectKind::View),
+                        ),
+                    )?),
                 };
-                let select = format!("SELECT * FROM {} LIMIT 0", quote_identifier(&object.name));
-                match db.prepare(&select) {
-                    Ok(_) => continue,
-                    Err(
-                        crate::rusqlite::Error::SqliteFailure(_, Some(message))
-                        | crate::rusqlite::Error::SqlInputError { msg: message, .. },
-                    ) if message.starts_with("no such column:")
-                        || message.starts_with("ambiguous column name:") =>
-                    {
-                        true
-                    }
+                match prepare_view(db, object) {
+                    Ok(()) => continue,
+                    Err(error) if unresolved_column(&error) => true,
                     Err(_) => needs_review,
                 }
             } else {
@@ -708,7 +745,7 @@ fn rename_object_drops(
         }
     }
     Ok(
-        order_schema_objects(affected.into_values().collect(), true)?
+        order_schema_objects(affected.into_values().collect(), true, state)?
             .into_iter()
             .map(StateChange::DeleteSchemaObject)
             .collect(),
@@ -794,128 +831,276 @@ impl SqliteIndexOrigins {
     }
 }
 
+/// Allow new models on opposite sides of a cross-app cycle to be installed
+/// before their relationships. Views and triggers follow the complete tables.
+fn defer_new_foreign_keys(
+    historical: &ProjectState,
+    desired: &ProjectState,
+) -> Option<ProjectState> {
+    let mut staged = desired.clone();
+    let mut deferred = false;
+    for table in &mut staged.tables {
+        let Some(owner) = staged.model_keys.get(&table.name) else {
+            continue;
+        };
+        if historical.model_keys.contains_key(&table.name) {
+            continue;
+        }
+        for column in &mut table.columns {
+            if let Some((target, _)) = column
+                .references
+                .as_ref()
+                .and_then(ForeignKeyState::target_parts)
+                && staged
+                    .model_keys
+                    .get(target)
+                    .is_some_and(|provider| provider.app != owner.app)
+                && !historical.model_keys.contains_key(target)
+            {
+                column.references = None;
+                deferred = true;
+            }
+        }
+    }
+    if !deferred {
+        return None;
+    }
+    staged
+        .objects
+        .retain(|object| object.kind == SchemaObjectKind::Table);
+    staged.objects.extend(
+        historical
+            .objects
+            .iter()
+            .filter(|object| object.kind != SchemaObjectKind::Table)
+            .cloned(),
+    );
+    Some(staged)
+}
+
+/// Collect actual schema transitions without assigning files. Intent checks
+/// authorize only the operations that the current command can emit.
+fn collect_operations(
+    historical: &ProjectState,
+    layout: MigrationLayout<'_>,
+    catalog: &Catalog<'_>,
+    origins: &mut SqliteIndexOrigins,
+    operations: &mut Vec<(String, MigrationOperation)>,
+    emitting: bool,
+) -> Result<(), MigrationError> {
+    let desired = catalog.desired;
+    let policy = catalog.policy;
+    let mut state = historical.clone();
+    for (owner, op) in origins.repairs(historical, desired)? {
+        op.state_forwards(&mut state)?;
+        origins.observe(std::slice::from_ref(&op));
+        operations.push((layout.file_owner(&owner).to_owned(), op));
+    }
+    for ((app, old_name), new_name) in &policy.rename_models {
+        let old = ModelKey {
+            app: app.clone(),
+            name: old_name.clone(),
+        };
+        let new = ModelKey {
+            app: app.clone(),
+            name: new_name.clone(),
+        };
+        let table = state
+            .model_keys
+            .iter()
+            .find(|(_, key)| **key == old)
+            .ok_or_else(|| invalid(format!("unknown historical model {app}.{old_name}")))?
+            .0
+            .clone();
+        if !desired.model_keys.values().any(|key| *key == new)
+            || desired.model_keys.values().any(|key| *key == old)
+        {
+            return Err(invalid(format!(
+                "expected {app}.{new_name} to replace {app}.{old_name} in the model registry"
+            )));
+        }
+        let op = MigrationOperation::RenameModel {
+            table,
+            app: app.clone(),
+            old_name: old_name.clone(),
+            new_name: new_name.clone(),
+        };
+        op.state_forwards(&mut state)?;
+        operations.push((layout.file_owner(app).to_owned(), op));
+    }
+    let mut explicit_changes = rename_object_drops(&state, desired, policy)?;
+    for ((table, old_name), new_name) in &policy.rename_columns {
+        let key = state
+            .model_keys
+            .get(table)
+            .ok_or_else(|| invalid(format!("unknown historical table {table}")))?;
+        let model = desired
+            .models()
+            .into_iter()
+            .find(|m| m.key == *key)
+            .ok_or_else(|| invalid(format!("missing desired model for {table}")))?;
+        if !model.table.columns.iter().any(|c| c.name == *new_name)
+            || model.table.columns.iter().any(|c| c.name == *old_name)
+        {
+            return Err(invalid(format!(
+                "expected {new_name} to replace {table}.{old_name} in desired schema"
+            )));
+        }
+        explicit_changes.push(StateChange::RenameColumn {
+            key: key.clone(),
+            table: table.clone(),
+            old_name: old_name.clone(),
+            new_name: new_name.clone(),
+        });
+    }
+    for change in explicit_changes {
+        let (owner, ops, after) = next_step(&state, &[change], layout, catalog, origins)?;
+        operations.extend(ops.into_iter().map(|op| (owner.clone(), op)));
+        state = after;
+    }
+    #[cfg(feature = "sqlite")]
+    let mut checked_removals = BTreeSet::new();
+    loop {
+        // Re-diff after each transition: a rename updates inbound FKs in
+        // state_forwards, so old AlterColumn snapshots are no longer valid.
+        let mut changes = state.diff_for_planner(desired)?;
+        if changes.is_empty() {
+            break;
+        }
+        if emitting {
+            catalog.check_intent(&changes)?;
+        }
+        #[cfg(feature = "sqlite")]
+        for change in &changes {
+            if let StateChange::RemoveColumn { table, column, .. } = change
+                && checked_removals.insert((table.clone(), column.name.clone()))
+            {
+                validate_final_column_references(desired, table, &column.name)?;
+            }
+        }
+        order_column_checks(&state, desired, &mut changes)?;
+        let (owner, ops, after) = match next_step(&state, &changes, layout, catalog, origins) {
+            Ok(step) => step,
+            Err(error) if !emitting => {
+                let Some(staged) = defer_new_foreign_keys(&state, desired) else {
+                    return Err(error);
+                };
+                // Only new table creations can make progress by deferring FKs.
+                let creates: Vec<_> = state
+                    .diff_for_planner(&staged)?
+                    .into_iter()
+                    .filter(|change| matches!(change, StateChange::CreateModel(_)))
+                    .collect();
+                next_step(&state, &creates, layout, catalog, origins).map_err(|_| error)?
+            }
+            Err(error) => return Err(error),
+        };
+        origins.observe(&ops);
+        operations.extend(ops.into_iter().map(|op| (owner.clone(), op)));
+        state = after;
+    }
+    Ok(())
+}
+
+// Check both ends of a transition: release constraints before dropping an
+// input, and install a new constraint after all its inputs are available.
+fn order_column_checks(
+    state: &ProjectState,
+    desired: &ProjectState,
+    changes: &mut Vec<StateChange>,
+) -> Result<(), MigrationError> {
+    let mut blocked_removals = BTreeSet::new();
+    let mut release = BTreeMap::new();
+    for change in changes.iter() {
+        let StateChange::RemoveColumn { key, table, column } = change else {
+            continue;
+        };
+        let current = &state.tables[table_index(state, table)?];
+        let final_table = &desired.tables[table_index(desired, table)?];
+        let reads_input = |c: &ColumnState| {
+            c.check
+                .as_deref()
+                .is_some_and(|expr| sql_dependencies::mentions_identifier(expr, &column.name))
+        };
+        for sibling in current
+            .columns
+            .iter()
+            .filter(|c| !same_name(&c.name, &column.name) && reads_input(c))
+        {
+            blocked_removals.insert((table.clone(), column.name.clone()));
+            match final_table
+                .columns
+                .iter()
+                .find(|c| same_name(&c.name, &sibling.name))
+            {
+                Some(c) if reads_input(c) => {
+                    return Err(MigrationError::DependentColumn {
+                        table: table.clone(),
+                        column: column.name.clone(),
+                        dependent: format!("CHECK on {}", sibling.name),
+                    });
+                }
+                Some(_) => {} // The pending AlterColumn will release this input.
+                None => {
+                    // Both fields are being removed, possibly with mutual CHECKs.
+                    let mut new_column = sibling.clone();
+                    new_column.check = None;
+                    release.insert(
+                        (table.clone(), sibling.name.clone()),
+                        StateChange::AlterColumn {
+                            key: key.clone(),
+                            table: table.clone(),
+                            old_column: sibling.clone(),
+                            new_column,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    changes.retain(|change| match change {
+        StateChange::RemoveColumn { table, column, .. } => {
+            !blocked_removals.contains(&(table.clone(), column.name.clone()))
+        }
+        _ => true,
+    });
+    changes.extend(release.into_values());
+
+    let mut pending: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for change in changes.iter() {
+        if let StateChange::AddColumn { table, column, .. } = change {
+            pending
+                .entry(table.clone())
+                .or_default()
+                .push(column.name.clone());
+        }
+    }
+    changes.retain_mut(|change| {
+        let (table, column, adding) = match change {
+            StateChange::AddColumn { table, column, .. } => (table, column, true),
+            StateChange::AlterColumn {
+                table, new_column, ..
+            } => (table, new_column, false),
+            _ => return true,
+        };
+        let waits = column.check.as_ref().is_some_and(|expr| {
+            pending.get(table).is_some_and(|columns| {
+                columns.iter().any(|name| {
+                    *name != column.name && sql_dependencies::mentions_identifier(expr, name)
+                })
+            })
+        });
+        if waits && adding {
+            column.check = None;
+        }
+        !waits || adding
+    });
+    Ok(())
+}
+
 fn independent_added_columns(left: &MigrationOperation, right: &MigrationOperation) -> bool {
     matches!((left, right), (MigrationOperation::AddColumn { table: a, column: x }, MigrationOperation::AddColumn { table: b, column: y })
         if a == b && !same_name(&x.name, &y.name) && [x, y].iter().all(|c| c.references.is_none() && c.check.is_none() && c.default.is_none() && c.nullable && !c.primary_key))
-}
-
-fn append_group(
-    groups: &mut Vec<(String, Vec<MigrationOperation>)>,
-    owner: &str,
-    ops: Vec<MigrationOperation>,
-) {
-    if let Some((last, operations)) = groups.last_mut()
-        && last == owner
-    {
-        operations.extend(ops);
-    } else {
-        groups.push((owner.to_owned(), ops));
-    }
-}
-
-// A target may stop at any migration file. Keep the full interval from
-// removing a schema object to installing its replacement in the same file.
-// If the interval includes work owned by several apps, give each affected app
-// a target that depends on the file where the operations actually run.
-type AtomicGroup = (String, Vec<MigrationOperation>, BTreeSet<String>);
-
-fn atomic_schema_replacements(
-    groups: Vec<(String, Vec<MigrationOperation>)>,
-    historical: &ProjectState,
-) -> Vec<AtomicGroup> {
-    let operations: Vec<_> = groups
-        .into_iter()
-        .flat_map(|(app, ops)| {
-            ops.into_iter()
-                .map(move |operation| (app.clone(), operation))
-        })
-        .collect();
-    let historical: BTreeMap<_, _> = historical
-        .objects()
-        .iter()
-        .map(|object| ((object.kind, object.name.as_str()), object))
-        .collect();
-    let mut removed = BTreeMap::new();
-    let mut intervals = BTreeMap::new();
-    let mut temporary = BTreeSet::new();
-    for (index, (_, operation)) in operations.iter().enumerate() {
-        match operation {
-            MigrationOperation::DropSchemaObject { kind, name }
-                if *kind != SchemaObjectKind::Table =>
-            {
-                removed.insert((*kind, name.as_str()), index);
-            }
-            MigrationOperation::CreateSchemaObject { object } => {
-                let key = (object.kind, object.name.as_str());
-                if let Some(start) = removed.remove(&key) {
-                    intervals.insert(start, index);
-                    // An unchanged object is borrowed for the model change.
-                    // The owning application needs no new target of its own.
-                    if historical.get(&key) == Some(&object) {
-                        temporary.insert(start);
-                        temporary.insert(index);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut result: Vec<AtomicGroup> = Vec::new();
-    let mut start = 0;
-    while start < operations.len() {
-        if let Some(&end) = intervals.get(&start) {
-            let mut end = end;
-            let mut cursor = start + 1;
-            while cursor <= end {
-                if let Some(&overlap) = intervals.get(&cursor) {
-                    end = end.max(overlap);
-                }
-                cursor += 1;
-            }
-            let batch = &operations[start..=end];
-            let owner = batch
-                .iter()
-                .find(|(_, operation)| {
-                    !matches!(
-                        operation,
-                        MigrationOperation::DropSchemaObject { .. }
-                            | MigrationOperation::CreateSchemaObject { .. }
-                    )
-                })
-                .unwrap_or(&batch[0])
-                .0
-                .clone();
-            let aliases = batch
-                .iter()
-                .enumerate()
-                .filter(|(offset, (app, _))| {
-                    app != &owner && !temporary.contains(&(start + offset))
-                })
-                .map(|(_, (app, _))| app.clone())
-                .collect();
-            result.push((
-                owner,
-                batch
-                    .iter()
-                    .map(|(_, operation)| operation.clone())
-                    .collect(),
-                aliases,
-            ));
-            start = end + 1;
-        } else {
-            let (app, operation) = &operations[start];
-            if let Some((last_app, last_ops, aliases)) = result.last_mut()
-                && last_app == app
-                && aliases.is_empty()
-            {
-                last_ops.push(operation.clone());
-            } else {
-                result.push((app.clone(), vec![operation.clone()], BTreeSet::new()));
-            }
-            start += 1;
-        }
-    }
-    result
 }
 
 fn invalid(message: impl Into<String>) -> MigrationError {
@@ -943,6 +1128,26 @@ fn validate_file(
     state.validate()?;
     catalog.validate_requirements(&state)?;
     Ok(state)
+}
+
+fn write_constraints_changed(old: Option<&ColumnState>, new: Option<&ColumnState>) -> bool {
+    old.zip(new).is_some_and(|(old, new)| {
+        old.nullable != new.nullable
+            || old.primary_key != new.primary_key
+            || old.unique != new.unique
+            || old.check != new.check
+            || old.choices != new.choices
+            || old.references != new.references
+    })
+}
+
+fn same_default(old: Option<&ColumnState>, new: Option<&ColumnState>) -> bool {
+    fn shape(column: Option<&ColumnState>) -> (Option<&str>, bool) {
+        let explicit = column.and_then(|c| c.default.as_deref());
+        let managed = explicit.is_none() && column.is_some_and(|c| c.auto_now || c.auto_now_add);
+        (explicit, managed)
+    }
+    shape(old) == shape(new)
 }
 
 fn columns(change: &StateChange) -> &[ColumnState] {
@@ -1002,11 +1207,72 @@ fn table_owner<'a>(state: &'a ProjectState, name: &str) -> Option<&'a str> {
         })
 }
 
-fn requires_schema_object(object: &SchemaObjectState, provider: &SchemaObjectState) -> bool {
-    references_view(object, provider)
-        || (provider.kind == SchemaObjectKind::Table
-            && object != provider
-            && sql_dependencies::references(object, &provider.name))
+// A foreign app can retire a trigger or view in the same release that rebuilds
+// its source table. Plan an independently executable rebuild while the old
+// consumer still exists. The consumer's owner can then remove it and its data
+// in a later file, without making that file a prerequisite for this target.
+fn rebuild_before_foreign_removal(
+    state: &ProjectState,
+    changes: &[StateChange],
+    catalog: &Catalog<'_>,
+) -> Result<Option<Step>, MigrationError> {
+    let retiring: BTreeSet<_> = changes
+        .iter()
+        .filter_map(|change| {
+            let StateChange::DeleteSchemaObject(object) = change else {
+                return None;
+            };
+            (object.kind != SchemaObjectKind::Table
+                && !catalog
+                    .desired
+                    .objects()
+                    .iter()
+                    .any(|o| o.kind == object.kind && o.name == object.name))
+            .then_some((object.app.as_str(), object.kind, object.name.as_str()))
+        })
+        .collect();
+    if retiring.is_empty() {
+        return Ok(None);
+    }
+    for change in changes {
+        let Some((key, table)) = model_table(change) else {
+            continue;
+        };
+        if state.model_keys.get(table) != Some(key) {
+            continue;
+        }
+        let op = change.clone().into_operation();
+        if SqliteSchemaEditor::rebuild_table_name(&op).is_none() {
+            continue;
+        }
+        let mut projected = state.clone();
+        if op.state_forwards(&mut projected).is_err() {
+            continue; // Another pending change must run first.
+        }
+        let batch = state.diff(&projected)?;
+        if !batch.iter().any(|change| {
+            matches!(change,
+                StateChange::DeleteSchemaObject(o) if o.app != key.app
+                    && retiring.contains(&(o.app.as_str(), o.kind, o.name.as_str()))
+            )
+        }) {
+            continue;
+        }
+        if let StateChange::RemoveColumn { column, .. } = change
+            && validate_final_column_references(&projected, table, &column.name).is_err()
+        {
+            continue; // The historical consumer really must be removed first.
+        }
+        let ops: Vec<_> = state
+            .diff_for_planner(&projected)?
+            .into_iter()
+            .map(StateChange::into_operation)
+            .collect();
+        if let Ok(after) = validate_file(state, &ops, catalog) {
+            return Ok(Some((key.app.clone(), ops, after)));
+        }
+    }
+    Ok(None)
 }
 
 fn next_step(
@@ -1016,8 +1282,30 @@ fn next_step(
     catalog: &Catalog<'_>,
     origins: &SqliteIndexOrigins,
 ) -> Result<Step, MigrationError> {
+    if matches!(layout, MigrationLayout::PerApp)
+        && let Some(step) = rebuild_before_foreign_removal(state, changes, catalog)?
+    {
+        return Ok(step);
+    }
     let mut blocked = Vec::new();
     for change in changes {
+        let dropping_table = match change {
+            StateChange::DeleteModel(model) => Some(&model.table.name),
+            StateChange::DeleteSchemaObject(object) if object.kind == SchemaObjectKind::Table => {
+                Some(&object.name)
+            }
+            _ => None,
+        };
+        if let Some(table) = dropping_table
+            && let Some(child) = state.objects().iter().find(|o| {
+                o.kind == SchemaObjectKind::Table
+                    && o.name != *table
+                    && sql_dependencies::references_foreign_key(&o.sql, table)
+            })
+        {
+            blocked.push(format!("{} requires table {table}", child.name));
+            continue;
+        }
         // Operations after a rename use the desired SQL name. A different
         // model can still occupy that name in the current state.
         if let Some((key, table)) = model_table(change)
@@ -1028,16 +1316,19 @@ fn next_step(
         }
         // Opaque schema objects bracket model transitions (as in diff).
         if matches!(change, StateChange::CreateSchemaObject(o) if o.kind != SchemaObjectKind::Table)
-            && changes
-                .iter()
-                .any(|c| !matches!(c, StateChange::CreateSchemaObject(_)))
+            && changes.iter().any(|c| {
+                !matches!(
+                    c,
+                    StateChange::CreateSchemaObject(_) | StateChange::SetSchemaRequirements { .. }
+                )
+            })
         {
             continue;
         }
         if let StateChange::CreateSchemaObject(object) = change
             && changes.iter().any(|other| {
                 matches!(other, StateChange::CreateSchemaObject(provider)
-                if requires_schema_object(object, provider))
+                if catalog.desired.requires_object(object, provider, false))
             })
         {
             blocked.push(format!(
@@ -1095,6 +1386,15 @@ fn next_step(
                 }
             }
             ops.push(op);
+            if let StateChange::CreateSchemaObject(o) = change
+                && let Some(requirements) = catalog.desired.object_requirements(o)
+            {
+                ops.push(MigrationOperation::SetSchemaRequirements {
+                    kind: o.kind,
+                    name: o.name.clone(),
+                    requirements: Some(requirements.clone()),
+                });
+            }
         }
         match validate_file(state, &ops, catalog) {
             Ok(after) => return Ok((owner.to_owned(), ops, after)),
@@ -1134,159 +1434,4 @@ fn describe(change: &StateChange) -> String {
         } => format!("{}:{table}.{}", change.app(), column.name),
         _ => format!("{}:{change:?}", change.app()),
     }
-}
-
-// Table-level read/write hazards across file boundaries. Adding/removing an FK
-// reads its target; dropping or renaming that target must wait for those reads.
-// For opaque SQL/objects we conservatively impose a history barrier.
-#[derive(Default)]
-struct Access {
-    reads: BTreeSet<String>,
-    writes: BTreeSet<String>,
-    opaque: bool,
-}
-impl Access {
-    fn conflicts(&self, other: &Self) -> bool {
-        self.opaque
-            || other.opaque
-            || !self.writes.is_disjoint(&other.reads)
-            || !self.reads.is_disjoint(&other.writes)
-            || !self.writes.is_disjoint(&other.writes)
-    }
-}
-
-fn access(
-    ops: &[MigrationOperation],
-    state: &mut ProjectState,
-    catalog: &Catalog<'_>,
-) -> Result<Access, MigrationError> {
-    use MigrationOperation::*;
-    let mut a = Access::default();
-    for op in ops {
-        let table = match op {
-            CreateModel {
-                model: ModelState { table, .. },
-            }
-            | CreateTable { table } => {
-                a.reads
-                    .extend(targets(&table.columns).map(|(t, _)| t.to_owned()));
-                &table.name
-            }
-            RenameTable { old_name, new_name } => {
-                a.writes.insert(old_name.clone());
-                // A table rename implicitly rewrites all existing inbound FKs.
-                for t in state.tables() {
-                    if targets(&t.columns).any(|(target, _)| target == old_name) {
-                        a.writes.insert(t.name.clone());
-                    }
-                }
-                new_name
-            }
-            AddColumn { table, column } => {
-                a.reads
-                    .extend(targets(std::slice::from_ref(column)).map(|(t, _)| t.to_owned()));
-                table
-            }
-            AlterColumn {
-                table,
-                old_column,
-                new_column,
-            } => {
-                for c in [old_column, new_column] {
-                    a.reads
-                        .extend(targets(std::slice::from_ref(c)).map(|(t, _)| t.to_owned()));
-                }
-                table
-            }
-            DropTable { name } => {
-                let old = &state.tables[table_index(state, name)?];
-                a.reads
-                    .extend(targets(&old.columns).map(|(t, _)| t.to_owned()));
-                name
-            }
-            RemoveColumn { table, column } => {
-                let old = &state.tables[table_index(state, table)?];
-                a.reads.extend(
-                    targets(std::slice::from_ref(
-                        &old.columns[column_index(old, column)?],
-                    ))
-                    .map(|(t, _)| t.to_owned()),
-                );
-                table
-            }
-            RenameColumn {
-                table, old_name, ..
-            } => {
-                for t in state.tables() {
-                    if targets(&t.columns)
-                        .any(|(target, col)| target == table && same_name(col, old_name))
-                    {
-                        a.writes.insert(t.name.clone());
-                    }
-                }
-                table
-            }
-            RenameSqliteIndexes {
-                table,
-                from_table,
-                to_table,
-            } => {
-                let schema = &state.tables[table_index(state, table)?];
-                for i in 0..schema.indexes.len() {
-                    a.writes.insert(index_name(from_table, i));
-                    a.writes.insert(index_name(to_table, i));
-                }
-                table
-            }
-            RenameModel { table, .. }
-            | AddIndex { table, .. }
-            | RemoveIndex { table, .. }
-            | AddUniqueConstraint { table, .. }
-            | RemoveUniqueConstraint { table, .. }
-            | NormalizeSqliteDateTimes { table, .. } => table,
-            CreateSchemaObject {
-                object:
-                    SchemaObjectState {
-                        kind: SchemaObjectKind::Table,
-                        name,
-                        ..
-                    },
-            }
-            | DropSchemaObject {
-                kind: SchemaObjectKind::Table,
-                name,
-            } => {
-                if let Some(contract) = catalog.contract(name) {
-                    a.reads
-                        .extend(contract.requires.iter().map(|(t, _)| t.clone()));
-                } else {
-                    a.opaque = true;
-                }
-                name
-            }
-            BackfillColumn { .. }
-            | RunSql { .. }
-            | CreateSchemaObject { .. }
-            | DropSchemaObject { .. } => {
-                a.opaque = true;
-                op.state_forwards(state)?;
-                continue;
-            }
-        };
-        // The operation that releases an index name must precede a file that
-        // reuses it, including when only that file's ancestors are deployed.
-        if let DropTable { name } | RemoveIndex { table: name, .. } = op {
-            let before = &state.tables[table_index(state, name)?];
-            a.writes
-                .extend((0..before.indexes.len()).map(|i| index_name(name, i)));
-        }
-        a.writes.insert(table.clone());
-        op.state_forwards(state)?;
-        if let Some(schema) = state.tables().iter().find(|t| t.name == *table) {
-            for i in 0..schema.indexes.len() {
-                a.writes.insert(index_name(table, i));
-            }
-        }
-    }
-    Ok(a)
 }

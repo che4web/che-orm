@@ -495,6 +495,7 @@ impl Database {
             }
         }
     }
+
     /// SQLite-only escape hatch for direct driver operations.
     #[cfg(feature = "sqlite")]
     pub async fn raw_transaction<T, F>(&self, action: F) -> Result<T, OrmError>

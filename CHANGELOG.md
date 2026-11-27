@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.5.0 (unreleased)
+
+- Remove the deprecated `Database::typed_transaction` alias. Use
+  `Database::transaction`. Use `migration::pending_operation_migrations` in
+  place of the SQLite-specific forwarding function.
+- Migration operations, state changes and errors are non-exhaustive. Add a
+  wildcard arm to downstream matches over these enums.
+- Physical table names and literal app prefixes must use lowercase ASCII.
+- Track managed timestamp defaults when ordering target migrations. Require
+  an explicit backfill when adding a required unique field with a default.
 
 - Classify migration resources by provider (ORM model, registered SQL table or
   external key). Add `GenerationPolicy` and SQL table contracts. Generation now
@@ -17,10 +26,7 @@
   and deadpool-sync; preserve lazy connection, URI, transaction and pool behavior.
 - Update the locked rustix dependency to 1.1.6 (RUSTSEC-2026-0486).
 
-- **Breaking:** remove the deprecated `Database::typed_transaction` alias; use
-  `Database::transaction`. Remove the SQLite-specific
-  `migration::sqlite_executor::pending_operation_migrations` forwarding function;
-  use `migration::pending_operation_migrations` on either backend.
+## 0.4.0
 
 - **Breaking:** Database/Transaction query builders now bind their execution
   context; call `.all()`, `.first()`, `.count()` etc. without passing the database
@@ -30,7 +36,7 @@
   metadata discovery; configuration is checked without opening a connection.
 - Add `PostgresSchemaEditor::plan_migration` to preview a complete migration,
   including deferred foreign keys, and backend-neutral migration-history
-  validation through `migration::pending_operation_migrations`.
+  validation while preserving the SQLite compatibility entry point.
 
 - **Breaking:** SQLite datetime values now use fixed-width UTC TEXT with nine
   fractional digits (`YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`, UTC years 0000..9999).

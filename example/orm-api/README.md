@@ -1,7 +1,7 @@
 # ORM API examples
 
 Run these commands from the che-orm repository root. The examples use the async
-che-orm 0.4.0 API and a database selected by `CHE_ORM_DATABASE_URL` (default:
+che-orm 0.5.0 API and a database selected by `CHE_ORM_DATABASE_URL` (default:
 `app.db`). Apply the compiled Rust migration `examples:0001_initial_models`
 before running the database examples. The same migration is used for SQLite
 and PostgreSQL. If you ran the old SQL baseline, set `CHE_ORM_DATABASE_URL` to

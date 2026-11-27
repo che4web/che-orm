@@ -40,9 +40,7 @@ async fn run(args: Vec<String>) -> Result<()> {
                 app: app.clone(),
                 name: name.clone(),
             };
-            for sql in migrations::graph()?.migration_sql(&id)? {
-                println!("{};", sql.trim_end().trim_end_matches(';'));
-            }
+            print!("{}", migrations::graph()?.migration_sql_script(&id)?);
         }
         [command, action] if command == "migrate" && action == "status" => {
             let history = database().await?.migration_history().await?;

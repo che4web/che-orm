@@ -1,6 +1,6 @@
 [package]
 name = "che-orm"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Typed SQLite and PostgreSQL ORM for che-rest applications"
 license = "MIT"
@@ -21,16 +21,13 @@ members = [
     "example/template-modular",
 ]
 
-[workspace.dependencies]
-che-orm = { path = ".", version = "0.4.0", default-features = false }
-
 [features]
 default = ["sqlite"]
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "dep:postgres-native-tls", "dep:native-tls"]
 sqlite = ["dep:deadpool", "dep:deadpool-sync", "dep:rusqlite"]
 
 [dependencies]
-che-orm-macros = { version = "0.3.2", path = "che-orm-macros" }
+che-orm-macros = { version = "0.4.0", path = "che-orm-macros" }
 deadpool-postgres = { version = "0.14", optional = true }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-uuid-1", "with-time-0_3"] }
 postgres-native-tls = { version = "0.5", optional = true }

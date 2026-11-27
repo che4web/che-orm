@@ -4,17 +4,9 @@ Use this checklist for every release. [The release procedure](releasing.md)
 records the planned versions, full verification commands and publication order
 for all four public crates. Crates in `example/` are not published.
 
-The current preparation targets **che-orm 0.4.0**, **che-sync 0.2.0**, then
-downstream **che-rest 0.4.0**. Registry checked 2026-11-12: core **0.3.3**,
-macros **0.3.2**, protocol **0.1.0**, sync **0.1.3** and REST **0.3.4** are
-already published. Keep those versions/tags intact. Unchanged macros/protocol
-must not be republished. See [registry audit](registry-audit-2026-11-12.json).
-
-The [2026-11-06 report](release-verification-2026-11-06.md) is historical, not
-verification of these breaking-change candidates. Require application-owned
-datetime migrations before deployment. Preparation does not authorize publication.
-See [the current preparation report](release-verification-2026-11-14.md), including
-the patched SQLite dependency and Rust 1.89 requirement.
+Prepare che-orm-macros 0.4.0, che-orm 0.5.0, che-sync 0.3.0 and che-rest
+0.5.0. Use the published che-sync-protocol 0.1.0. Earlier verification reports
+cover historical source snapshots.
 
 ## Prepare
 
@@ -60,8 +52,8 @@ the new macros are published, patch only that dependency to the unpacked macro
 archive (use the release's macro and core versions in these paths):
 
 ```bash
-cargo test --manifest-path target/package/che-orm-0.4.0/Cargo.toml \
-  --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.3.2"' \
+cargo test --manifest-path target/package/che-orm-0.5.0/Cargo.toml \
+  --config 'patch.crates-io.che-orm-macros.path="target/package/che-orm-macros-0.4.0"' \
   --test public_api_examples --test uuid --test runtime --test sqlite_datetime --test app_table
 ```
 
@@ -73,26 +65,8 @@ cargo package --manifest-path che-orm-macros/Cargo.toml --list
 
 ## Publish this candidate
 
-1. Review the checks linked in [releasing.md](releasing.md), commit
-   the prepared sources, and ensure the worktree is clean.
-2. From the ORM workspace:
-
-   ```bash
-   cargo publish --dry-run -p che-orm --locked
-   # Actual publication requires separate approval. After core is indexed:
-   cargo publish --dry-run -p che-sync --locked
-   ```
-
-3. Wait for core 0.4.0 and sync 0.2.0 to appear in the registry index. Then from che-rest:
-
-   ```bash
-   cargo publish --dry-run --locked
-   ```
-
-4. Verify crate pages and docs.rs builds before creating new tags
-   core `v0.4.0`, `che-sync-v0.2.0` and REST `v0.4.0`. Do not move old tags.
-
-Preparing archives or running a dry run does not publish a crate. Before core
-0.4.0 and sync 0.2.0 are indexed, the ordinary REST dry run cannot resolve them;
-use the sibling archive verifier for preparation. Repeat the registry dry run
-after dependency publication. Do not republish unchanged macros/protocol.
+1. Review the verification results and commit the prepared sources.
+2. Dry-run and publish che-orm-macros 0.4.0, then che-orm 0.5.0, then
+   che-sync 0.3.0, and finally che-rest 0.5.0. Wait for crates.io indexing
+   between releases. Each publication requires separate explicit authorization.
+3. Verify crate pages and docs.rs builds before creating the matching tags.

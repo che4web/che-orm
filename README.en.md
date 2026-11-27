@@ -5,12 +5,12 @@
 An experimental typed ORM for Rust with a shared async API for SQLite and
 PostgreSQL. The backend is selected at compile time. Requires **Rust 1.89+**.
 
-The current published `che-orm` version is **0.3.3**. The project is under
+The current published `che-orm` version is **0.4.0**. The project is under
 development; check the [changelog](CHANGELOG.md) before upgrading.
 
-This checkout prepares **0.4.0** (not yet published), with breaking bound-query
-and SQLite datetime-storage changes. Use matching local dependencies until the
-new core/sync/REST versions are published; see [release preparation](docs/releasing.md).
+Version **0.5.0** updates the migration generator, table naming rules and
+minimum Rust version. Use matching local dependencies until publication.
+See [release preparation](docs/releasing.md).
 
 ## Features
 
@@ -38,7 +38,7 @@ Add the dependencies to `Cargo.toml`. SQLite is enabled by default:
 
 ```toml
 [dependencies]
-che-orm = "0.4.0"
+che-orm = "0.5.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -136,7 +136,7 @@ database
 Models and CRUD code stay the same. Replace the dependency in `Cargo.toml`:
 
 ```toml
-che-orm = { version = "0.4.0", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.5.0", default-features = false, features = ["postgres"] }
 ```
 
 Create a PostgreSQL database and set the URL with your credentials:

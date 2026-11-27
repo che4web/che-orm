@@ -1,10 +1,12 @@
 //! SQLite display keys backed by a counter per parent and record kind.
+use crate::SchemaRequirement as Req;
 use crate::migration::quote_identifier as quote;
 use crate::trigger::registered_column;
 use crate::{
     ColumnRef, ColumnType, MigrationError, Model, ModelField, ProjectState, SchemaObjectKind,
     SchemaObjectState, SqlDialect, SqliteDialect,
 };
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 /// Declares a shared counter table keyed by the parent ID and record kind.
@@ -176,7 +178,7 @@ impl GeneratedKeyDefinition {
         &self,
         app: &str,
         state: &ProjectState,
-    ) -> Result<Vec<SchemaObjectState>, MigrationError> {
+    ) -> Result<Vec<crate::migration::DeclaredObject>, MigrationError> {
         let key = registered_column(state, self.key)?;
         let parent = registered_column(state, self.parent)?;
         let parent_id = registered_column(state, self.sequence.parent_id)?;
@@ -227,29 +229,57 @@ impl GeneratedKeyDefinition {
         let sequence = quote(&self.sequence.name);
         let kind = &self.kind;
         let label = kind.to_ascii_lowercase();
-        let trigger = |suffix: &str, statement: String| {
+        let generated = format!(
+            "(SELECT parent.{prefix} || '-{kind}-' || printf('%04d', seq.next_value) \
+             FROM {parent_table} AS parent JOIN {sequence} AS seq ON seq.project_id = parent.{parent_id} AND seq.kind = '{kind}' \
+             WHERE parent.{parent_id} = NEW.{parent})"
+        );
+        let key_requirements = BTreeSet::from([
+            Req::field(self.key),
+            Req::Default(self.key.table.into(), self.key.name.into()),
+        ]);
+        let mut assign = key_requirements.clone();
+        assign.extend([
+            Req::Relation(self.sequence.name.clone()),
+            Req::field(self.id),
+            Req::field(self.parent),
+            Req::field(self.sequence.parent_id),
+            Req::field(self.sequence.parent_key),
+            Req::Key(
+                self.sequence.parent_key.table.into(),
+                self.sequence.parent_key.name.into(),
+            ),
+            Req::Key(self.key.table.into(), self.key.name.into()),
+            Req::WriteConstraint(self.key.table.into(), self.key.name.into()),
+        ]);
+        let trigger = |suffix: &str, requirements: BTreeSet<Req>, statement: String| {
             let name = format!("{}_{suffix}", self.id.table);
-            SchemaObjectState {
-                app: app.into(),
-                kind: SchemaObjectKind::Trigger,
-                sql: format!("CREATE TRIGGER {} {statement}", quote(&name)),
-                name,
-            }
+            (
+                SchemaObjectState {
+                    app: app.into(),
+                    kind: SchemaObjectKind::Trigger,
+                    sql: format!("CREATE TRIGGER {} {statement}", quote(&name)),
+                    name,
+                },
+                requirements,
+            )
         };
         Ok(vec![
             trigger(
                 "assign_key",
+                assign,
                 format!(
                     "AFTER INSERT ON {table} WHEN NEW.{key} = '' BEGIN \
                  INSERT INTO {sequence} (project_id, kind, next_value) VALUES (NEW.{parent}, '{kind}', 1) \
                  ON CONFLICT(project_id, kind) DO UPDATE SET next_value = next_value + 1; \
-                 UPDATE {table} SET {key} = (SELECT parent.{prefix} || '-{kind}-' || printf('%04d', seq.next_value) \
-                 FROM {parent_table} AS parent JOIN {sequence} AS seq ON seq.project_id = parent.{parent_id} AND seq.kind = '{kind}' \
-                 WHERE parent.{parent_id} = NEW.{parent}) WHERE {id} = NEW.{id}; END"
+                 SELECT RAISE(ABORT, '{label} key already exists') \
+                 WHERE EXISTS (SELECT 1 FROM {table} WHERE {key} = {generated}); \
+                 UPDATE {table} SET {key} = {generated} WHERE {id} = NEW.{id}; END"
                 ),
             ),
             trigger(
                 "protect_key",
+                BTreeSet::from([Req::field(self.key)]),
                 format!(
                     "BEFORE UPDATE OF {key} ON {table} WHEN OLD.{key} <> '' AND OLD.{key} <> NEW.{key} \
                  BEGIN SELECT RAISE(ABORT, '{label} key cannot be changed'); END"
@@ -257,6 +287,7 @@ impl GeneratedKeyDefinition {
             ),
             trigger(
                 "reject_explicit_key",
+                key_requirements,
                 format!(
                     "BEFORE INSERT ON {table} WHEN NEW.{key} <> '' \
                  BEGIN SELECT RAISE(ABORT, '{label} key is server-generated'); END"

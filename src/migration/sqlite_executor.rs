@@ -111,7 +111,8 @@ fn apply_single_operation_migration(
     migration: &Migration,
     migration_state: &mut ProjectState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for operation in &migration.operations {
+    let mut physical = super::PhysicalOperations::new(&migration.operations);
+    while let Some(operation) = physical.next(migration_state) {
         match operation {
             MigrationOperation::RunSql { forward, .. } => {
                 use crate::rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -135,8 +136,11 @@ fn apply_single_operation_migration(
                 {
                     verify_renamed_indexes(connection, migration_state, table, from_table)?;
                 }
+                let mut suspended = Vec::new();
                 let plan = if let Some(table) = SqliteSchemaEditor::rebuild_table_name(operation) {
                     ensure_rebuild_can_preserve_rows(connection, operation)?;
+                    suspended =
+                        suspend_declared_dependents(connection, table, migration_state, operation)?;
                     assert_rebuild_objects_match_history(connection, table, migration_state)?;
                     let occupied = connection.prepare(
                         "SELECT lower(name) FROM main.sqlite_schema UNION SELECT lower(name) FROM temp.sqlite_schema"
@@ -187,6 +191,25 @@ fn apply_single_operation_migration(
                     connection.remove_function("che_datetime_utc", 1)?;
                 }
                 result?;
+                for object in suspended.iter().rev() {
+                    connection.execute(&super::sqlite_create_object_sql(object), [])?;
+                }
+                if matches!(operation, MigrationOperation::RemoveColumn { .. }) {
+                    // CREATE VIEW defers name resolution. Prepare the restored
+                    // projections on the real schema before committing a drop.
+                    for view in suspended
+                        .iter()
+                        .filter(|o| o.kind == super::SchemaObjectKind::View)
+                    {
+                        let header =
+                            super::parse_schema_object_header(&view.sql).expect("validated view");
+                        let schema = if header.temporary { "temp" } else { "main" };
+                        connection.prepare(&format!(
+                            "SELECT * FROM {schema}.{} LIMIT 0",
+                            quote_identifier(&view.name)
+                        ))?;
+                    }
+                }
                 *migration_state = plan.resulting_state;
             }
         }
@@ -303,6 +326,68 @@ fn ensure_unique_values(
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+// Independent migrations can install consumers after a rebuild was compiled.
+// Work against the actual applied history under the same transaction and lock.
+// The logical state keeps these definitions throughout the physical rebuild.
+fn suspend_declared_dependents(
+    connection: &crate::rusqlite::Connection,
+    table: &str,
+    history: &ProjectState,
+    operation: &MigrationOperation,
+) -> Result<Vec<super::SchemaObjectState>, Box<dyn std::error::Error + Send + Sync>> {
+    use super::SchemaObjectKind;
+    let dropping = SqliteSchemaEditor::rebuild_dependents(history, table)?;
+    for object in &dropping {
+        let header = super::parse_schema_object_header(&object.sql).expect("validated object");
+        let schema = if header.temporary { "temp" } else { "main" };
+        let kind = match object.kind {
+            SchemaObjectKind::View => "view",
+            SchemaObjectKind::Trigger => "trigger",
+            SchemaObjectKind::Table => unreachable!("tables cannot be suspended"),
+        };
+        let sql: Option<String> = connection
+            .query_row(
+                &format!("SELECT sql FROM {schema}.sqlite_schema WHERE type=?1 AND name=?2"),
+                [kind, &object.name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if sql.as_deref().map(stored_definition) != Some(stored_definition(&object.sql)) {
+            return Err(format!(
+                "cannot rebuild {table}: definition of {kind} {} differs from applied history",
+                object.name
+            )
+            .into());
+        }
+        if object.kind == SchemaObjectKind::Trigger
+            && let MigrationOperation::RemoveColumn { column, .. } = operation
+            && super::sql_dependencies::references(object, table)
+            && super::sql_dependencies::may_read_column(object, table, column, history)
+        {
+            return Err(format!(
+                "cannot remove {table}.{column} while trigger {} uses it",
+                object.name
+            )
+            .into());
+        }
+        if object.kind == SchemaObjectKind::View {
+            // DROP VIEW also removes attached INSTEAD OF triggers. All known
+            // consumers have already been suspended in dependency order.
+            let remaining = sqlite_opaque_dependents(connection, &object.name, history)?;
+            if !remaining.is_empty() {
+                return Err(format!(
+                    "cannot suspend view {}: dependent objects {}",
+                    object.name,
+                    remaining.join(", ")
+                )
+                .into());
+            }
+        }
+        connection.execute(&super::sqlite_drop_object_sql(object), [])?;
+    }
+    Ok(dropping)
 }
 
 fn assert_rebuild_objects_match_history(
@@ -493,10 +578,9 @@ fn sqlite_index_columns(
 // SQLite canonicalizes the CREATE header in sqlite_schema, including removing
 // IF NOT EXISTS. Compare the body verbatim so drifted definitions stay guarded.
 fn stored_definition(sql: &str) -> &str {
-    super::parse_schema_object_header(sql)
-        .map_or(sql, |h| h.declaration)
-        .trim_end()
-        .trim_end_matches(';')
+    let statement = super::sql_dependencies::sqlite_statement_end(sql).map_or(sql, |i| &sql[..i]);
+    super::parse_schema_object_header(statement)
+        .map_or(statement, |h| h.declaration)
         .trim_end()
 }
 
@@ -507,10 +591,14 @@ fn sqlite_opaque_dependents(
 ) -> Result<Vec<String>, crate::rusqlite::Error> {
     let table = table.to_ascii_lowercase();
     let mut statement = connection.prepare(
-        "SELECT type, name, tbl_name, sql FROM main.sqlite_master WHERE type IN ('trigger', 'view') AND sql IS NOT NULL ORDER BY type, name",
+        "SELECT type, name, tbl_name, sql FROM (
+             SELECT type, name, tbl_name, sql FROM main.sqlite_schema UNION ALL
+             SELECT type, name, tbl_name, sql FROM temp.sqlite_schema)
+         WHERE type IN ('trigger', 'view') AND sql IS NOT NULL
+             AND NOT (type='view' AND name=?1 COLLATE NOCASE) ORDER BY type, name",
     )?;
     statement
-        .query_map([], |row| {
+        .query_map([&table], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,

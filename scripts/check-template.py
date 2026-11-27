@@ -363,7 +363,9 @@ pub struct Category {
             assert blog_migration.exists() and 'app: "blog"' in blog_migration.read_text()
             assert 'name: "blog_post"' in blog_migration.read_text()
             if modular:
-                assert 'name: "0002_add_description"' in blog_migration.read_text()
+                # The Post FK only requires the initial primary key on Task.
+                assert 'name: "0001_initial"' in blog_migration.read_text()
+                assert 'name: "0002_add_description"' not in blog_migration.read_text()
                 assert not (migration_dir / "m0003_add_blog.rs").exists()
             for filename, contents in history.items():
                 assert (migration_dir / filename).read_bytes() == contents
@@ -407,6 +409,27 @@ pub struct Category {
             run(manage("makemigrations", "--empty", "tasks", "--name", "backfill"), cwd=project, env=env)
             manual_file, = migration_dir.glob("m*_backfill.rs")
             manual_name = manual_file.stem[1:]
+            if backend == "sqlite" and modular:
+                # Exercise stdout as a single script, including a statement whose
+                # last line is a comment. Edit the freshly generated empty file.
+                statements = [
+                    "CREATE VIEW first_preview AS SELECT 42 AS id -- published;",
+                    "CREATE VIEW outer_preview AS SELECT id FROM first_preview",
+                ]
+                operations = ", ".join(
+                    "MigrationOperation::RunSql { forward: " + json.dumps(sql) +
+                    ".into(), reverse: None, state_operations: vec![] }" for sql in statements
+                )
+                source = manual_file.read_text()
+                before, marker, after = source.rpartition("vec![]")
+                assert marker
+                manual_file.write_text(before + "vec![" + operations + "]" + after)
+                script = subprocess.check_output(manage("sqlmigrate", "tasks", manual_name),
+                                                 cwd=project, env=env, text=True)
+                with sqlite3.connect(":memory:") as db:
+                    db.executescript(script)
+                    for view in ("first_preview", "outer_preview"):
+                        assert db.execute(f"SELECT id FROM {view}").fetchone() == (42,)
             preview = subprocess.check_output(sqlite_manage("migrate", "tasks", manual_name, "--plan"),
                                               cwd=project, env=runtime_env, text=True)
             assert manual_name in preview

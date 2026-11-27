@@ -548,7 +548,12 @@ async fn reusing_index_names_after_an_already_applied_legacy_rename() {
         let changes = history
             .generate(&desired, MigrationLayout::PerApp, "reuse")
             .unwrap();
-        assert_eq!(changes.len(), 2);
+        assert_eq!(changes.len(), 3);
+        let join = &changes[2];
+        assert!(join.operations.is_empty());
+        assert_eq!(join.id.app, "original");
+        assert!(join.dependencies.contains(&changes[0].id));
+        assert!(join.dependencies.contains(&files[2].id));
         assert!(changes[1].dependencies.contains(&changes[0].id));
         let target = changes[1].id.clone();
         let repair = changes[0].id.clone();
@@ -563,7 +568,7 @@ async fn reusing_index_names_after_an_already_applied_legacy_rename() {
                 .unwrap(),
             17
         );
-        assert_eq!(db.migrate(graph.clone()).await.unwrap(), 0);
+        assert_eq!(db.migrate(graph.clone()).await.unwrap(), 1);
         assert!(
             graph
                 .generate(&desired, MigrationLayout::PerApp, "again")
@@ -1728,11 +1733,7 @@ async fn target_rebuild_restores_unchanged_cross_app_view_in_the_same_migration(
     assert_eq!(change.id.app, "models");
     assert!(matches!(
         change.operations.as_slice(),
-        [
-            MigrationOperation::DropSchemaObject { .. },
-            MigrationOperation::AddIndex { .. },
-            MigrationOperation::CreateSchemaObject { .. },
-        ]
+        [MigrationOperation::AddIndex { .. }]
     ));
     let mut changed_view = desired.clone();
     let mut view = changed_view.objects()[0].clone();
@@ -1747,14 +1748,29 @@ async fn target_rebuild_restores_unchanged_cross_app_view_in_the_same_migration(
     let changes_with_view = historical
         .generate(&changed_view, MigrationLayout::PerApp, "index")
         .unwrap();
-    let [batch, reports_target] = changes_with_view.as_slice() else {
-        panic!("expected the atomic batch and a reports target")
-    };
-    assert_eq!(batch.id.app, "models");
-    assert_eq!(reports_target.id.app, "reports");
-    assert!(reports_target.operations.is_empty());
-    assert!(reports_target.dependencies.contains(&batch.id));
-
+    let rebuilt =
+        MigrationGraph::new(files.iter().cloned().chain(changes_with_view).collect()).unwrap();
+    let reports = rebuilt.app_heads("reports")[0];
+    let models = rebuilt.app_heads("models")[0];
+    assert!(!reports.dependencies.contains(&models.id));
+    assert!(!models.dependencies.contains(&reports.id));
+    db.migrate_to(rebuilt.clone(), Some(reports.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        db.query_sql("SELECT id FROM parent_report", vec![])
+            .await
+            .unwrap()[0]
+            .get::<i64>(0)
+            .unwrap(),
+        43
+    );
+    db.migrate(rebuilt).await.unwrap();
+    let db = Database::connect_in_memory().await.unwrap();
+    db.migrate(historical.clone()).await.unwrap();
+    db.execute_sql("INSERT INTO parents VALUES (42)", vec![])
+        .await
+        .unwrap();
     let target = change.id.clone();
     files.extend(changes);
     let graph = MigrationGraph::new(files).unwrap();
@@ -1854,5 +1870,916 @@ async fn initial_migrations_order_cross_app_objects_by_actual_dependencies() {
         db.query_sql(format!("SELECT id FROM {view}"), vec![])
             .await
             .unwrap();
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn target_rebuild_does_not_apply_another_apps_table_drop() {
+    use che_orm::migration::sqlite_executor::{
+        apply_operation_migrations_on_connection as apply,
+        apply_operation_migrations_to_on_connection as apply_to,
+    };
+    use che_orm::{GenerationPolicy, MigrationOperation, SchemaObjectKind, SchemaObjectState};
+
+    for (other, raw, other_table, insert, guarded) in [
+        (
+            SchemaSet::new().model::<Unrelated>(),
+            None,
+            "unrelated",
+            "INSERT INTO unrelated VALUES (42)",
+            false,
+        ),
+        (
+            SchemaSet::new().model::<Child>(),
+            None,
+            "children",
+            "INSERT INTO children VALUES (42, 17)",
+            false,
+        ),
+        (
+            SchemaSet::new().model::<Child>(),
+            None,
+            "children",
+            "INSERT INTO children VALUES (42, 17)",
+            true,
+        ),
+        (
+            SchemaSet::new(),
+            Some(
+                "CREATE TABLE raw_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id))",
+            ),
+            "raw_child",
+            "INSERT INTO raw_child VALUES (42, 17)",
+            true,
+        ),
+    ] {
+        let models = SchemaSet::new().model::<Parent>();
+        let view = SchemaObjectState {
+            app: "reports".into(),
+            kind: SchemaObjectKind::View,
+            name: "parent_report".into(),
+            sql: "CREATE VIEW parent_report AS SELECT id FROM parents".into(),
+        };
+        let mut old =
+            ProjectState::from_app_schemas([("models", &models), ("other", &other)]).unwrap();
+        old.add_schema_object(view.clone()).unwrap();
+        if let Some(sql) = raw {
+            old.add_schema_object(SchemaObjectState {
+                app: "other".into(),
+                kind: SchemaObjectKind::Table,
+                name: other_table.into(),
+                sql: sql.into(),
+            })
+            .unwrap();
+        }
+        if guarded {
+            old.add_schema_object(SchemaObjectState {
+                app: "other".into(),
+                kind: SchemaObjectKind::Trigger,
+                name: "child_guard".into(),
+                sql: format!(
+                    "CREATE TRIGGER child_guard BEFORE INSERT ON {other_table}
+                    WHEN NOT EXISTS (SELECT 1 FROM parents WHERE id = NEW.parent_id)
+                    BEGIN SELECT RAISE(ABORT, 'missing parent'); END"
+                ),
+            })
+            .unwrap();
+        }
+        let mut desired = ProjectState::from_app_schema("models", &models);
+        desired.add_schema_object(view).unwrap();
+        MigrationOperation::AddIndex {
+            table: "parents".into(),
+            columns: vec!["id".into()],
+        }
+        .state_forwards(&mut desired)
+        .unwrap();
+        let mut history = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate(&old, MigrationLayout::PerApp, "initial")
+            .unwrap();
+        let previous = MigrationGraph::new(history.clone()).unwrap();
+        let changes = previous
+            .generate_with_policy(
+                &desired,
+                MigrationLayout::PerApp,
+                "changes",
+                &GenerationPolicy {
+                    allow_drop: [other_table.into()].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let target = changes
+            .iter()
+            .find(|m| m.id.app == "models")
+            .unwrap()
+            .id
+            .clone();
+        history.extend(changes);
+        let graph = MigrationGraph::new(history).unwrap();
+        let mut db = che_orm::rusqlite::Connection::open_in_memory().unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut db, previous).unwrap();
+        db.execute_batch("INSERT INTO parents VALUES (17);")
+            .unwrap();
+        db.execute_batch(insert).unwrap();
+        assert_eq!(
+            apply_to(&mut db, graph.clone(), Some(target)).unwrap(),
+            1,
+            "{other_table}"
+        );
+        let id = |db: &che_orm::rusqlite::Connection, table: &str| {
+            db.query_row(&format!("SELECT id FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+        };
+        assert_eq!(id(&db, "parent_report").unwrap(), 17);
+        assert_eq!(id(&db, other_table).unwrap(), 42);
+        let indexed: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_index_list('parents') AS idx
+             JOIN pragma_index_info(idx.name) AS col WHERE idx.origin = 'c' AND col.name = 'id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(indexed);
+        if guarded {
+            let error = db
+                .execute_batch(&format!("INSERT INTO {other_table} VALUES (43, 999)"))
+                .unwrap_err();
+            assert!(error.to_string().contains("missing parent"), "{error}");
+        }
+        assert_eq!(apply(&mut db, graph.clone()).unwrap(), 1);
+        assert!(id(&db, other_table).is_err());
+        assert_eq!(apply(&mut db, graph).unwrap(), 0);
+    }
+}
+
+#[test]
+fn scoped_view_waits_for_another_apps_column() {
+    use che_orm::{
+        ColumnState, ColumnType, GenerationPolicy, MigrationOperation, SchemaObjectKind,
+        SchemaObjectState,
+    };
+
+    let old = ProjectState::from_app_schema("models", &SchemaSet::new().model::<Parent>());
+    let empty = MigrationGraph::new(vec![]).unwrap();
+    let mut history = empty
+        .generate(&old, MigrationLayout::PerApp, "initial")
+        .unwrap();
+    let mut desired = old;
+    MigrationOperation::AddColumn {
+        table: "parents".into(),
+        column: ColumnState {
+            field_name: "label".into(),
+            name: "label".into(),
+            column_type: ColumnType::Text,
+            nullable: true,
+            primary_key: false,
+            unique: false,
+            default: None,
+            check: None,
+            choices: None,
+            references: None,
+            auto_now_add: false,
+            auto_now: false,
+        },
+    }
+    .state_forwards(&mut desired)
+    .unwrap();
+    desired
+        .add_schema_object(SchemaObjectState {
+            app: "reports".into(),
+            kind: SchemaObjectKind::View,
+            name: "parent_report".into(),
+            sql: "CREATE VIEW parent_report AS SELECT p.label FROM parents AS p".into(),
+        })
+        .unwrap();
+    let graph = MigrationGraph::new(history.clone()).unwrap();
+    let policy = GenerationPolicy::default();
+    assert!(
+        graph
+            .generate_for_app(&desired, "reports", "report", &policy)
+            .unwrap_err()
+            .to_string()
+            .contains("requires parents.label")
+    );
+    let provider = graph
+        .generate_for_app(&desired, "models", "label", &policy)
+        .unwrap();
+    let provider_id = provider[0].id.clone();
+    history.extend(provider);
+    let graph = MigrationGraph::new(history).unwrap();
+    let reports = graph
+        .generate_for_app(&desired, "reports", "report", &policy)
+        .unwrap();
+    assert_eq!(reports[0].dependencies, vec![provider_id]);
+}
+
+#[cfg(feature = "sqlite")]
+mod sql_object_targets {
+    use super::{Child, Parent};
+    use che_orm::migration::sqlite_executor::{
+        apply_operation_migrations_on_connection as apply,
+        apply_operation_migrations_to_on_connection as apply_to,
+    };
+    use che_orm::rusqlite::Connection;
+    use che_orm::{
+        GenerationPolicy, MigrationGraph, MigrationLayout, MigrationOperation, ProjectState,
+        SchemaObjectKind as Kind, SchemaObjectState, SchemaSet,
+    };
+
+    fn object(app: &str, kind: Kind, name: &str, sql: &str) -> SchemaObjectState {
+        SchemaObjectState {
+            app: app.into(),
+            kind,
+            name: name.into(),
+            sql: sql.into(),
+        }
+    }
+
+    #[test]
+    fn reports_target_installs_only_its_required_stock_schema() {
+        let mut old = ProjectState::from_app_schema("stock", &SchemaSet::new().model::<Parent>());
+        let mut stock = old.clone();
+        old.add_schema_object(object(
+            "stock",
+            Kind::Table,
+            "archive",
+            "CREATE TABLE archive(id INTEGER PRIMARY KEY)",
+        ))
+        .unwrap();
+        let baseline = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&old, "initial")
+            .unwrap();
+        let previous = MigrationGraph::new(baseline.clone()).unwrap();
+        let baseline_id = previous.app_heads("stock")[0].id.clone();
+        let policy = GenerationPolicy {
+            allow_drop: ["archive".into()].into(),
+            ..Default::default()
+        };
+        MigrationOperation::AddIndex {
+            table: "parents".into(),
+            columns: vec!["id".into()],
+        }
+        .state_forwards(&mut stock)
+        .unwrap();
+        for (field, add_label) in [("id", false), ("id", true), ("label", true)] {
+            let mut desired = stock.clone();
+            if add_label {
+                let mut label = stock.tables()[0].columns[0].clone();
+                label.name = "label".into();
+                label.field_name = "label".into();
+                label.primary_key = false;
+                label.nullable = true;
+                label.default = Some("23".into());
+                MigrationOperation::AddColumn {
+                    table: "parents".into(),
+                    column: label,
+                }
+                .state_forwards(&mut desired)
+                .unwrap();
+            }
+            desired
+                .add_schema_object(object(
+                    "reports",
+                    Kind::View,
+                    "report",
+                    &format!("CREATE VIEW report AS SELECT {field} AS value FROM parents"),
+                ))
+                .unwrap();
+            let files = previous
+                .generate_with_policy(&desired, MigrationLayout::PerApp, "update", &policy)
+                .unwrap();
+            let graph =
+                MigrationGraph::new(baseline.iter().chain(&files).cloned().collect()).unwrap();
+            let report = graph.app_heads("reports")[0];
+            let target = Some(report.id.clone());
+            let closure: Vec<_> = graph
+                .plan_forward(&Default::default(), target.as_ref())
+                .unwrap()
+                .into_iter()
+                .map(|step| step.id)
+                .collect();
+            let removal = files
+                .iter()
+                .find(|f| {
+                    f.operations.iter().any(|op| {
+                        matches!(op, MigrationOperation::DropSchemaObject {
+                            kind: Kind::Table, name
+                        } if name == "archive")
+                    })
+                })
+                .unwrap();
+            assert!(!closure.contains(&removal.id));
+            if field == "id" {
+                assert_eq!(
+                    report.dependencies.as_slice(),
+                    std::slice::from_ref(&baseline_id)
+                );
+                let scoped = previous
+                    .generate_for_app(&desired, "reports", "update", &policy)
+                    .unwrap();
+                assert_eq!(scoped.as_slice(), std::slice::from_ref(report));
+            } else {
+                let provider = files.iter().find(|f| f.operations.iter().any(|op| {
+                    matches!(op, MigrationOperation::AddColumn { column, .. } if column.name == "label")
+                })).unwrap();
+                assert!(closure.contains(&provider.id));
+            }
+            // Generating stock first freezes its file boundaries. A later
+            // reports-only generation must still select the same version.
+            let stock_files = previous
+                .generate_for_app(&desired, "stock", "update", &policy)
+                .unwrap();
+            assert_eq!(
+                stock_files,
+                files
+                    .iter()
+                    .filter(|m| m.id.app == "stock")
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+            let frozen_stock =
+                MigrationGraph::new(baseline.iter().cloned().chain(stock_files).collect()).unwrap();
+            let reports = frozen_stock
+                .generate_for_app(&desired, "reports", "update", &policy)
+                .unwrap();
+            assert_eq!(reports.as_slice(), std::slice::from_ref(report));
+
+            let mut db = Connection::open_in_memory().unwrap();
+            apply(&mut db, previous.clone()).unwrap();
+            db.execute_batch("INSERT INTO archive VALUES (42); INSERT INTO parents VALUES (7)")
+                .unwrap();
+            apply_to(&mut db, graph.clone(), target.clone()).unwrap();
+            let report_value = |db: &Connection| {
+                db.query_row("SELECT value FROM report", [], |r| r.get::<_, i64>(0))
+                    .unwrap()
+            };
+            let expected = if field == "id" { 7 } else { 23 };
+            assert_eq!(report_value(&db), expected);
+            assert_eq!(
+                db.query_row("SELECT id FROM archive", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                42
+            );
+            if field == "id" {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM pragma_index_list('parents') WHERE origin='c'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    0
+                );
+            }
+            assert_eq!(apply_to(&mut db, graph.clone(), target).unwrap(), 0);
+            apply(&mut db, graph.clone()).unwrap();
+            assert!(db.prepare("SELECT id FROM archive").is_err());
+            assert_eq!(report_value(&db), expected);
+            let mut fresh = Connection::open_in_memory().unwrap();
+            apply(&mut fresh, graph.clone()).unwrap();
+            fresh
+                .execute("INSERT INTO parents(id) VALUES (7)", [])
+                .unwrap();
+            assert_eq!(report_value(&fresh), expected);
+            let schema = |db: &Connection| {
+                db.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type,name")
+                    .unwrap()
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert_eq!(schema(&db), schema(&fresh));
+            assert_eq!(apply(&mut db, graph).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn independent_consumers_can_install_different_versions_from_one_app() {
+        let mut desired = ProjectState::default();
+        for (app, name, table) in [
+            ("reports", "report", "items"),
+            ("audits", "audit", "events"),
+        ] {
+            desired
+                .add_schema_object(object(
+                    "stock",
+                    Kind::Table,
+                    table,
+                    &format!("CREATE TABLE {table}(id INTEGER)"),
+                ))
+                .unwrap();
+            desired
+                .add_schema_object(object(
+                    app,
+                    Kind::View,
+                    name,
+                    &format!("CREATE VIEW {name} AS SELECT id FROM {table}"),
+                ))
+                .unwrap();
+        }
+        let files = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&desired, "initial")
+            .unwrap();
+        let graph = MigrationGraph::new(files).unwrap();
+        assert_eq!(graph.app_heads("stock").len(), 1);
+        for (target, table, other) in [
+            ("reports", "items", "events"),
+            ("audits", "events", "items"),
+        ] {
+            let mut db = Connection::open_in_memory().unwrap();
+            let id = graph.app_heads(target)[0].id.clone();
+            assert_eq!(apply_to(&mut db, graph.clone(), Some(id)).unwrap(), 2);
+            let exists = |db: &Connection, name| {
+                db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                    [name],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap()
+            };
+            assert!(exists(&db, table));
+            assert!(!exists(&db, other));
+            apply(&mut db, graph.clone()).unwrap();
+            assert!(exists(&db, other));
+        }
+    }
+
+    #[test]
+    fn rebuild_restores_independently_installed_views_and_preserves_unmanaged_triggers() {
+        use che_orm::migration::sqlite_executor::applied_operation_migrations;
+        let mut desired =
+            ProjectState::from_app_schema("stock", &SchemaSet::new().model::<Parent>());
+        let base = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&desired, "initial")
+            .unwrap();
+        let previous = MigrationGraph::new(base.clone()).unwrap();
+        MigrationOperation::AddIndex {
+            table: "parents".into(),
+            columns: vec!["id".into()],
+        }
+        .state_forwards(&mut desired)
+        .unwrap();
+        for (name, source) in [("inner_view", "parents"), ("outer_view", "inner_view")] {
+            desired
+                .add_schema_object(object(
+                    "reports",
+                    Kind::View,
+                    name,
+                    &format!("CREATE VIEW {name} AS SELECT id FROM {source}"),
+                ))
+                .unwrap();
+        }
+        let files = previous
+            .generate(&desired, MigrationLayout::PerApp, "update")
+            .unwrap();
+        let graph = MigrationGraph::new(base.into_iter().chain(files).collect()).unwrap();
+        let target = graph.app_heads("reports")[0].id.clone();
+        let mut db = Connection::open_in_memory().unwrap();
+        apply_to(&mut db, graph.clone(), Some(target)).unwrap();
+        db.execute_batch(
+            "INSERT INTO parents VALUES (7);
+            CREATE TRIGGER external_write INSTEAD OF INSERT ON inner_view
+            BEGIN INSERT INTO parents VALUES (new.id); END",
+        )
+        .unwrap();
+        let before = applied_operation_migrations(&db).unwrap();
+        let error = apply(&mut db, graph.clone()).unwrap_err();
+        assert!(error.to_string().contains("external_write"), "{error}");
+        assert_eq!(applied_operation_migrations(&db).unwrap(), before);
+        db.execute("INSERT INTO inner_view VALUES (8)", []).unwrap();
+        assert_eq!(
+            db.query_row("SELECT sum(id) FROM outer_view", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            15
+        );
+        db.execute_batch(
+            "DROP TRIGGER external_write;
+            DROP VIEW outer_view; CREATE VIEW outer_view AS SELECT id+1 AS id FROM inner_view",
+        )
+        .unwrap();
+        let error = apply(&mut db, graph.clone()).unwrap_err();
+        assert!(
+            error.to_string().contains("differs from applied history"),
+            "{error}"
+        );
+        db.execute_batch(
+            "DROP VIEW outer_view; CREATE VIEW outer_view AS SELECT id FROM inner_view",
+        )
+        .unwrap();
+        assert_eq!(apply(&mut db, graph).unwrap(), 1);
+        assert_eq!(
+            db.query_row("SELECT sum(id) FROM outer_view", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            15
+        );
+    }
+
+    #[test]
+    fn column_drop_rolls_back_if_an_installed_view_loses_a_transitive_column() {
+        use che_orm::{Migration, MigrationId};
+        let mut old = ProjectState::from_app_schema("stock", &SchemaSet::new().model::<Parent>());
+        let mut label = old.tables()[0].columns[0].clone();
+        label.name = "label".into();
+        label.field_name = "label".into();
+        label.primary_key = false;
+        MigrationOperation::AddColumn {
+            table: "parents".into(),
+            column: label,
+        }
+        .state_forwards(&mut old)
+        .unwrap();
+        let baseline = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&old, "initial")
+            .unwrap();
+        let previous = MigrationGraph::new(baseline.clone()).unwrap();
+        for (name, select) in [
+            ("inner_view", "SELECT * FROM parents"),
+            ("report", "SELECT label FROM inner_view"),
+        ] {
+            old.add_schema_object(object(
+                "reports",
+                Kind::View,
+                name,
+                &format!("CREATE VIEW {name} AS {select}"),
+            ))
+            .unwrap();
+        }
+        let reports = previous
+            .generate(&old, MigrationLayout::PerApp, "report")
+            .unwrap();
+        let removal = Migration::new(
+            MigrationId {
+                app: "stock".into(),
+                name: "0002_remove".into(),
+            },
+            vec![previous.app_heads("stock")[0].id.clone()],
+            vec![MigrationOperation::RemoveColumn {
+                table: "parents".into(),
+                column: "label".into(),
+            }],
+        );
+        let graph = MigrationGraph::new(
+            baseline
+                .into_iter()
+                .chain(reports)
+                .chain([removal])
+                .collect(),
+        )
+        .unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
+        apply_to(
+            &mut db,
+            graph.clone(),
+            Some(graph.app_heads("reports")[0].id.clone()),
+        )
+        .unwrap();
+        db.execute("INSERT INTO parents VALUES (1, 42)", [])
+            .unwrap();
+        let error = apply(&mut db, graph).unwrap_err();
+        assert!(
+            error.to_string().contains("no such column: label"),
+            "{error}"
+        );
+        assert_eq!(
+            db.query_row("SELECT label FROM report", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn drop_trigger_and_raw_foreign_key_before_parent_table() {
+        let mut old = ProjectState::default();
+        for obj in [
+            object(
+                "a_provider",
+                Kind::Table,
+                "a_parent",
+                "CREATE TABLE a_parent(id INTEGER PRIMARY KEY)",
+            ),
+            object(
+                "a_provider",
+                Kind::Trigger,
+                "guard",
+                "CREATE TRIGGER guard BEFORE INSERT ON a_parent WHEN NEW.id < 0 BEGIN SELECT RAISE(ABORT,'bad id'); END",
+            ),
+            object(
+                "z_consumer",
+                Kind::Table,
+                "z_child",
+                "CREATE TABLE z_child(id INTEGER PRIMARY KEY, owner INTEGER REFERENCES a_parent(id))",
+            ),
+        ] {
+            old.add_schema_object(obj).unwrap();
+        }
+        let mut history = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&old, "initial")
+            .unwrap();
+        let previous = MigrationGraph::new(history.clone()).unwrap();
+        let empty = ProjectState::default();
+        let policy = GenerationPolicy {
+            allow_drop: ["a_parent".into(), "z_child".into()].into(),
+            ..Default::default()
+        };
+        let error = previous
+            .generate_for_app(&empty, "a_provider", "remove", &policy)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("z_child requires table a_parent"),
+            "{error}"
+        );
+        let drops = previous
+            .generate_with_policy(&empty, MigrationLayout::PerApp, "remove", &policy)
+            .unwrap();
+        let target = drops
+            .iter()
+            .rev()
+            .find(|m| m.id.app == "a_provider")
+            .unwrap()
+            .id
+            .clone();
+        history.extend(drops);
+        let graph = MigrationGraph::new(history).unwrap();
+        for target in [Some(target), None] {
+            let mut db = Connection::open_in_memory().unwrap();
+            apply(&mut db, previous.clone()).unwrap();
+            db.execute_batch("INSERT INTO a_parent VALUES (1); INSERT INTO z_child VALUES (2,1)")
+                .unwrap();
+            apply_to(&mut db, graph.clone(), target).unwrap();
+            let remaining: i64 = db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('a_parent','z_child','guard')", [], |r| r.get(0)).unwrap();
+            assert_eq!(remaining, 0);
+        }
+    }
+
+    #[test]
+    fn removing_a_column_releases_the_foreign_trigger_without_dropping_its_table() {
+        let parents = SchemaSet::new().model::<Parent>();
+        let children = SchemaSet::new().model::<Child>();
+        let desired = ProjectState::from_app_schema("models", &parents);
+        let mut old =
+            ProjectState::from_app_schemas([("models", &parents), ("other", &children)]).unwrap();
+        let mut column = children_column(&old);
+        column.references = None;
+        MigrationOperation::AddColumn {
+            table: "parents".into(),
+            column,
+        }
+        .state_forwards(&mut old)
+        .unwrap();
+        old.add_schema_object(object("other", Kind::Trigger, "child_guard",
+            "CREATE TRIGGER child_guard BEFORE INSERT ON children WHEN EXISTS
+             (SELECT 1 FROM parents WHERE parents.parent_id = 0) BEGIN SELECT RAISE(ABORT, 'blocked'); END")).unwrap();
+        let mut history = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&old, "initial")
+            .unwrap();
+        let previous = MigrationGraph::new(history.clone()).unwrap();
+        let changes = previous
+            .generate_with_policy(
+                &desired,
+                MigrationLayout::PerApp,
+                "remove",
+                &GenerationPolicy {
+                    allow_drop: ["parents.parent_id".into(), "children".into()].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let target = changes
+            .iter()
+            .find(|m| m.id.app == "models")
+            .unwrap()
+            .id
+            .clone();
+        history.extend(changes);
+        let graph = MigrationGraph::new(history).unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
+        apply(&mut db, previous).unwrap();
+        db.execute_batch(
+            "INSERT INTO parents VALUES (17, NULL); INSERT INTO children VALUES (42,17)",
+        )
+        .unwrap();
+        apply_to(&mut db, graph.clone(), Some(target)).unwrap();
+        assert_eq!(
+            db.query_row("SELECT id FROM children", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+        assert!(db.prepare("SELECT parent_id FROM parents").is_err());
+        assert_eq!(apply(&mut db, graph).unwrap(), 1);
+        assert!(db.prepare("SELECT id FROM children").is_err());
+    }
+
+    #[test]
+    fn target_creates_snapshot_after_view_and_keeps_rows_when_view_changes() {
+        let view = |value| {
+            object(
+                "provider",
+                Kind::View,
+                "v_source",
+                &format!("CREATE VIEW v_source AS SELECT {value} AS id"),
+            )
+        };
+        let snapshot = object(
+            "consumer",
+            Kind::Table,
+            "snapshot",
+            "CREATE TABLE snapshot AS SELECT id FROM v_source",
+        );
+        let mut state = ProjectState::default();
+        state.add_schema_object(snapshot.clone()).unwrap();
+        state.add_schema_object(view(42)).unwrap();
+        let mut history = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&state, "initial")
+            .unwrap();
+        let target = history
+            .iter()
+            .find(|m| m.id.app == "consumer")
+            .unwrap()
+            .id
+            .clone();
+        let previous = MigrationGraph::new(history.clone()).unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
+        assert_eq!(
+            apply_to(&mut db, previous.clone(), Some(target)).unwrap(),
+            2
+        );
+        let mut desired = ProjectState::default();
+        desired.add_schema_object(snapshot).unwrap();
+        desired.add_schema_object(view(7)).unwrap();
+        history.extend(
+            previous
+                .generate(&desired, MigrationLayout::PerApp, "edit")
+                .unwrap(),
+        );
+        apply(&mut db, MigrationGraph::new(history).unwrap()).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT snapshot.id, v_source.id FROM snapshot, v_source",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            (42, 7)
+        );
+    }
+
+    #[test]
+    fn scoped_consumer_uses_columns_exported_by_registered_view() {
+        let provider = |columns| {
+            object(
+                "provider",
+                Kind::View,
+                "provider_view",
+                &format!("CREATE VIEW provider_view AS SELECT {columns}"),
+            )
+        };
+        let state = |columns, field| {
+            let mut desired = ProjectState::default();
+            desired.add_schema_object(provider(columns)).unwrap();
+            desired
+                .add_schema_object(object(
+                    "consumer",
+                    Kind::View,
+                    "consumer_view",
+                    &format!("CREATE VIEW consumer_view AS SELECT {field} FROM provider_view"),
+                ))
+                .unwrap();
+            desired
+        };
+        let mut old = ProjectState::default();
+        old.add_schema_object(provider("1 AS id")).unwrap();
+        let mut history = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&old, "initial")
+            .unwrap();
+        let graph = MigrationGraph::new(history.clone()).unwrap();
+        let desired = state("1 AS id, 'yes' AS label", "label");
+        let policy = GenerationPolicy::default();
+        let error = graph
+            .generate_for_app(&desired, "consumer", "report", &policy)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no such column: label"),
+            "{error}"
+        );
+        assert!(
+            graph
+                .generate_for_app(
+                    &state("1 AS id, 'yes' AS label", "id"),
+                    "consumer",
+                    "report",
+                    &policy
+                )
+                .is_ok()
+        );
+        history.extend(
+            graph
+                .generate_for_app(&desired, "provider", "expand", &policy)
+                .unwrap(),
+        );
+        let graph = MigrationGraph::new(history.clone()).unwrap();
+        let reports = graph
+            .generate_for_app(&desired, "consumer", "report", &policy)
+            .unwrap();
+        let target = reports[0].id.clone();
+        history.extend(reports);
+        let mut db = Connection::open_in_memory().unwrap();
+        apply_to(&mut db, MigrationGraph::new(history).unwrap(), Some(target)).unwrap();
+        assert_eq!(
+            db.query_row("SELECT label FROM consumer_view", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn old_and_new_refer_to_trigger_target() {
+        let parents = SchemaSet::new().model::<Parent>();
+        let children = SchemaSet::new().model::<Child>();
+        let old = ProjectState::from_app_schemas([("models", &parents), ("consumer", &children)])
+            .unwrap();
+        let mut history = MigrationGraph::new(vec![])
+            .unwrap()
+            .generate_initial(&old, "initial")
+            .unwrap();
+        let graph = MigrationGraph::new(history.clone()).unwrap();
+        let mut desired = old.clone();
+        let mut column = children_column(&old);
+        column.references = None;
+        MigrationOperation::AddColumn {
+            table: "parents".into(),
+            column,
+        }
+        .state_forwards(&mut desired)
+        .unwrap();
+        let guard = |filter| {
+            object("consumer", Kind::Trigger, "child_guard", &format!(
+            "CREATE TRIGGER child_guard BEFORE UPDATE ON children
+             WHEN NEW.parent_id = OLD.parent_id AND EXISTS(SELECT 1 FROM parents WHERE {filter} = NEW.parent_id)
+             BEGIN SELECT RAISE(ABORT,'unchanged parent'); END"))
+        };
+        let policy = GenerationPolicy::default();
+        let mut missing = desired.clone();
+        missing
+            .add_schema_object(guard("parents.parent_id"))
+            .unwrap();
+        assert!(
+            graph
+                .generate_for_app(&missing, "consumer", "guard", &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("requires parents.parent_id")
+        );
+        desired.add_schema_object(guard("parents.id")).unwrap();
+        history.extend(
+            graph
+                .generate_for_app(&desired, "consumer", "guard", &policy)
+                .unwrap(),
+        );
+        let mut db = Connection::open_in_memory().unwrap();
+        apply(&mut db, MigrationGraph::new(history).unwrap()).unwrap();
+        db.execute_batch("INSERT INTO parents VALUES (1); INSERT INTO children VALUES (2,1)")
+            .unwrap();
+        assert!(
+            db.execute_batch("UPDATE children SET parent_id=1 WHERE id=2")
+                .unwrap_err()
+                .to_string()
+                .contains("unchanged parent")
+        );
+    }
+
+    fn children_column(state: &ProjectState) -> che_orm::ColumnState {
+        state
+            .tables()
+            .iter()
+            .find(|t| t.name == "children")
+            .unwrap()
+            .columns
+            .iter()
+            .find(|c| c.name == "parent_id")
+            .unwrap()
+            .clone()
     }
 }

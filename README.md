@@ -5,11 +5,11 @@
 Экспериментальная типизированная ORM для Rust с единым async API для SQLite
 и PostgreSQL. Backend выбирается при компиляции. Требуется **Rust 1.89+**.
 
-Текущая опубликованная версия `che-orm` — **0.3.3**. Проект находится
+Текущая опубликованная версия `che-orm` — **0.4.0**. Проект находится
 в разработке; перед обновлением см. [CHANGELOG](CHANGELOG.md).
 
-Этот checkout готовит **0.4.0** (ещё не опубликована): bound-query API и формат
-SQLite datetime изменились несовместимо. До публикации новых ORM/Sync/REST
+Версия **0.5.0** обновляет генератор миграций, требования к именам таблиц
+и минимальную версию Rust. До публикации новых ORM/Sync/REST
 используйте согласованные локальные зависимости. См. [план выпуска](docs/releasing.md).
 
 ## Возможности
@@ -38,7 +38,7 @@ SQLite datetime изменились несовместимо. До публик
 
 ```toml
 [dependencies]
-che-orm = "0.4.0"
+che-orm = "0.5.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -136,7 +136,7 @@ database
 Модели и CRUD-код остаются прежними. Замените зависимость в `Cargo.toml`:
 
 ```toml
-che-orm = { version = "0.4.0", default-features = false, features = ["postgres"] }
+che-orm = { version = "0.5.0", default-features = false, features = ["postgres"] }
 ```
 
 Создайте базу PostgreSQL и задайте URL со своими реквизитами:

@@ -273,8 +273,9 @@ impl PostgresSchemaEditor {
         let mut state = before.clone();
         let mut statements = Vec::new();
         let mut deferred = Vec::<DeferredForeignKey>::new();
-        for operation in operations {
-            let plan = Self::plan_with_deferred(operation, &state, &deferred)?;
+        let mut physical = super::PhysicalOperations::new(operations);
+        while let Some((operation, replaced)) = physical.next_postgres(&state) {
+            let plan = Self::plan_physical(operation, replaced, &state, &deferred)?;
             statements.extend(plan.statements);
             if let MigrationOperation::AlterColumn {
                 table, old_column, ..
@@ -329,6 +330,42 @@ impl PostgresSchemaEditor {
         Self::plan_with_deferred(operation, before, &[])
     }
 
+    pub(super) fn plan_physical(
+        operation: &MigrationOperation,
+        replaced: Option<&MigrationOperation>,
+        before: &ProjectState,
+        pending: &[DeferredForeignKey],
+    ) -> Result<PostgresOperationPlan, MigrationError> {
+        let Some(drop) = replaced else {
+            return Self::plan_with_deferred(operation, before, pending);
+        };
+        let MigrationOperation::CreateSchemaObject { object } = operation else {
+            unreachable!()
+        };
+        let mut after = before.clone();
+        drop.state_forwards(&mut after)?;
+        operation.state_forwards(&mut after)?;
+        // PostgreSQL can append view outputs in place, preserving the OID and
+        // any installed consumers. Refresh descendants whose SQL expands it.
+        let mut statements = vec![replace_view_sql(object)];
+        let descendants = dependent_definitions(&after, |consumer| {
+            if !references_view(consumer, object) || consumer.kind != SchemaObjectKind::View {
+                return false;
+            }
+            let reads = sql_dependencies::SqlReads::new(consumer);
+            reads.physical_column_list(&object.name).unwrap_or(true)
+                || reads.reads_whole_row(&object.name)
+        })?;
+        if !descendants.is_empty() {
+            statements.push(maintain_views(&after, &descendants, &[])?);
+        }
+        Ok(PostgresOperationPlan {
+            statements,
+            deferred_foreign_keys: vec![],
+            resulting_state: after,
+        })
+    }
+
     pub(crate) fn plan_with_deferred(
         operation: &MigrationOperation,
         before: &ProjectState,
@@ -339,7 +376,8 @@ impl PostgresSchemaEditor {
         let mut statements = Vec::new();
         let mut deferred = Vec::new();
         match operation {
-            MigrationOperation::RenameModel { .. } => {}
+            MigrationOperation::RenameModel { .. }
+            | MigrationOperation::SetSchemaRequirements { .. } => {}
             MigrationOperation::CreateModel { model } => {
                 create(&model.table, before, &mut statements, &mut deferred)?
             }
@@ -496,38 +534,48 @@ impl PostgresSchemaEditor {
                 statements.push(object.sql.clone())
             }
             MigrationOperation::DropSchemaObject { kind, name } => {
-                let keyword = match kind {
-                    SchemaObjectKind::Table => "TABLE",
-                    SchemaObjectKind::View => "VIEW",
-                    SchemaObjectKind::Trigger => "TRIGGER",
-                };
-                let mut sql = format!("DROP {keyword} {}", quote_identifier(name));
-                if *kind == SchemaObjectKind::Trigger {
-                    let object = before
-                        .objects()
-                        .iter()
-                        .find(|o| o.kind == *kind && o.name == *name)
-                        .ok_or_else(|| MigrationError::InvalidState("missing trigger".into()))?;
-                    let words = object.sql.split_whitespace().collect::<Vec<_>>();
-                    let target = words
-                        .windows(2)
-                        .find(|w| w[0].eq_ignore_ascii_case("ON"))
-                        .map(|w| w[1].trim_matches('"'))
-                        .ok_or_else(|| {
-                            MigrationError::InvalidState(
-                                "trigger target requires explicit RunSql".into(),
-                            )
-                        })?;
-                    crate::schema::validate_identifier(target).map_err(|error| {
-                        MigrationError::InvalidState(format!("invalid trigger target: {error:?}"))
-                    })?;
-                    sql.push_str(&format!(" ON {}", quote_identifier(target)));
-                }
-                statements.push(sql);
+                statements.push(drop_object_sql(before, *kind, name)?);
             }
             MigrationOperation::NormalizeSqliteDateTimes { .. }
             | MigrationOperation::RenameSqliteIndexes { .. } => {}
             MigrationOperation::RunSql { forward, .. } => statements.push(forward.clone()),
+        }
+        if let MigrationOperation::AddColumn { table, .. } = operation {
+            // PostgreSQL freezes a star projection at CREATE VIEW time. Use
+            // the definitions installed at execution, including indirect views.
+            let suspended = dependent_definitions(before, |object| {
+                if object.kind != SchemaObjectKind::View {
+                    return false;
+                }
+                let reads = sql_dependencies::SqlReads::new(object);
+                reads.references(table) && reads.column_list(table).unwrap_or(true)
+            })?;
+            if !suspended.is_empty() {
+                statements.push(maintain_views(before, &suspended, &[])?);
+            }
+        }
+        let changed_column = match operation {
+            MigrationOperation::RemoveColumn { table, column } => Some((table, column)),
+            MigrationOperation::AlterColumn {
+                table,
+                old_column,
+                new_column,
+            } if old_column.column_type != new_column.column_type => {
+                Some((table, &old_column.name))
+            }
+            _ => None,
+        };
+        if let Some((table, column)) = changed_column {
+            let suspended = dependent_definitions(before, |object| {
+                let reads = sql_dependencies::SqlReads::new(object);
+                object.kind != SchemaObjectKind::Table
+                    && reads.references(table)
+                    && (reads.physical_column_list(table).unwrap_or(true)
+                        || reads.column(table, column, before).unwrap_or(true))
+            })?;
+            if !suspended.is_empty() {
+                statements = vec![maintain_views(before, &suspended, &statements)?];
+            }
         }
         Ok(PostgresOperationPlan {
             statements,
@@ -536,6 +584,130 @@ impl PostgresSchemaEditor {
         })
     }
 }
+
+fn replace_view_sql(view: &SchemaObjectState) -> String {
+    let definition = &view.sql.trim_start()["CREATE".len()..];
+    format!("CREATE OR REPLACE{definition}")
+}
+
+// Refresh in place where PostgreSQL can append the output columns. This keeps
+// grants, attached triggers and dependent objects bound to the original OID.
+// A star in the middle of a projection can move existing output columns;
+// PostgreSQL then requires recreating the declared views in dependency order.
+fn maintain_views(
+    state: &ProjectState,
+    dropping: &[SchemaObjectState],
+    ddl: &[String],
+) -> Result<String, MigrationError> {
+    fn literal(value: &str) -> String {
+        // E-strings have the same escaping regardless of connection settings.
+        format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+    }
+    let mut body =
+        String::from("DECLARE restore_comments text[] := ARRAY[]::text[]; command text; BEGIN\n");
+    let views: Vec<_> = dropping
+        .iter()
+        .filter(|o| o.kind == SchemaObjectKind::View)
+        .collect();
+    if ddl.is_empty() {
+        for view in views.iter().rev() {
+            let replace = replace_view_sql(view);
+            body.push_str(&format!("EXECUTE {};\n", literal(&replace)));
+        }
+        body.push_str("EXCEPTION WHEN invalid_table_definition THEN\n");
+    }
+    for object in dropping
+        .iter()
+        .filter(|o| o.kind == SchemaObjectKind::Trigger)
+    {
+        let target = trigger_target(object)?;
+        let drop = drop_object_sql(state, object.kind, &object.name)?;
+        body.push_str(&format!(
+            "restore_comments := restore_comments || ARRAY(SELECT pg_catalog.format(
+                'COMMENT ON TRIGGER %I ON %s IS %L', t.tgname, t.tgrelid::regclass, d.description)
+                FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_description d
+                ON d.classoid = 'pg_catalog.pg_trigger'::regclass AND d.objoid = t.oid AND d.objsubid = 0
+                WHERE t.tgrelid = {}::regclass AND t.tgname = {});\nEXECUTE {};\n",
+            literal(&quote_identifier(target)), literal(&object.name), literal(&drop)
+        ));
+    }
+    let ids = views
+        .iter()
+        .map(|v| format!("{}::regclass", literal(&quote_identifier(&v.name))))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // DROP VIEW implicitly deletes attached triggers, rules, defaults and
+    // privileges. A nonstandard dependency must survive a failed refresh.
+    if !views.is_empty() {
+        body.push_str(&format!("IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN ({ids}) AND (
+            c.relowner <> current_user::regrole OR c.relacl IS NOT NULL OR c.reloptions IS NOT NULL
+            OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid = c.oid AND a.attacl IS NOT NULL)
+            OR EXISTS (SELECT 1 FROM pg_catalog.pg_description d WHERE d.classoid = 'pg_catalog.pg_class'::regclass AND d.objoid = c.oid)
+            OR EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = c.oid AND d.deptype = 'a')
+        )) THEN RAISE EXCEPTION 'cannot recreate managed views with additional database metadata'; END IF;\n"));
+    }
+    for view in views {
+        body.push_str(&format!(
+            "EXECUTE {};\n",
+            literal(&drop_object_sql(state, view.kind, &view.name)?)
+        ));
+    }
+    for sql in ddl {
+        body.push_str(&format!("EXECUTE {};\n", literal(sql)));
+    }
+    for object in dropping.iter().rev() {
+        body.push_str(&format!("BEGIN EXECUTE {}; EXCEPTION WHEN undefined_column OR undefined_table THEN RAISE EXCEPTION USING MESSAGE = {} || SQLERRM, ERRCODE=SQLSTATE; END;\n",
+            literal(&object.sql),literal(&format!("cannot restore {:?} {}: ",object.kind,object.name))));
+    }
+    body.push_str("FOREACH command IN ARRAY restore_comments LOOP EXECUTE command; END LOOP; END");
+    let mut tag = "$che_refresh$".to_owned();
+    while body.contains(&tag) {
+        tag.insert(1, '_');
+    }
+    Ok(format!("DO {tag}{body}{tag}"))
+}
+
+fn drop_object_sql(
+    before: &ProjectState,
+    kind: SchemaObjectKind,
+    name: &str,
+) -> Result<String, MigrationError> {
+    let keyword = match kind {
+        SchemaObjectKind::Table => "TABLE",
+        SchemaObjectKind::View => "VIEW",
+        SchemaObjectKind::Trigger => "TRIGGER",
+    };
+    let mut sql = format!("DROP {keyword} {}", quote_identifier(name));
+    if kind == SchemaObjectKind::Trigger {
+        let object = before
+            .objects()
+            .iter()
+            .find(|o| o.kind == kind && o.name == name)
+            .ok_or_else(|| MigrationError::InvalidState("missing trigger".into()))?;
+        sql.push_str(&format!(
+            " ON {}",
+            quote_identifier(trigger_target(object)?)
+        ));
+    }
+    Ok(sql)
+}
+
+fn trigger_target(object: &SchemaObjectState) -> Result<&str, MigrationError> {
+    let mut words = object.sql.split_whitespace();
+    let target = words
+        .find(|w| w.eq_ignore_ascii_case("ON"))
+        .and_then(|_| words.next())
+        .map(|name| name.trim_matches('"'))
+        .ok_or_else(|| {
+            MigrationError::InvalidState("trigger target requires explicit RunSql".into())
+        })?;
+    crate::schema::validate_identifier(target).map_err(|error| {
+        MigrationError::InvalidState(format!("invalid trigger target: {error:?}"))
+    })?;
+    Ok(target)
+}
+
 fn create(
     table: &TableState,
     before: &ProjectState,

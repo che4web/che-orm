@@ -77,15 +77,19 @@ pub(crate) async fn apply(
                 .map_err(|error| OrmError::Migration(error.to_string()))?;
             session.batch(HISTORY).await?;
             let mut deferred = Vec::new();
-            for operation in &migration.operations {
-                let plan = PostgresSchemaEditor::plan_with_deferred(operation, &state, &deferred)
-                    .map_err(|error| OrmError::Migration(error.to_string()))?;
-                for sql in &plan.statements {
+            let mut physical = super::PhysicalOperations::new(&migration.operations);
+            while let Some((operation, replaced)) = physical.next_postgres(&state) {
+                let plan =
+                    PostgresSchemaEditor::plan_physical(operation, replaced, &state, &deferred)
+                        .map_err(|error| OrmError::Migration(error.to_string()))?;
+                for (index, sql) in plan.statements.iter().enumerate() {
                     session
                         .batch("SET LOCAL standard_conforming_strings = on")
                         .await?;
                     reject_transaction_control(sql)?;
-                    if matches!(operation, MigrationOperation::CreateSchemaObject { .. }) {
+                    if index == 0
+                        && matches!(operation, MigrationOperation::CreateSchemaObject { .. })
+                    {
                         session
                             .execute(CompiledQuery {
                                 sql: sql.clone(),

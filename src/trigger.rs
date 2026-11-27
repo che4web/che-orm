@@ -1,8 +1,10 @@
 //! Declarative SQLite triggers for writes on registered models.
+use crate::SchemaRequirement;
 use crate::migration::quote_identifier as quote;
 use crate::{
     ColumnRef, MigrationError, Model, ModelField, ProjectState, SchemaObjectKind, SchemaObjectState,
 };
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 /// A typed field reference inside a trigger condition.
@@ -147,7 +149,7 @@ impl GuardDefinition {
         &self,
         app: &str,
         state: &ProjectState,
-    ) -> Result<Vec<SchemaObjectState>, MigrationError> {
+    ) -> Result<Vec<crate::migration::DeclaredObject>, MigrationError> {
         let error = |message: &str| {
             MigrationError::InvalidState(format!("guard {app}.{}: {message}", self.name))
         };
@@ -178,11 +180,13 @@ impl GuardDefinition {
         }
         events.into_iter().map(|(suffix, event)| {
             let name = format!("{}_{}", self.name, suffix);
-            let condition = self.render(state, &self.condition.0, suffix == "update", None)?;
+            let mut requires=BTreeSet::from([SchemaRequirement::Relation(self.table.into())]);
+            if suffix=="update" {requires.extend(self.update.iter().copied().map(SchemaRequirement::field));}
+            let condition = self.render(state, &self.condition.0, suffix == "update", None, &mut requires)?;
             let table = quote(self.table);
             let message = self.message.replace('\'', "''");
             let sql = format!("CREATE TRIGGER {} BEFORE {event} ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT, '{message}'); END", quote(&name));
-            Ok(SchemaObjectState { app: app.into(), kind: SchemaObjectKind::Trigger, name, sql })
+            Ok((SchemaObjectState { app: app.into(), kind: SchemaObjectKind::Trigger, name, sql },requires))
         }).collect()
     }
 
@@ -192,8 +196,9 @@ impl GuardDefinition {
         predicate: &Predicate,
         update: bool,
         source: Option<&str>,
+        requires: &mut BTreeSet<SchemaRequirement>,
     ) -> Result<String, MigrationError> {
-        let field = |field: TriggerField| -> Result<_, MigrationError> {
+        let mut field = |field: TriggerField| -> Result<_, MigrationError> {
             let prefix = match field.row {
                 Row::New if field.column.table == self.table => "NEW",
                 Row::Old if update && field.column.table == self.table => "OLD",
@@ -206,9 +211,10 @@ impl GuardDefinition {
                 }
             };
             registered_column(state, field.column)?;
+            requires.insert(SchemaRequirement::field(field.column));
             Ok(format!("{prefix}.{}", quote(field.column.name)))
         };
-        let render = |predicate| self.render(state, predicate, update, source);
+
         Ok(match predicate {
             Predicate::Compare(left, op, right) => {
                 if registered_column(state, left.column)?.column_type
@@ -222,8 +228,16 @@ impl GuardDefinition {
                 format!("({} {op} {})", field(*left)?, field(*right)?)
             }
             Predicate::NotNull(value) => format!("({} IS NOT NULL)", field(*value)?),
-            Predicate::And(left, right) => format!("({} AND {})", render(left)?, render(right)?),
-            Predicate::Or(left, right) => format!("({} OR {})", render(left)?, render(right)?),
+            Predicate::And(left, right) => format!(
+                "({} AND {})",
+                self.render(state, left, update, source, requires)?,
+                self.render(state, right, update, source, requires)?
+            ),
+            Predicate::Or(left, right) => format!(
+                "({} OR {})",
+                self.render(state, left, update, source, requires)?,
+                self.render(state, right, update, source, requires)?
+            ),
             Predicate::NotExists(table, condition) => {
                 if !state
                     .tables()
@@ -235,7 +249,8 @@ impl GuardDefinition {
                         self.name
                     )));
                 }
-                let condition = self.render(state, condition, update, Some(table))?;
+                requires.insert(SchemaRequirement::Relation((*table).into()));
+                let condition = self.render(state, condition, update, Some(table), requires)?;
                 format!(
                     "NOT EXISTS (SELECT 1 FROM {} AS guard_source WHERE {condition})",
                     quote(table)

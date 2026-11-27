@@ -10,4 +10,4 @@ sqlite = ["che-orm/sqlite"]
 postgres = ["che-orm/postgres"]
 
 [dependencies]
-che-orm.workspace = true
+che-orm = { path = "../../../..", version = "0.5.0", default-features = false }

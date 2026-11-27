@@ -35,6 +35,37 @@ for a table rebuild are restored in the same migration. Each registered SQL
 object uses one `CREATE` statement. A SQLite trigger body can contain several
 commands.
 
+A view that reads a column depends on its SQL name and type. Changing its
+`DEFAULT` matters to a trigger that omits it from an `INSERT`. A star reads the
+columns of its source, including the output of a subquery. PostgreSQL
+`TABLE items` reads the same columns as `SELECT * FROM items`. If the generator
+cannot resolve a SQL reference across a column removal, it reports
+`NeedsManualMigration`. Use explicit source columns or provide a reviewed migration.
+
+The planner records which migration supplies each required column, key, default or constraint.
+The SQLite guard, sequence and generated-key builders provide those inputs from their typed
+model fields. For reviewed SQL, pass the complete set of inputs to
+`SchemaSet::declared_object(object, inputs)`. For example, a report reading only
+`details.id` can declare `[SchemaRequirement::Column("details".into(), "id".into())]`.
+A compatible append to a simple view projection keeps existing named outputs
+available from the earlier migration. New outputs and wildcard consumers require
+the expanded projection. PostgreSQL updates compatible definitions in place.
+
+Use `ColumnList` for a projection that consumes all columns. Use `Relation` for the
+existence of a relation. The ordinary SQL registration continues to infer inputs.
+If an old definition has identical SQL, the generator can add its contract with a
+state-only `SetSchemaRequirements` operation. This preserves the published checksum.
+
+A report that needs populated values can declare `Data(table, column)`. This includes
+all independent `BackfillColumn` migrations that contributed to the column.
+A `CREATE TABLE ... AS SELECT` snapshot also requires backfills when it reads
+through a view with declared input columns. Both `Default` and `WriteConstraint`
+require the column itself. A composite `UNIQUE` affects writes to each member column.
+For arbitrary data conversions, declare the required file dependency explicitly. During later column edits,
+the backend uses the applied history to temporarily remove and restore compatible managed
+views and triggers in dependency order inside the transaction. An incompatible definition
+causes the transaction to roll back. Offline SQL preview uses the target's ancestors.
+
 | Template layout | Where migrations live | How they are applied |
 | --- | --- | --- |
 | `single` | Shared `src/migrations/` directory. | The CLI reads the shared registry. |
@@ -74,6 +105,20 @@ column type or adding a required column without a default requires a manual
 migration (`NeedsManualMigration`). Use a reviewed `RunSql` with a physical
 `ALTER TABLE` and state-only operations to replace the SQL definition without
 dropping rows.
+
+Adding a required column with a single-column unique constraint and a default
+to an existing table also returns `NeedsManualMigration`. A constant default
+would give existing rows the same value. The generator requires manual review
+for SQL default expressions and managed timestamp defaults in this case.
+
+1. Add the field as nullable without a default or unique constraint. Generate
+   the migration.
+2. Use `makemigrations --empty` to add a data migration. Fill each existing
+   row with a distinct value, for example with `BackfillColumn` and the primary
+   key if it suits the new field. Coordinate writes so new rows receive values
+   before the final step.
+3. Make the field required and unique in the model and generate the final
+   migration. Ensure future inserts supply distinct values.
 
 `generate_with_policy` accepts a `GenerationPolicy`. Its `sql_tables` map
 declares each `SqlTableContract` (provided keys and required table/column pairs);
@@ -196,8 +241,10 @@ cargo run --bin manage -- migrate tasks 0002_rename_task
 Status validates checksums and dependencies. Plan reads the recorded history and
 lists pending operations. Use the complete app and migration name to apply a
 forward target and its prerequisites. SQL preview renders the selected backend's
-operation SQL offline. Runtime data checks, locks and history writes occur
-during migration execution.
+operation SQL offline. For a SQLite table rebuild, the preview includes dependent
+views and triggers from the target's prerequisites. Execution also accounts for
+objects from other migrations already applied to that database. Data checks,
+locks and history writes occur during execution.
 
 SQLite compares physical columns with history using `pragma_table_xinfo` before
 rebuilding a table. A mismatch aborts the migration. Preserve data and reconcile
@@ -212,3 +259,28 @@ Generated applications own their management CLI and registries. When updating
 an existing application, port the corresponding template changes to its CLI.
 For modular layouts also register `src/che_sync_migrations/mod.rs` among its
 migration sources. Preserve existing migration files and dependencies.
+
+### When a target deletes another application's data
+
+The executor applies each migration file in full, including every pending file
+the target depends on directly or indirectly. In this example, each file was
+published in a separate release.
+
+| Migration | Depends on | Operation |
+| --- | --- | --- |
+| `stock:0002_retire_archive` | `stock:0001_initial` | Drops the `archive` table |
+| `stock:0003_create_products` | `stock:0002_retire_archive` | Creates the `products` table |
+| `reports:0001_initial` | `stock:0003_create_products` | Creates a report on `products` |
+
+If only `stock:0001_initial` has been applied, installing the report **drops
+`archive` and its data**, even though the report only reads `products`.
+On that database, `--plan` lists both `stock` migrations and the `reports` migration.
+
+```bash
+cargo run --bin manage -- migrate reports 0001_initial --plan
+```
+
+Before publishing the history, you can create `products` first, put the archive
+drop in a later file, and make the report depend on the file that creates
+`products`. Once the chain shown above is published, the drop is a prerequisite
+of that target. Adding a later `reports` migration keeps that dependency.

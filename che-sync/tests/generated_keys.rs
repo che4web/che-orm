@@ -67,12 +67,37 @@ async fn generated_task_keys_are_captured_in_the_sync_journal() {
         .id
         .clone();
     let graph = MigrationGraph::new(files).unwrap();
+    let replayed = graph.replay(ProjectState::default()).unwrap();
+    for definition in state
+        .objects()
+        .iter()
+        .filter(|o| state.object_requirements(o).is_some())
+    {
+        assert_eq!(
+            replayed.object_requirements(definition),
+            state.object_requirements(definition)
+        );
+    }
+    let sequence_object = state
+        .objects()
+        .iter()
+        .find(|o| o.name == "natural_key_sequence")
+        .unwrap();
+    assert!(
+        replayed
+            .object_requirements(sequence_object)
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r,che_orm::SchemaRequirement::Key(_,col) if col=="id"))
+    );
     let database = Database::connect_in_memory().await.unwrap();
     database
         .migrate_to(graph.clone(), Some(target))
         .await
         .unwrap();
-    assert_eq!(database.migrate(graph.clone()).await.unwrap(), 0);
+    // A task-key trigger needs the project and its counter, but not the
+    // project's own synchronization journal.
+    assert_eq!(database.migrate(graph.clone()).await.unwrap(), 1);
     assert!(
         graph
             .generate(&state, MigrationLayout::PerApp, "again")
@@ -226,4 +251,52 @@ fn generated_keys_require_the_server_and_a_registered_sequence() {
             .to_string()
             .contains("requires matching sequence registration")
     );
+}
+
+#[test]
+fn duplicate_generated_key_aborts_even_with_outer_ignore_or_replace() {
+    let sequence = SqliteKeySequence::new("natural_key_sequence", &Project::KEY);
+    let key = SqliteGeneratedKey::new(&Task::KEY, &Task::PROJECT_ID, &sequence, "TASK");
+    let schema = SchemaSet::new()
+        .server_model::<Project>()
+        .server_model::<Task>()
+        .sqlite_key_sequence(sequence)
+        .sqlite_generated_key(key);
+    let db = che_orm::rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(&schema.try_to_sql::<SqliteDialect>().unwrap())
+        .unwrap();
+    db.execute_batch(
+        "INSERT INTO knowledge_project(id,key) VALUES (zeroblob(16),'ALPHA');
+         INSERT INTO tasks_task(id,project_id) VALUES (zeroblob(16),zeroblob(16));
+         UPDATE knowledge_project SET key='RENAMED' WHERE id=zeroblob(16);
+         INSERT INTO knowledge_project(id,key) VALUES (X'00000000000000000000000000000001','ALPHA');",
+    ).unwrap();
+    for mode in ["", "OR IGNORE", "OR REPLACE"] {
+        let failure = db
+            .execute_batch(&format!(
+                "INSERT {mode} INTO tasks_task(id,project_id)
+             VALUES(X'00000000000000000000000000000002',X'00000000000000000000000000000001')"
+            ))
+            .unwrap_err();
+        assert!(
+            failure.to_string().contains("task key already exists"),
+            "{failure}"
+        );
+    }
+    let original: (i64, String, i64) = db
+        .query_row(
+            "SELECT count(*), max(key), sum(id = zeroblob(16)) FROM tasks_task",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(original, (1, "ALPHA-TASK-0001".into(), 1));
+    let counters: (i64, i64) = db
+        .query_row(
+            "SELECT count(*), max(next_value) FROM natural_key_sequence",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(counters, (1, 1));
 }
